@@ -661,8 +661,11 @@ export function niceTicks(min, max, approxCount) {
   if (!Number.isFinite(count) || count < 1) count = 1;
   if (count > 100) count = 100;
 
-  const range = niceNumber(max - min, false);
-  const step = niceNumber(range / count, true);
+  // Derive the step from the RAW range, not from a nice-rounded range: rounding the range up first
+  // (Heckbert's "loose" labelling) assumes the axis is then extended to the nice bounds. Here the
+  // bounds are fixed by the data window, so niceNumber(5544, false) = 10000 would yield a 2000 step
+  // and leave a 6-tick request with 3 ticks.
+  const step = niceNumber((max - min) / count, true);
   if (!(step > 0)) return out;
 
   out.step = step;
@@ -671,7 +674,10 @@ export function niceTicks(min, max, approxCount) {
   const last = Math.floor(max / step);
   const n = last - first;
   if (!Number.isFinite(n) || n < 0 || n > 1000) return out;
-  for (let i = 0; i <= n; i += 1) out.ticks.push((first + i) * step);
+  // Snap each tick to the step's own precision: (first+i)*step drifts (3*0.2 = 0.6000000000000001)
+  // and a caller comparing a tick against zero or against a data value would miss.
+  const snap = Math.min(12, out.decimals + 2);
+  for (let i = 0; i <= n; i += 1) out.ticks.push(Number(((first + i) * step).toFixed(snap)));
   return out;
 }
 
@@ -951,8 +957,10 @@ export const THEME_TOKEN_NAMES = Object.freeze([
   '--accent', '--accent-hover', '--accent-press', '--accent-soft',
   '--ok', '--warn', '--alarm', '--info',
   '--ok-soft', '--warn-soft', '--alarm-soft', '--focus',
-  // chart furniture
-  '--grid', '--grid-strong', '--band-a', '--band-b',
+  // chart furniture. The phase-band tints are named `--phase-band-*` in
+  // styles/tokens.css (all four theme blocks); `--band-1..4` below are the
+  // separate P&ID species bands and are NOT the same tokens.
+  '--grid', '--grid-strong', '--phase-band-a', '--phase-band-b',
   // P&ID
   '--pipe-idle', '--flow-dash', '--valve-closed', '--valve-open',
   '--bed-bead', '--col-glass', '--gradient-front',

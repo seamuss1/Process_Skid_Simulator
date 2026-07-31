@@ -10,9 +10,9 @@
  *     REQUIRED after every `createRunState`, or `run.topo/bed/col` stay null and the first
  *     `physicsTick` throws.
  *   - Own the single rAF loop: `sim.advanceWall(ctx, wallDt_s)` once per frame, then `update()` on
- *     the VISIBLE view only. Hidden tabs cost nothing.
- *   - Own the shell chrome: title bar, run control bar, alarm banner stack, tab strip, status strip,
- *     the perf overlay and the theme toggle.
+ *     the VISIBLE view only. A hidden tab costs nothing.
+ *   - Own the persistent chrome: title bar, run control bar, alarm banner stack, tab strip, status
+ *     strip, the perf overlay and the theme toggle.
  *   - Route every `sim.*` action's `{ ok, reason }` to a toast when `ok` is false — never a silent
  *     refusal (§9.4.4).
  *   - Surface `run.speedDeficit` honestly as `1000× (limited to N×)` (§2.1.1, §9.4.3).
@@ -20,34 +20,41 @@
  * THE UI IS READ-ONLY OVER `run` AND `config`. Nothing in this file assigns to either; every
  * mutation goes through `core/sim.js`.
  *
- * FRAME SAFETY. `sim.advanceWall` and every panel `update()` are wrapped: one bad panel shows an
- * error bar and is disabled after three consecutive throws, but the rAF loop never dies.
+ * FRAME SAFETY. `sim.advanceWall` and every panel `update()` are guarded: a throwing panel is
+ * reported in the chrome and, after three consecutive failures, taken out of the loop — but the
+ * loop itself never dies and the shell never freezes.
  *
- * CSS CONTRACT — the class names this file emits, which `styles/app.css` must style (§9.4.2):
+ * DOM DISCIPLINE. `boot` empties `#app` and builds the shell once. After that this module writes
+ * only text and attributes onto cached node references: there is no `innerHTML` anywhere in this
+ * file, and no layout read (`getBoundingClientRect`, `offsetWidth`) inside a frame (§6.24).
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * CSS CONTRACT — the class vocabulary this module emits, styled in `styles/app.css`:
  *   .shell .skip-link .sr-only
  *   .titlebar .titlebar__title .titlebar__sub .titlebar__spacer .titlebar__actions
  *   .chip .chip--sim
- *   .runbar .runbar__group .runbar__rule .runbar__label .runbar__value .runbar__stack
- *   .runbar__progress .runbar__progress-fill .runbar__speed-note
- *   .pill .pill--lg .pill--ok .pill--warn .pill--alarm .pill--info .pill--neutral
- *   .btn .btn--primary .btn--ghost .btn--danger .btn--icon .btn--estop
- *   .segmented .segmented__opt (with .is-selected)
+ *   .runbar .runbar__group .runbar__stack .runbar__label .runbar__value .runbar__rule
+ *   .runbar__speed-note (.is-limited) .runbar__progress .runbar__progress-fill
+ *   .pill .pill--lg .pill--ok|warn|alarm|info|neutral
+ *   .btn .btn--primary .btn--ghost .btn--danger .btn--icon .btn--sm .btn--estop
+ *   .segmented .segmented__opt (.is-selected)
  *   .holdring .holdring__track .holdring__fill
  *   .alarm-stack .alarm-stack__list .banner .banner--info|warn|alarm|critical|fault
- *   .banner__bar .banner__icon .banner__text .banner__msg .banner__detail .banner__sev
- *   .banner__actions .banner__count
- *   .tabstrip .tab (with .is-active)
- *   .workspace .view (hidden views carry the `hidden` attribute)
- *   .statusstrip .statchip .statchip__label .statchip__value .num
+ *   .banner__bar .banner__icon .banner__text .banner__sev .banner__msg .banner__detail
+ *   .banner__actions .banner__count .info-dot
+ *   .tabstrip .tab (.is-active) .workspace .view .view--run|method|results|system
+ *   .statusstrip .statchip .statchip__label .statchip__value (.is-warn|.is-invalid|.is-off)
  *   .perf-overlay .perf-overlay__row .perf-overlay__k .perf-overlay__v
  *   .shell-error .shell-error__msg .shell-error__actions .shell-narrow-note
- * Tour anchors this file publishes for `ui/onboarding.js`: `[data-tour="run-controls"]`,
- * `[data-tour="tab-method"]`, `[data-tour="speed"]`, `[data-tour="status"]`.
+ *   .glossary .glossary__typical .empty .empty__title .table-wrap .field__hint .btn-row
+ * The `.shell` grid has exactly six rows, so every extra surface it owns is out of flow: the skip
+ * link is absolute, the narrow note and the perf overlay are fixed, and the error bar lives inside
+ * the alarm band rather than adding a seventh band.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
  *
- * Layer L10. Imports the sim surface, the two physics helpers the startup benchmark needs, the
- * four views, the overlay host and onboarding. It imports NOTHING from `physics/*` beyond
- * `benchmarkColumn` / `buildColumnCfg`, and reads `skid/engine.js` / `skid/method.js` for two pure
- * progress helpers only.
+ * Layer L10. Imports the sim surface, the two physics helpers the startup benchmark needs, the four
+ * views, the overlay host and onboarding, plus three pure read-only helpers from the skid layer
+ * (`blockProgress`, `methodDemand`, `sensorQuality`).
  */
 
 import * as sim from '../core/sim.js';
@@ -56,14 +63,12 @@ import { createBus, QF } from '../core/log.js';
 import * as skid from '../skid/skid.js';
 import { blockProgress } from '../skid/engine.js';
 import { methodDemand } from '../skid/method.js';
+import { sensorQuality } from '../skid/sensors.js';
 import * as column from '../physics/column.js';
 import * as bed from '../physics/bed.js';
 import * as presets from '../data/presets.js';
-import { glossaryFor } from '../data/glossary.js';
-import {
-  exportDataCSV, exportEventsCSV, exportFractionsCSV, exportRunJSON,
-  exportMethodJSON, importMethodJSON, downloadText,
-} from '../io/export.js';
+import { GLOSSARY, glossaryFor } from '../data/glossary.js';
+import { exportMethodJSON, importMethodJSON, downloadText } from '../io/export.js';
 import * as fmt from './format.js';
 import * as overlay from './overlay.js';
 import * as onboarding from './onboarding.js';
@@ -76,10 +81,10 @@ import { createSystemView } from './view_system.js';
  * CONSTANTS
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
-/** The default preset the shell boots into. */
+/** The preset the shell boots into. */
 const DEFAULT_PRESET_ID = 'cex-capture-igg1-pilot';
 
-/** The four tabs of §9.1.1, in DOM and Alt+N order. */
+/** The four tabs of §9.1.1, in DOM and `Alt+N` order. */
 const TABS = [
   { id: 'run', label: 'Run', key: 'Alt+1', create: createRunView },
   { id: 'method', label: 'Method', key: 'Alt+2', create: createMethodView },
@@ -92,8 +97,8 @@ const NZ_LADDER = [100, 200, 400, 800];
 
 /**
  * Column-solver budget in milliseconds per SIMULATED second, used to pick `nz` at boot.
- * The reference machine of §2.1.1 measures ~5 ms/sim-s at `nz = 400` (0.25 ms per 0.05 s tick),
- * so 8.0 keeps the shipped grid on a reference-class machine and downgrades on one ~1.6× slower.
+ * The reference machine of §2.1.1 measures ~5 ms/sim-s at `nz = 400` (0.25 ms per 0.05 s tick), so
+ * 8.0 keeps the shipped grid on a reference-class machine and downgrades on one ~1.6× slower.
  */
 const NZ_BUDGET_MS_PER_SIM_S = 8.0;
 
@@ -112,13 +117,16 @@ const ESTOP_DOUBLE_MS = 1000;
 /** Consecutive `update()` throws before a view is taken out of the frame loop. */
 const VIEW_FAIL_LIMIT = 3;
 
+/** Radius of the Skip Block progress ring, SVG user units. */
+const RING_R = 9;
+
 /** Severity ladder used to rank the alarm banner stack (§5.6). */
 const SEVERITY_RANK = { INFO: 0, WARN: 1, ALARM: 2, CRITICAL: 3, FAULT: 4 };
 
 /** Glyph per severity. Severity is ALWAYS also given as text — never colour alone (§9.7). */
-const SEVERITY_GLYPH = { INFO: 'i', WARN: '!', ALARM: '!!', CRITICAL: '×', FAULT: '×' };
+const SEVERITY_GLYPH = { INFO: 'i', WARN: '!', ALARM: '!', CRITICAL: '×', FAULT: '×' };
 
-/** Maximum banners drawn before the "+N more" counter takes over (§9.1.1). */
+/** Maximum banners drawn before the "+N more" row takes over (§9.1.1). */
 const MAX_BANNERS = 3;
 
 /** Event types that change list content and therefore demand a `structural` frame (§6.24). */
@@ -128,7 +136,7 @@ const STRUCTURAL_EVENT_TYPES = {
   STATE_CHANGE: 1, PACKING_TEST_RESULT: 1, SCENARIO_APPLIED: 1,
 };
 
-/** Human names for the `run.qualityFlags` bits (§5.3), for the status-strip quality chip. */
+/** Human names for the `run.qualityFlags` bits (§5.3), for the status strip's Quality chip. */
 const QF_LABELS = [
   [QF.UV_OVERRANGE, 'UV over-range'],
   [QF.UV_SATURATED, 'UV saturated'],
@@ -136,7 +144,7 @@ const QF_LABELS = [
   [QF.UV_AUTOZERO_UNSTABLE, 'Autozero unstable'],
   [QF.COND_DRY, 'Conductivity cell dry'],
   [QF.COND_TEMP_RANGE, 'Cell temperature out of range'],
-  [QF.PH_FROZEN_AIR, 'pH frozen (air)'],
+  [QF.PH_FROZEN_AIR, 'pH frozen by air'],
   [QF.PH_ELECTRODE_DEGRADED, 'pH electrode degraded'],
   [QF.PRESS_SUSPECT, 'Pressure suspect'],
   [QF.DETECTORS_BYPASSED, 'Detectors bypassed'],
@@ -149,55 +157,74 @@ const QF_LABELS = [
 ];
 
 /**
+ * The status strip of §9.1.1: key, visible label, glossary id, and the sensor whose
+ * `sensorQuality` verdict tints the value (§5.3). `null` means the chip has no sensor of its own.
+ */
+const STATUS_CHIPS = [
+  { key: 'p1', label: 'P1', gloss: 'PT-101', sensor: 'PRESS' },
+  { key: 'dp', label: 'ΔP', gloss: 'PDT-101', sensor: 'PRESS' },
+  { key: 'flow', label: 'Flow', gloss: 'FT-101', sensor: null },
+  { key: 'pctb', label: '%B', gloss: 'pctB', sensor: null },
+  { key: 'uv', label: 'UV280', gloss: 'UV-101', sensor: 'UV' },
+  { key: 'cond', label: 'Cond', gloss: 'CE-101', sensor: 'COND' },
+  { key: 'ph', label: 'pH', gloss: 'AE-101', sensor: 'PH' },
+  { key: 'cv', label: 'Total', gloss: 'cv', sensor: null },
+  { key: 'clock', label: 'Sim', gloss: 'run-state', sensor: null },
+  { key: 'quality', label: 'Quality', gloss: 'quality-flags', sensor: null },
+];
+
+/**
  * The global keyboard registry of §9.5.
  *
  * Keys are normalised combos (`normaliseCombo`): modifiers in the fixed order `Ctrl+Alt+Shift+`,
- * then the key name with single characters upper-cased. `Shift` is dropped for punctuation so
- * `?`, `+` and `-` are reachable on every layout.
+ * then the key name with single characters upper-cased. `Shift` is dropped for punctuation so `?`,
+ * `+` and `-` are reachable on every layout.
  *
- * Shell-scoped actions are executed here. View-scoped actions (chart, legend, pooling) are emitted
- * on `ctx.bus` as `('key-action', { action, combo, event })` so whichever view owns them can react
- * without adding a second document-level key listener.
+ * Shell-scoped actions execute here. View-scoped actions (chart, legend, pooling) are emitted on
+ * `ctx.bus` as `('key-action', { action, combo, event })`, so whichever view owns them reacts
+ * without a second document-level key listener existing anywhere in the program.
  *
- * @type {{[combo:string]: {action:string, label:string}}}
+ * @type {{[combo:string]: {action:string, label:string, group:string}}}
  */
 export const KEYMAP = {
-  'Space': { action: 'start-hold-toggle', label: 'Start / Hold toggle' },
-  'H': { action: 'hold', label: 'Hold (flow continues, clock freezes)' },
-  'C': { action: 'continue', label: 'Continue' },
-  'N': { action: 'skip-block', label: 'Skip the current block (confirm)' },
-  'E': { action: 'end-run', label: 'End the run (confirm)' },
-  'Shift+Escape': { action: 'estop', label: 'Emergency stop — press twice within 1 s' },
-  '1': { action: 'speed:0', label: 'Sim speed preset 1' },
-  '2': { action: 'speed:1', label: 'Sim speed preset 2' },
-  '3': { action: 'speed:2', label: 'Sim speed preset 3' },
-  '4': { action: 'speed:3', label: 'Sim speed preset 4' },
-  '5': { action: 'speed:4', label: 'Sim speed preset 5' },
-  '6': { action: 'speed:5', label: 'Sim speed preset 6' },
-  '7': { action: 'speed:6', label: 'Sim speed preset 7' },
-  '[': { action: 'speed-down', label: 'Sim speed down one step' },
-  ']': { action: 'speed-up', label: 'Sim speed up one step' },
-  'Alt+1': { action: 'tab:run', label: 'Run tab' },
-  'Alt+2': { action: 'tab:method', label: 'Method tab' },
-  'Alt+3': { action: 'tab:results', label: 'Results tab' },
-  'Alt+4': { action: 'tab:system', label: 'System tab' },
-  'X': { action: 'x-axis-cycle', label: 'Cycle the chromatogram x axis' },
-  'A': { action: 'autoscale', label: 'Autoscale / fit all' },
-  'F': { action: 'follow-toggle', label: 'Toggle follow-live' },
-  '+': { action: 'zoom-in', label: 'Zoom in about the cursor' },
-  '-': { action: 'zoom-out', label: 'Zoom out about the cursor' },
-  'ArrowLeft': { action: 'pan-left', label: 'Pan left (Shift for 5×)' },
-  'ArrowRight': { action: 'pan-right', label: 'Pan right (Shift for 5×)' },
-  'Shift+ArrowLeft': { action: 'pan-left-fast', label: 'Pan left, 5×' },
-  'Shift+ArrowRight': { action: 'pan-right-fast', label: 'Pan right, 5×' },
-  'M': { action: 'mark-fraction', label: 'Mark a fraction manually' },
-  'Shift+P': { action: 'pool-selection', label: 'Pool the selected fraction range' },
-  'L': { action: 'legend-focus', label: 'Legend channel focus mode' },
-  '?': { action: 'cheat-sheet', label: 'This shortcut list' },
-  'Ctrl+S': { action: 'export-method', label: 'Export the method as JSON' },
-  'Ctrl+O': { action: 'import-method', label: 'Import a method from JSON' },
-  'Ctrl+Alt+P': { action: 'perf-overlay', label: 'Performance overlay' },
-  'Escape': { action: 'dismiss', label: 'Close a popover or dialog, cancel a drag' },
+  'Space': { action: 'start-hold-toggle', label: 'Start / Hold toggle', group: 'Run control' },
+  'Ctrl+Enter': { action: 'start-run', label: 'Start the run', group: 'Run control' },
+  'H': { action: 'hold', label: 'Hold — flow continues, the clock freezes', group: 'Run control' },
+  'C': { action: 'continue', label: 'Continue', group: 'Run control' },
+  'N': { action: 'skip-block', label: 'Skip the current block (confirm)', group: 'Run control' },
+  'E': { action: 'end-run', label: 'End the run (confirm)', group: 'Run control' },
+  'Shift+Escape': { action: 'estop', label: 'Emergency stop — press twice within 1 s', group: 'Run control' },
+  '1': { action: 'speed:0', label: 'Sim speed preset 1', group: 'Simulation speed' },
+  '2': { action: 'speed:1', label: 'Sim speed preset 2', group: 'Simulation speed' },
+  '3': { action: 'speed:2', label: 'Sim speed preset 3', group: 'Simulation speed' },
+  '4': { action: 'speed:3', label: 'Sim speed preset 4', group: 'Simulation speed' },
+  '5': { action: 'speed:4', label: 'Sim speed preset 5', group: 'Simulation speed' },
+  '6': { action: 'speed:5', label: 'Sim speed preset 6', group: 'Simulation speed' },
+  '7': { action: 'speed:6', label: 'Sim speed preset 7', group: 'Simulation speed' },
+  'P': { action: 'pause-toggle', label: 'Pause / resume the simulation', group: 'Simulation speed' },
+  '[': { action: 'speed-down', label: 'Sim speed down one step', group: 'Simulation speed' },
+  ']': { action: 'speed-up', label: 'Sim speed up one step', group: 'Simulation speed' },
+  'Alt+1': { action: 'tab:run', label: 'Run tab', group: 'Navigation' },
+  'Alt+2': { action: 'tab:method', label: 'Method tab', group: 'Navigation' },
+  'Alt+3': { action: 'tab:results', label: 'Results tab', group: 'Navigation' },
+  'Alt+4': { action: 'tab:system', label: 'System tab', group: 'Navigation' },
+  'X': { action: 'x-axis-cycle', label: 'Cycle the x axis: volume / CV / time', group: 'Chromatogram' },
+  'A': { action: 'autoscale', label: 'Autoscale — fit all', group: 'Chromatogram' },
+  'F': { action: 'follow-toggle', label: 'Toggle follow-live', group: 'Chromatogram' },
+  '+': { action: 'zoom-in', label: 'Zoom in about the cursor', group: 'Chromatogram' },
+  '-': { action: 'zoom-out', label: 'Zoom out about the cursor', group: 'Chromatogram' },
+  'ArrowLeft': { action: 'pan-left', label: 'Pan left', group: 'Chromatogram' },
+  'ArrowRight': { action: 'pan-right', label: 'Pan right', group: 'Chromatogram' },
+  'Shift+ArrowLeft': { action: 'pan-left-fast', label: 'Pan left, 5×', group: 'Chromatogram' },
+  'Shift+ArrowRight': { action: 'pan-right-fast', label: 'Pan right, 5×', group: 'Chromatogram' },
+  'L': { action: 'legend-focus', label: 'Legend channel focus mode', group: 'Chromatogram' },
+  'M': { action: 'mark-fraction', label: 'Mark a fraction manually', group: 'Fractions' },
+  'Shift+P': { action: 'pool-selection', label: 'Pool the selected fraction range', group: 'Fractions' },
+  '?': { action: 'cheat-sheet', label: 'This shortcut list', group: 'General' },
+  'Ctrl+S': { action: 'export-method', label: 'Export the method as JSON', group: 'General' },
+  'Ctrl+O': { action: 'import-method', label: 'Import a method from JSON', group: 'General' },
+  'Ctrl+Alt+P': { action: 'perf-overlay', label: 'Performance overlay', group: 'General' },
+  'Escape': { action: 'dismiss', label: 'Close a popover or dialog, cancel a drag', group: 'General' },
 };
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -215,9 +242,9 @@ let app = null;
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Build an element through `ui/format.js::h`, which is the app's only element factory.
+ * Build an element through `ui/format.js::h`, the app's only element factory.
  * @param {string} tag element tag name
- * @param {object} attrs attribute map; values are set with `setAttribute`
+ * @param {object} attrs attribute bag (see `format.h`)
  * @param {...(Node|string)} children child nodes or text
  * @returns {Element} the new element
  */
@@ -249,9 +276,9 @@ function button(className, label, onClick, attrs) {
  * @returns {void}
  */
 function setEnabled(el, enabled, whyDisabled, whenEnabled) {
+  if (!el) return;
   if (el.disabled !== !enabled) el.disabled = !enabled;
-  const t = enabled ? whenEnabled : whyDisabled;
-  if (el.getAttribute('title') !== t) el.setAttribute('title', t);
+  fmt.setAttr(el, 'title', enabled ? whenEnabled : whyDisabled);
 }
 
 /**
@@ -297,22 +324,29 @@ function normaliseCombo(e) {
  * Build the whole application inside `rootEl` and start the frame loop.
  *
  * Boot order is §6.32, exactly:
- *   1. warm both theme-token maps, apply the initial theme, mount the shell chrome;
+ *   1. warm both theme-token maps, adopt the theme `index.html` stamped, build the shell chrome;
  *   2. build `ctx` (`normalizePreset` → `createRunState` → **`createSkid`**, which is required);
  *   3. benchmark a throwaway column, pick `nz` (downgrade only), `sim.rebuild(ctx, {column:{nz}})`;
  *   4. mount the four views, only the active one updating;
- *   4a. mount `ui/onboarding.js` — after the views (its coach marks measure them) and before the
- *       loop (its tour may auto-load `textbook-clean` at 60×);
+ *   4a. mount `ui/onboarding.js` — after the views, because its coach marks measure them, and
+ *       before the loop, because its tour may auto-load `textbook-clean` at 60×;
  *   5. start the single `requestAnimationFrame` loop.
  *
- * @param {Element} rootEl the container the shell is built into; it is emptied first
+ * @param {Element} rootEl `#app` from `index.html`; its placeholder content is removed
  * @returns {{config:object, run:object, bus:object, sim:object, fmt:object, overrides:object}}
  *   the one long-lived `ctx` of §2.4
  */
 export function boot(rootEl) {
   if (app && app.rafId) cancelAnimationFrame(app.rafId);
+  // createOverlayHost appends a fresh .ov-root to <body> every call, so a second boot() in the same
+  // document would leave the first host's layer, Esc handler and focus trap behind. Tear it down on
+  // the same re-entry path that already cancels the previous rAF loop.
+  if (app && app.overlayHost) {
+    try { overlay.destroyOverlayHost(app.overlayHost); } catch (err) { /* never block a re-boot */ }
+  }
 
-  const presetId = presets.PRESETS[DEFAULT_PRESET_ID] ? DEFAULT_PRESET_ID
+  const presetId = presets.PRESETS[DEFAULT_PRESET_ID]
+    ? DEFAULT_PRESET_ID
     : Object.keys(presets.PRESETS)[0];
 
   const config = presets.normalizePreset(presetId, {});
@@ -330,53 +364,60 @@ export function boot(rootEl) {
     activeTab: 'run',
     overlayHost: null,
     onboarding: null,
-    theme: (config.ui && config.ui.theme) || 'auto',
+    theme: document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark',
     rafId: 0,
     tPrev: 0,
     structural: true,
     frameInfo: { now_ms: 0, dt_ms: 16.7, tick: 0, structural: true },
     lastEventCount: 0,
     demandCache: null,            // { config, total_mL, startById }
-    alarmSig: '',
+    progressPct: -1,
+    // `null`, never `''`: an EMPTY alarm set has the signature `''`, so a `''` sentinel would make
+    // "some alarms" -> "no alarms" compare equal and leave the banners on screen forever.
+    alarmSig: null,
     silenced: new Set(),          // alarm ids the operator muted for this session
-    liveAlarmId: '',
-    skipHold: { active: false, start_ms: 0, pointerId: -1 },
+    liveAlarmId: null,
+    skipHold: { active: false, start_ms: 0 },
     estopArm_ms: 0,
     perfOn: false,
     perf: { frame_ms: 16.7, sim_ms: 0, render_ms: 0, ticks: 0, tps: 0, tAcc: 0, nAcc: 0 },
+    perfRows: null,
     simFailed: false,
-    error: null,
     fileInput: null,
     benchmark: null,
-    narrowQuery: null,
   };
 
-  // ---- 1. theme tokens + shell chrome --------------------------------------------------------
-  warmThemeTokens();
-  applyTheme(app, app.theme, false);
-  buildShell(app);
-
-  // ---- 3. startup grid benchmark (D5) --------------------------------------------------------
-  runStartupBenchmark(app);
-
-  // ---- 4. the four views ---------------------------------------------------------------------
-  mountViews(app);
-
-  // ---- 4a. onboarding ------------------------------------------------------------------------
   try {
-    app.onboarding = onboarding.createOnboarding(app.el.shell, ctx, app.overlayHost);
-    app.onboarding.mount();
+    // ---- 1. theme tokens + shell chrome ------------------------------------------------------
+    warmThemeTokens();
+    buildShell(app);
+    applyTheme(app, app.theme, false);
+
+    // ---- 3. startup grid benchmark (D5) ------------------------------------------------------
+    runStartupBenchmark(app);
+
+    // ---- 4. the four views -------------------------------------------------------------------
+    mountViews(app);
+
+    // ---- 4a. onboarding ----------------------------------------------------------------------
+    try {
+      app.onboarding = onboarding.createOnboarding(app.el.shell, ctx, app.overlayHost);
+      app.onboarding.mount();
+    } catch (err) {
+      reportError(app, 'onboarding', err);
+    }
+
+    // ---- input wiring ------------------------------------------------------------------------
+    wireBus(app);
+    wireKeyboard(app);
+    wireResponsiveNote(app);
+    document.addEventListener('visibilitychange', () => { app.tPrev = 0; });
+
+    refreshShell(app, true);
   } catch (err) {
-    reportError(app, 'onboarding', err);
+    showBootError(err);
+    throw err;
   }
-
-  // ---- bus + input wiring --------------------------------------------------------------------
-  wireBus(app);
-  wireKeyboard(app);
-  wireResponsiveNote(app);
-  document.addEventListener('visibilitychange', () => { app.tPrev = 0; });
-
-  refreshShell(app, true);
 
   // ---- 5. the one rAF loop -------------------------------------------------------------------
   app.rafId = requestAnimationFrame(frame);
@@ -384,8 +425,22 @@ export function boot(rootEl) {
 }
 
 /**
+ * Reveal `index.html`'s `#boot-error` panel with a real message. A blank page is the worst possible
+ * failure mode for a teaching tool, so a boot that throws says what threw.
+ * @param {*} err the thrown value
+ * @returns {void}
+ */
+function showBootError(err) {
+  const panel = document.getElementById('boot-error');
+  if (!panel) return;
+  const slot = panel.querySelector('[data-slot="detail"]');
+  if (slot) fmt.setText(slot, `${errText(err)}\n${(err && err.stack) || ''}`);
+  panel.hidden = false;
+}
+
+/**
  * Warm both theme-token maps once at boot (§6.25). `readThemeTokens` owns the hidden probes and the
- * cache; calling it here simply pays that cost before the first paint instead of inside a frame.
+ * cache; calling it here pays that cost before the first paint instead of inside a frame.
  * @returns {void}
  */
 function warmThemeTokens() {
@@ -393,7 +448,7 @@ function warmThemeTokens() {
     fmt.readThemeTokens('light');
     fmt.readThemeTokens('dark');
   } catch (err) {
-    // A missing token map degrades colour fidelity in exported PNGs; it must never block boot.
+    // A missing token map degrades exported-PNG colour fidelity; it must never block boot.
     console.warn('readThemeTokens failed at boot:', err);
   }
 }
@@ -402,7 +457,7 @@ function warmThemeTokens() {
  * Time a throwaway column and pick the axial grid size, downgrading only (§2.4 D5).
  *
  * Cost scales close to `nz²` — the cell count rises linearly and the Courant-limited substep count
- * rises with it — so a measurement at the preset's own `nz` predicts every rung of the ladder.
+ * rises with it — so one measurement at the preset's own `nz` predicts every rung of the ladder.
  *
  * @param {object} a the application instance
  * @returns {void}
@@ -425,7 +480,7 @@ function runStartupBenchmark(a) {
     let pick = NZ_LADDER[0];
     if (Number.isFinite(cost0) && cost0 > 0) {
       for (const nz of NZ_LADDER) {
-        if (nz > cfg.column.nz) break;                       // downgrade only, never upgrade
+        if (nz > cfg.column.nz) break;                     // downgrade only, never upgrade
         const predicted = cost0 * (nz / nz0) * (nz / nz0);
         if (predicted <= NZ_BUDGET_MS_PER_SIM_S) pick = nz;
       }
@@ -440,29 +495,32 @@ function runStartupBenchmark(a) {
 }
 
 /**
- * Construct the four views, mount them, and hide all but the active one.
+ * Create the four view containers, construct each view into its own, and hide all but the active.
+ * A view that throws at construction shows a written empty state instead of taking the shell down.
  * @param {object} a the application instance
  * @returns {void}
  */
 function mountViews(a) {
   for (const tab of TABS) {
     const host = h('section', {
-      class: 'view',
+      class: `view view--${tab.id}`,
       id: `view-${tab.id}`,
       role: 'tabpanel',
       tabindex: '0',
       'aria-labelledby': `tab-${tab.id}`,
     });
-    if (tab.id !== a.activeTab) host.setAttribute('hidden', '');
+    if (tab.id !== a.activeTab) host.hidden = true;
     a.el.workspace.appendChild(host);
+
     let panel = null;
     try {
       panel = tab.create(host, a.ctx);
       if (panel && typeof panel.mount === 'function') panel.mount();
     } catch (err) {
       panel = null;
-      host.appendChild(h('div', { class: 'shell-error__msg' },
-        `The ${tab.label} view failed to load: ${errText(err)}`));
+      host.appendChild(h('div', { class: 'empty' },
+        h('p', { class: 'empty__title' }, `The ${tab.label} view failed to load`),
+        h('p', {}, errText(err))));
       reportError(a, `${tab.id} view`, err);
     }
     a.views.set(tab.id, { panel, host, failCount: 0, disabled: !panel });
@@ -470,11 +528,12 @@ function mountViews(a) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * SHELL CHROME
+ * SHELL CONSTRUCTION — the six bands of §9.1.1, built once
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Build the six vertical bands of §9.1.1 and cache every node the frame loop writes to.
+ * Empty `#app` and build the shell: title bar 44 px, run bar 56 px, alarm stack, tab strip 36 px,
+ * workspace, status strip 28 px — plus the out-of-flow skip link, narrow note and perf overlay.
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -484,8 +543,8 @@ function buildShell(a) {
   const shell = h('div', { class: 'shell' });
   a.el.shell = shell;
 
-  const skip = h('a', { class: 'skip-link', href: '#runbar' }, 'Skip to run controls');
-  shell.appendChild(skip);
+  // Out of flow, so the six-row grid keeps exactly six children.
+  shell.appendChild(h('a', { class: 'skip-link', href: '#runbar' }, 'Skip to run controls'));
 
   shell.appendChild(buildTitleBar(a));
   shell.appendChild(buildRunBar(a));
@@ -499,24 +558,32 @@ function buildShell(a) {
   shell.appendChild(buildStatusStrip(a));
 
   const narrow = h('div', { class: 'shell-narrow-note' },
-    'This HMI is designed for 1280 px and wider. Everything still works here, but the Run view stacks.');
-  narrow.setAttribute('hidden', '');
+    'Best viewed at 1280 px or wider. Everything still works here; the Run view stacks.');
+  narrow.hidden = true;
   a.el.narrowNote = narrow;
   shell.appendChild(narrow);
 
   const perf = h('div', { class: 'perf-overlay', role: 'status', 'aria-label': 'Performance' });
-  perf.setAttribute('hidden', '');
+  perf.hidden = true;
   a.el.perf = perf;
   shell.appendChild(perf);
 
   a.root.appendChild(shell);
 
-  // The overlay host owns every floating surface, so it is created last and lives on the shell.
-  a.overlayHost = overlay.createOverlayHost(shell);
+  // One host for the whole app (§6.33). It is handed the mount root, because that is the subtree
+  // it marks `inert` + `aria-hidden` while a modal is up; its own layer goes on <body>.
+  a.overlayHost = overlay.createOverlayHost(a.root);
+
+  // Publish it on ctx BEFORE mountViews() runs. Every view resolves its host as
+  // `ctx.overlayHost || ctx.overlay || createOverlayHost(...)`, so without this line each of the
+  // four views builds a host of its own — four .ov-root layers, four Esc handlers and four focus
+  // traps competing over one modal stack. overlay.js requires exactly one host per document.
+  a.ctx.overlayHost = a.overlayHost;
 }
 
 /**
- * The 44 px title bar: product identity, the `SIMULATED` honesty chip, and the global entry points.
+ * The 44 px title bar: product identity, the active preset, the `SIMULATED` honesty chip, and the
+ * global entry points.
  * @param {object} a the application instance
  * @returns {Element} the title bar
  */
@@ -528,14 +595,15 @@ function buildTitleBar(a) {
   a.el.presetName = sub;
   bar.appendChild(sub);
 
+  // The physics-honesty chip of §9.6: a real button, so the assumptions are keyboard-reachable.
   const simChip = button('chip chip--sim', 'SIMULATED', (e) => {
     overlay.showPopover(a.overlayHost, {
       anchorEl: /** @type {Element} */ (e.currentTarget),
       content: honestyContent(a),
       placement: 'bottom',
-      maxWidth: 320,
+      maxWidth: 340,
     });
-  }, { title: 'What this model does and does not do' });
+  }, { title: 'What this model does, and what it deliberately does not' });
   bar.appendChild(simChip);
 
   bar.appendChild(h('span', { class: 'titlebar__spacer' }));
@@ -543,26 +611,17 @@ function buildTitleBar(a) {
   const actions = h('div', { class: 'titlebar__actions' });
   actions.appendChild(button('btn btn--ghost', 'Scenarios', () => {
     if (a.onboarding) onboarding.showScenarioPicker(a.onboarding);
-  }, { title: 'Load one of the eight teaching scenarios' }));
-  actions.appendChild(button('btn btn--ghost', 'Tour', () => {
-    if (a.onboarding) onboarding.startTour(a.onboarding);
-  }, { title: 'Replay the 60-second tour' }));
-
-  const hints = button('btn btn--ghost', 'Hints on', () => {
-    if (!a.onboarding) return;
-    a.onboarding.hintsEnabled = !a.onboarding.hintsEnabled;
-    fmt.setText(hints, a.onboarding.hintsEnabled ? 'Hints on' : 'Hints off');
-    fmt.cls(hints, 'is-selected', a.onboarding.hintsEnabled);
-  }, { title: 'Coach hints during a run — one card per 20 s, never blocking' });
-  a.el.hintsBtn = hints;
-  actions.appendChild(hints);
-
+  }, { title: 'Load one of the eight teaching scenarios — each starts in one click' }));
+  actions.appendChild(button('btn btn--ghost', 'Help', () => showHelp(a), {
+    title: 'The tour, the glossary and the shortcuts',
+  }));
   actions.appendChild(button('btn btn--icon', '?', () => {
     overlay.showCheatSheet(a.overlayHost, KEYMAP);
   }, { title: 'Keyboard shortcuts (?)', 'aria-label': 'Keyboard shortcuts' }));
 
-  const themeBtn = button('btn btn--icon', 'A', () => cycleTheme(a), {
-    'aria-label': 'Colour theme',
+  const themeBtn = button('btn btn--icon', '◐', () => toggleTheme(a), {
+    'aria-label': 'Toggle the light and dark theme',
+    'aria-pressed': 'false',
   });
   a.el.themeBtn = themeBtn;
   actions.appendChild(themeBtn);
@@ -572,17 +631,22 @@ function buildTitleBar(a) {
 }
 
 /**
- * The 56 px run control bar of §9.4.3, left to right: state, transport, E-stop, speed, progress,
- * mode.
+ * The 56 px run control bar of §9.4.3, left to right: state · transport · E-stop · speed ·
+ * progress · mode. The E-stop and the mode chip are DIRECT children of `.runbar`, which is how
+ * `styles/app.css` fixes the E-stop's x and pushes the mode chip to the right edge.
  * @param {object} a the application instance
  * @returns {Element} the run bar
  */
 function buildRunBar(a) {
-  const bar = h('div', { class: 'runbar', id: 'runbar', role: 'toolbar', 'aria-label': 'Run controls' });
+  const bar = h('div', {
+    class: 'runbar', id: 'runbar', role: 'toolbar', 'aria-label': 'Run controls', tabindex: '-1',
+  });
 
-  // 1 — state pill + method name + block
+  // 1 — state pill + method name + block name/index
   const g1 = h('div', { class: 'runbar__group' });
-  const pill = h('span', { class: 'pill pill--lg pill--neutral', role: 'status', 'aria-live': 'polite' }, 'IDLE');
+  const pill = h('span', {
+    class: 'pill pill--lg pill--neutral', role: 'status', 'aria-live': 'polite',
+  }, 'IDLE');
   a.el.statePill = pill;
   g1.appendChild(pill);
   const stack = h('div', { class: 'runbar__stack' });
@@ -600,50 +664,42 @@ function buildRunBar(a) {
   a.el.startBtn = button('btn btn--primary', 'Start', () => doStartOrContinue(a), {});
   a.el.holdBtn = button('btn btn--ghost', 'Hold', () => act(a, () => sim.hold(a.ctx)), {});
   a.el.skipBtn = buildSkipButton(a);
-  a.el.endBtn = button('btn btn--ghost', 'End', (e) => openEndPopover(a, /** @type {Element} */ (e.currentTarget)), {});
+  a.el.endBtn = button('btn btn--ghost', 'End',
+    (e) => openEndPopover(a, /** @type {Element} */ (e.currentTarget)),
+    { 'aria-haspopup': 'dialog' });
   a.el.resetBtn = button('btn btn--ghost', 'Reset', () => act(a, () => sim.reset(a.ctx)), {});
+  a.el.resetBtn.hidden = true;
   g2.appendChild(a.el.startBtn);
   g2.appendChild(a.el.holdBtn);
   g2.appendChild(a.el.skipBtn);
   g2.appendChild(a.el.endBtn);
   g2.appendChild(a.el.resetBtn);
-
-  const exports = h('div', { class: 'runbar__group' });
-  exports.setAttribute('hidden', '');
-  a.el.exportGroup = exports;
-  exports.appendChild(button('btn btn--ghost', 'Data CSV', () => exportFile(a, 'data')));
-  exports.appendChild(button('btn btn--ghost', 'Fractions CSV', () => exportFile(a, 'fractions')));
-  exports.appendChild(button('btn btn--ghost', 'Events CSV', () => exportFile(a, 'events')));
-  exports.appendChild(button('btn btn--ghost', 'Run JSON', () => exportFile(a, 'json')));
-  g2.appendChild(exports);
   bar.appendChild(g2);
 
   // 3 — emergency stop, behind a rule and a gap so it never sits beside a benign control
   bar.appendChild(h('span', { class: 'runbar__rule', role: 'separator', 'aria-orientation': 'vertical' }));
-  const estop = button('btn btn--danger btn--estop', 'E-STOP', () => act(a, () => sim.estop(a.ctx)), {
-    title: 'Emergency stop — acts immediately, no undo (Shift+Esc twice)',
+  a.el.estopBtn = button('btn btn--danger btn--estop', 'E-STOP', () => act(a, () => sim.estop(a.ctx)), {
+    title: 'Emergency stop — acts immediately, no undo (Shift+Esc twice within 1 s)',
     'aria-label': 'Emergency stop',
   });
-  a.el.estopBtn = estop;
-  bar.appendChild(estop);
+  bar.appendChild(a.el.estopBtn);
   bar.appendChild(h('span', { class: 'runbar__rule', role: 'separator', 'aria-orientation': 'vertical' }));
 
   // 4 — sim speed
   const g4 = h('div', { class: 'runbar__group', 'data-tour': 'speed' });
-  const seg = h('div', { class: 'segmented', role: 'radiogroup', 'aria-label': 'Simulation speed' });
+  g4.appendChild(h('span', { class: 'runbar__label', id: 'speed-caption' }, 'Sim speed'));
+  const seg = h('div', {
+    class: 'segmented', role: 'radiogroup', 'aria-labelledby': 'speed-caption',
+  });
+  a.el.speedSeg = seg;
   a.el.speedOpts = [];
-  for (const s of a.ctx.config.sim.speedOptions) {
-    const opt = button('segmented__opt', `${s}×`, () => act(a, () => sim.setSpeed(a.ctx, s)), {
-      role: 'radio', 'aria-checked': 'false', title: `Run the simulation at ${s}× real time`,
-    });
-    opt.dataset.speed = String(s);
-    a.el.speedOpts.push(opt);
-    seg.appendChild(opt);
-  }
+  buildSpeedOptions(a);
   g4.appendChild(seg);
-  a.el.pauseBtn = button('btn btn--ghost', 'Pause', () => togglePause(a), {});
+  a.el.pauseBtn = button('btn btn--icon', '❚❚', () => togglePause(a), {
+    'aria-pressed': 'false', 'aria-label': 'Pause the simulation',
+  });
   g4.appendChild(a.el.pauseBtn);
-  const note = h('span', { class: 'runbar__speed-note num' }, '');
+  const note = h('span', { class: 'runbar__speed-note' }, '');
   a.el.speedNote = note;
   g4.appendChild(note);
   bar.appendChild(g4);
@@ -658,16 +714,16 @@ function buildRunBar(a) {
     'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0',
     'aria-label': 'Method progress',
   });
-  const fill = h('div', { class: 'runbar__progress-fill' });
+  const fill = h('span', { class: 'runbar__progress-fill' });
   a.el.progressTrack = track;
   a.el.progressFill = fill;
   track.appendChild(fill);
   g5.appendChild(track);
   bar.appendChild(g5);
 
-  // 6 — mode chip (also the manual-control toggle of §9.4.4)
+  // 6 — mode chip, a direct child of .runbar, and the manual-control toggle of §9.4.4
   const mode = button('pill pill--neutral', 'METHOD', () => toggleManual(a), {
-    title: 'Manual control — available in IDLE, READY, HELD and PAUSED only',
+    title: 'METHOD: the engine drives the skid. MANUAL: you do — available in IDLE, READY, HELD and PAUSED.',
     'aria-pressed': 'false',
   });
   a.el.modeChip = mode;
@@ -677,39 +733,53 @@ function buildRunBar(a) {
 }
 
 /**
- * The Skip Block control: a 400 ms press-and-hold with a filling progress ring (§9.4.3).
+ * (Re)build the speed segmented control from `config.sim.speedOptions`, which a different preset
+ * may change.
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function buildSpeedOptions(a) {
+  const seg = a.el.speedSeg;
+  while (seg.firstChild) seg.removeChild(seg.firstChild);
+  a.el.speedOpts = [];
+  for (const s of a.ctx.config.sim.speedOptions) {
+    const opt = button('segmented__opt', `${s}×`, () => act(a, () => sim.setSpeed(a.ctx, s)), {
+      role: 'radio', 'aria-checked': 'false', title: `Run the simulation at ${s}× real time`,
+    });
+    opt.dataset.speed = String(s);
+    a.el.speedOpts.push(opt);
+    seg.appendChild(opt);
+  }
+}
+
+/**
+ * The Skip Block control: a 400 ms press-and-hold with a filling progress ring (§9.4.3), so a
+ * fat-fingered click cannot throw away the rest of a block.
+ *
  * The ring is advanced by the shell's own frame pass — no panel starts a second rAF loop.
+ *
  * @param {object} a the application instance
  * @returns {HTMLButtonElement} the skip button
  */
 function buildSkipButton(a) {
   const btn = /** @type {HTMLButtonElement} */ (h('button', {
     class: 'btn btn--ghost', type: 'button',
-    title: 'Skip the current block — hold for 400 ms',
+    title: 'Skip the current block — press and hold for 400 ms (N)',
   }, 'Skip block'));
 
-  const NS = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(NS, 'svg');
-  svg.setAttribute('class', 'holdring');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('width', '18');
-  svg.setAttribute('height', '18');
-  svg.setAttribute('aria-hidden', 'true');
-  const track = document.createElementNS(NS, 'circle');
-  track.setAttribute('class', 'holdring__track');
-  track.setAttribute('cx', '12'); track.setAttribute('cy', '12'); track.setAttribute('r', '9');
-  track.setAttribute('fill', 'none');
-  const arc = document.createElementNS(NS, 'circle');
-  arc.setAttribute('class', 'holdring__fill');
-  arc.setAttribute('cx', '12'); arc.setAttribute('cy', '12'); arc.setAttribute('r', '9');
-  arc.setAttribute('fill', 'none');
-  arc.setAttribute('transform', 'rotate(-90 12 12)');
-  const circumference = 2 * Math.PI * 9;
-  arc.setAttribute('stroke-dasharray', String(circumference));
-  arc.setAttribute('stroke-dashoffset', String(circumference));
-  svg.appendChild(track);
-  svg.appendChild(arc);
-  btn.appendChild(svg);
+  const circumference = 2 * Math.PI * RING_R;
+  const arc = fmt.hSvg('circle', {
+    class: 'holdring__fill',
+    cx: '12', cy: '12', r: String(RING_R), fill: 'none',
+    transform: `rotate(-90 12 12)`,
+    'stroke-dasharray': String(circumference),
+    'stroke-dashoffset': String(circumference),
+  });
+  btn.appendChild(fmt.hSvg('svg', {
+    class: 'holdring', viewBox: '0 0 24 24', width: '18', height: '18', 'aria-hidden': 'true',
+  },
+  fmt.hSvg('circle', { class: 'holdring__track', cx: '12', cy: '12', r: String(RING_R), fill: 'none' }),
+  arc));
   a.el.skipArc = arc;
   a.el.skipArcLength = circumference;
 
@@ -718,20 +788,22 @@ function buildSkipButton(a) {
     ev.preventDefault();
     a.skipHold.active = true;
     a.skipHold.start_ms = performance.now();
-    a.skipHold.pointerId = ev.pointerId === undefined ? -1 : ev.pointerId;
     if (btn.setPointerCapture && ev.pointerId !== undefined) {
       try { btn.setPointerCapture(ev.pointerId); } catch (_e) { /* not capturable */ }
     }
   };
   const cancel = () => {
+    if (!a.skipHold.active) return;
     a.skipHold.active = false;
-    a.el.skipArc.setAttribute('stroke-dashoffset', String(a.el.skipArcLength));
+    fmt.setAttr(a.el.skipArc, 'stroke-dashoffset', String(a.el.skipArcLength));
   };
   btn.addEventListener('pointerdown', start);
   btn.addEventListener('pointerup', cancel);
   btn.addEventListener('pointercancel', cancel);
   btn.addEventListener('pointerleave', cancel);
-  // Keyboard equivalent: Enter/Space open the same confirm the `N` shortcut opens.
+  // Keyboard path: a held key has no reliable "still held" signal across layouts, so the keyboard
+  // gets the same confirm dialog the `N` shortcut opens. Both paths are deliberate; neither is a
+  // single unguarded click.
   btn.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); confirmSkip(a); }
   });
@@ -739,7 +811,8 @@ function buildSkipButton(a) {
 }
 
 /**
- * The alarm banner stack of §9.1.1 with the two live regions of §9.7.
+ * The alarm banner stack of §9.1.1 with the two live regions of §9.7. The shell's error bar lives
+ * in this band too, rather than adding a seventh row to the grid.
  * @param {object} a the application instance
  * @returns {Element} the alarm stack container
  */
@@ -749,12 +822,15 @@ function buildAlarmStack(a) {
     class: 'sr-only', role: 'alert', 'aria-live': 'assertive', 'aria-atomic': 'true',
   });
   const polite = h('div', { class: 'sr-only', 'aria-live': 'polite', 'aria-atomic': 'true' });
+  const errors = h('div', {});
   const list = h('div', { class: 'alarm-stack__list' });
   a.el.alarmAssertive = assertive;
   a.el.alarmPolite = polite;
+  a.el.errorSlot = errors;
   a.el.alarmList = list;
   wrap.appendChild(assertive);
   wrap.appendChild(polite);
+  wrap.appendChild(errors);
   wrap.appendChild(list);
   return wrap;
 }
@@ -765,31 +841,20 @@ function buildAlarmStack(a) {
  * @returns {Element} the tab strip
  */
 function buildTabStrip(a) {
-  const strip = h('div', { class: 'tabstrip', role: 'tablist', 'aria-label': 'Workspace' });
+  const strip = h('nav', { class: 'tabstrip', role: 'tablist', 'aria-label': 'Workspace views' });
   a.el.tabs = new Map();
   for (const tab of TABS) {
-    const btn = button('tab', tab.label, () => setTab(a, tab.id), {
+    const on = tab.id === a.activeTab;
+    const btn = button(`tab${on ? ' is-active' : ''}`, tab.label, () => setTab(a, tab.id), {
       role: 'tab',
       id: `tab-${tab.id}`,
       'aria-controls': `view-${tab.id}`,
-      'aria-selected': tab.id === a.activeTab ? 'true' : 'false',
-      tabindex: tab.id === a.activeTab ? '0' : '-1',
+      'aria-selected': on ? 'true' : 'false',
+      tabindex: on ? '0' : '-1',
       title: `${tab.label} (${tab.key})`,
     });
-    if (tab.id === 'method') btn.setAttribute('data-tour', 'tab-method');
-    btn.addEventListener('keydown', (e) => {
-      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return;
-      e.preventDefault();
-      const i = TABS.findIndex((t) => t.id === tab.id);
-      let j = i;
-      if (e.key === 'ArrowLeft') j = (i - 1 + TABS.length) % TABS.length;
-      else if (e.key === 'ArrowRight') j = (i + 1) % TABS.length;
-      else if (e.key === 'Home') j = 0;
-      else j = TABS.length - 1;
-      setTab(a, TABS[j].id);
-      const next = a.el.tabs.get(TABS[j].id);
-      if (next) next.focus();
-    });
+    if (tab.id === 'method') fmt.setAttr(btn, 'data-tour', 'tab-method');
+    btn.addEventListener('keydown', (e) => onTabKey(a, e, tab.id));
     a.el.tabs.set(tab.id, btn);
     strip.appendChild(btn);
   }
@@ -797,44 +862,55 @@ function buildTabStrip(a) {
 }
 
 /**
+ * Arrow-key navigation for the tab strip (§9.7).
+ * @param {object} a the application instance
+ * @param {KeyboardEvent} e the key event
+ * @param {string} tabId the tab the key landed on
+ * @returns {void}
+ */
+function onTabKey(a, e, tabId) {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return;
+  e.preventDefault();
+  const i = TABS.findIndex((t) => t.id === tabId);
+  let j;
+  if (e.key === 'ArrowLeft') j = (i - 1 + TABS.length) % TABS.length;
+  else if (e.key === 'ArrowRight') j = (i + 1) % TABS.length;
+  else if (e.key === 'Home') j = 0;
+  else j = TABS.length - 1;
+  setTab(a, TABS[j].id);
+  const next = a.el.tabs.get(TABS[j].id);
+  if (next) next.focus();
+}
+
+/**
  * The 28 px status strip — the redundant copy of process state that survives a tab switch (§9.1.1).
+ * Every chip is a real button, so the glossary behind it is keyboard-reachable.
  * @param {object} a the application instance
  * @returns {Element} the status strip
  */
 function buildStatusStrip(a) {
-  const strip = h('footer', { class: 'statusstrip', 'data-tour': 'status' });
+  const strip = h('footer', {
+    class: 'statusstrip', 'aria-label': 'Live process values', 'data-tour': 'status',
+  });
   a.el.stat = {};
-  const chips = [
-    ['p1', 'P1', 'PT-101'],
-    ['dp', 'ΔP', 'PDT-101'],
-    ['flow', 'Flow', 'FT-101'],
-    ['pctb', '%B', 'pctB'],
-    ['uv', 'UV280', 'UV-101'],
-    ['cond', 'Cond', 'CE-101'],
-    ['ph', 'pH', 'AE-101'],
-    ['cv', 'Total', 'cv'],
-    ['clock', 'Clock', 'run-state'],
-  ];
-  for (const [key, label, glossId] of chips) {
-    const value = h('span', { class: 'statchip__value num' }, '—');
-    const chip = button('statchip', '', (e) => {
-      showGlossary(a, /** @type {Element} */ (e.currentTarget), glossId);
-    }, { title: `${label} — click for what this is` });
-    while (chip.firstChild) chip.removeChild(chip.firstChild);
-    chip.appendChild(h('span', { class: 'statchip__label' }, label));
-    chip.appendChild(value);
-    a.el.stat[key] = value;
+  for (const spec of STATUS_CHIPS) {
+    const chip = /** @type {HTMLButtonElement} */ (h('button', {
+      class: 'statchip', type: 'button',
+      title: `${spec.label} — press for what this is and what abnormal looks like`,
+    },
+    h('span', { class: 'statchip__label' }, spec.label),
+    h('span', { class: 'statchip__value' }, fmt.NO_VALUE)));
+    chip.addEventListener('click', () => {
+      if (spec.key === 'quality') showQualityPopover(a, chip);
+      else showGlossary(a, chip, spec.gloss);
+    });
+    a.el.stat[spec.key] = {
+      chip,
+      value: chip.querySelector('.statchip__value'),
+      sensor: spec.sensor,
+    };
     strip.appendChild(chip);
   }
-  const quality = button('statchip', '', (e) => {
-    showQualityPopover(a, /** @type {Element} */ (e.currentTarget));
-  }, { title: 'Data quality flags' });
-  while (quality.firstChild) quality.removeChild(quality.firstChild);
-  quality.appendChild(h('span', { class: 'statchip__label' }, 'Quality'));
-  const qv = h('span', { class: 'statchip__value num' }, 'OK');
-  quality.appendChild(qv);
-  a.el.stat.quality = qv;
-  strip.appendChild(quality);
   return strip;
 }
 
@@ -843,8 +919,8 @@ function buildStatusStrip(a) {
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Run a `core/sim.js` action and surface its refusal. Every action returns `{ ok, reason? }`; a
- * refusal is ALWAYS shown, because a silent refusal teaches nothing (§9.4.4).
+ * Run a `core/sim.js` action and surface its refusal. Every action returns `{ ok, reason? }`, and a
+ * refusal is ALWAYS shown: a silent refusal teaches nothing and gets worked around (§9.4.4).
  * @param {object} a the application instance
  * @param {function():{ok:boolean, reason?:string}} fn the action thunk
  * @returns {{ok:boolean, reason?:string}} the action's own result
@@ -857,10 +933,10 @@ function act(a, fn) {
     reportError(a, 'action', err);
     return { ok: false, reason: errText(err) };
   }
-  if (!r || typeof r !== 'object') return { ok: true };
-  if (r.ok === false) toast(a, r.reason || 'Blocked.', 'blocked');
-  else if (r.reason) toast(a, r.reason, 'warn');
   a.structural = true;
+  if (!r || typeof r !== 'object') return { ok: true };
+  if (!overlay.reportResult(a.overlayHost, r, 'The skid refused that action.')) return r;
+  if (r.reason) toast(a, r.reason, 'warn');       // ok:true WITH a reason = partial success
   return r;
 }
 
@@ -873,15 +949,15 @@ function act(a, fn) {
  */
 function toast(a, message, kind) {
   try {
-    overlay.showToast(a.overlayHost, { message, kind: kind || 'info', ms: kind === 'blocked' ? 6000 : 4000 });
+    overlay.showToast(a.overlayHost, { message, kind: kind || 'info' });
   } catch (err) {
     console.warn('toast failed:', message, err);
   }
 }
 
 /**
- * Start, or continue from HELD/PAUSED. On a pre-run-check refusal the full failure list is shown in
- * a modal rather than a one-line toast — all twelve checks report at once (§5.5.1).
+ * Start, or continue from HELD/PAUSED. A pre-run-check refusal opens the full failure list rather
+ * than a one-line toast, because all twelve checks report at once (§5.5.1).
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -902,24 +978,25 @@ function doStartOrContinue(a) {
  * @returns {void}
  */
 function showPreRunFailures(a, failures) {
-  const body = h('div', { class: 'shell-error__msg' });
   const blocking = failures.filter((f) => !f.acknowledgeable);
   const advisory = failures.filter((f) => f.acknowledgeable);
-  body.appendChild(h('p', {},
-    blocking.length > 0
+  const body = h('div', {},
+    h('p', {}, blocking.length > 0
       ? 'The run cannot start until these are fixed:'
-      : 'Only advisory checks failed. You may acknowledge and start anyway.'));
+      : 'Only advisory checks failed. You may acknowledge them and start anyway.'));
   const ul = h('ul', {});
   for (const f of blocking.concat(advisory)) {
     ul.appendChild(h('li', {}, `${f.code} — ${f.message}${f.acknowledgeable ? ' (advisory)' : ''}`));
   }
   body.appendChild(ul);
-  const actions = [{ label: 'Close', onClick: () => {}, variant: 'ghost' }];
+
+  // `showModal` closes nothing by itself: every handler is handed the handle and dismisses it.
+  const actions = [{ label: 'Close', variant: 'ghost', onClick: (hd) => overlay.dismiss(hd) }];
   if (blocking.length === 0) {
     actions.unshift({
       label: 'Acknowledge and start',
       variant: 'primary',
-      onClick: () => act(a, () => sim.start(a.ctx)),
+      onClick: (hd) => { overlay.dismiss(hd); act(a, () => sim.start(a.ctx)); },
     });
   }
   overlay.showModal(a.overlayHost, {
@@ -934,18 +1011,18 @@ function showPreRunFailures(a, failures) {
  * @returns {void}
  */
 function openEndPopover(a, anchorEl) {
-  const box = h('div', { class: 'shell-error__actions' });
-  let handle = null;
-  const close = () => { if (handle) overlay.dismiss(handle); };
+  const box = h('div', {});
   box.appendChild(h('p', {}, 'End the run:'));
-  box.appendChild(button('btn btn--ghost', 'End after current block', () => {
-    close(); act(a, () => sim.end(a.ctx, 'AFTER_BLOCK'));
-  }));
-  box.appendChild(button('btn btn--danger', 'End now', () => {
-    close(); act(a, () => sim.end(a.ctx, 'NOW'));
-  }));
+  let handle = null;
+  const after = button('btn btn--ghost btn--sm', 'After this block', () => {
+    overlay.dismiss(handle); act(a, () => sim.end(a.ctx, 'AFTER_BLOCK'));
+  });
+  const now = button('btn btn--danger btn--sm', 'End now', () => {
+    overlay.dismiss(handle); act(a, () => sim.end(a.ctx, 'NOW'));
+  });
+  box.appendChild(h('div', { class: 'btn-row' }, after, now));
   handle = overlay.showPopover(a.overlayHost, {
-    anchorEl, content: box, placement: 'bottom', maxWidth: 260,
+    anchorEl, content: box, placement: 'bottom', maxWidth: 280,
   });
 }
 
@@ -962,37 +1039,45 @@ function confirmSkip(a) {
   }
   const blocks = a.ctx.config.method ? a.ctx.config.method.blocks : null;
   const b = blocks && blocks[run.blockIndex];
-  const body = h('div', { class: 'shell-error__msg' },
-    h('p', {}, `Skip ${b ? `${b.id} · ${b.name}` : `block ${run.blockIndex + 1}`} and move to the next block?`),
-    h('p', {}, 'The block boundary is flushed and logged exactly as a normal block end.'));
+  const body = h('div', {},
+    h('p', {}, `Skip ${b ? `${b.id} · ${b.name}` : `block ${run.blockIndex + 1}`} and move on?`),
+    h('p', {}, 'The block boundary is flushed and logged exactly as a normal block end is.'));
+
   let handle = null;
+  let settled = false;                 // Enter reaches both the capture listener and the button
   const confirm = () => {
+    if (settled) return;
+    settled = true;
     document.removeEventListener('keydown', onKey, true);
-    if (handle) overlay.dismiss(handle);
+    overlay.dismiss(handle);
     act(a, () => sim.skipBlock(a.ctx));
   };
   const cancel = () => {
+    if (settled) return;
+    settled = true;
     document.removeEventListener('keydown', onKey, true);
-    if (handle) overlay.dismiss(handle);
+    overlay.dismiss(handle);
   };
   const onKey = (e) => {
     if (e.key === 'Enter') { e.preventDefault(); confirm(); }
-    else if (e.key === 'Escape') { cancel(); }
+    else if (e.key === 'Escape') cancel();
   };
+
   handle = overlay.showModal(a.overlayHost, {
     title: 'Skip block',
     content: body,
     actions: [
-      { label: 'Skip block (Enter)', onClick: confirm, variant: 'primary' },
-      { label: 'Cancel', onClick: cancel, variant: 'ghost' },
+      { label: 'Skip block (Enter)', variant: 'primary', onClick: confirm },
+      { label: 'Cancel', variant: 'ghost', onClick: cancel },
     ],
     dismissible: true,
+    onDismiss: cancel,          // the X, the dim and Esc all land here, so the listener never leaks
   });
   document.addEventListener('keydown', onKey, true);
 }
 
 /**
- * Pause / resume the process. `Pause` ramps flow to zero; `Continue` returns to RUNNING (§5.5).
+ * Pause / resume the process. `Pause` ramps flow to zero; resuming returns to RUNNING (§5.5).
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -1003,8 +1088,8 @@ function togglePause(a) {
 }
 
 /**
- * Toggle manual control. Interlocks and the legal-state rule are enforced by `sim` and explained by
- * the toast on refusal (§9.4.4).
+ * Toggle manual control. Interlocks and the legal-state rule live in `sim`; a refusal is explained
+ * by the toast (§9.4.4).
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -1026,25 +1111,17 @@ function stepSpeed(a, dir) {
 }
 
 /**
- * Write one of the four export files (§5.12, §5.13).
+ * Export the loaded method as JSON (`Ctrl+S`). The run's data exports live on the Results tab,
+ * which owns the analytics they carry; the method is shell-scoped because it is editable on the
+ * Method tab and worth saving from anywhere.
  * @param {object} a the application instance
- * @param {'data'|'events'|'fractions'|'json'|'method'} kind which file
  * @returns {void}
  */
-function exportFile(a, kind) {
-  const { config, run } = a.ctx;
-  const stem = `${config.presetId}_${Math.round(run.t_s)}s`;
+function exportMethod(a) {
   try {
-    if (kind === 'data') downloadText(`${stem}_data.csv`, exportDataCSV(config, run), 'text/csv;charset=utf-8');
-    else if (kind === 'events') downloadText(`${stem}_events.csv`, exportEventsCSV(config, run), 'text/csv;charset=utf-8');
-    else if (kind === 'fractions') downloadText(`${stem}_fractions.csv`, exportFractionsCSV(config, run), 'text/csv;charset=utf-8');
-    else if (kind === 'json') {
-      downloadText(`${stem}_run.json`, JSON.stringify(exportRunJSON(config, run, null), null, 2),
-        'application/json;charset=utf-8');
-    } else {
-      downloadText(`${config.presetId}_method.json`, JSON.stringify(exportMethodJSON(config), null, 2),
-        'application/json;charset=utf-8');
-    }
+    const payload = exportMethodJSON(a.ctx.config);
+    downloadText(`${a.ctx.config.presetId}_method.json`, JSON.stringify(payload, null, 2),
+      'application/json;charset=utf-8');
   } catch (err) {
     toast(a, `Export failed: ${errText(err)}`, 'blocked');
   }
@@ -1052,7 +1129,6 @@ function exportFile(a, kind) {
 
 /**
  * Open a file picker and install the chosen method JSON through `sim.loadMethod` (`Ctrl+O`, §9.5).
- *
  * The shell owns this shortcut rather than the Method view so it works from any tab.
  * @param {object} a the application instance
  * @returns {void}
@@ -1090,7 +1166,7 @@ function importMethodFile(a) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * TABS, THEME, POPOVERS
+ * TABS, THEME, HELP
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
@@ -1106,8 +1182,7 @@ function setTab(a, tabId) {
     const entry = a.views.get(tab.id);
     const btn = a.el.tabs.get(tab.id);
     const on = tab.id === tabId;
-    if (on) entry.host.removeAttribute('hidden');
-    else entry.host.setAttribute('hidden', '');
+    entry.host.hidden = !on;
     fmt.cls(btn, 'is-active', on);
     fmt.setAttr(btn, 'aria-selected', on ? 'true' : 'false');
     fmt.setAttr(btn, 'tabindex', on ? '0' : '-1');
@@ -1118,50 +1193,41 @@ function setTab(a, tabId) {
 }
 
 /**
- * Cycle the colour theme `auto → dark → light → auto` and tell every canvas painter to re-read its
- * tokens. Reading CSS custom properties per frame is a layout-thrash trap (§6.25).
+ * Flip between the dark and light themes and tell every canvas painter to re-read its tokens.
+ * `index.html` stamps an explicit `data-theme` before first paint, so there is no third state to
+ * carry here; reading CSS custom properties per frame is a layout-thrash trap (§6.25).
  * @param {object} a the application instance
  * @returns {void}
  */
-function cycleTheme(a) {
-  const order = ['auto', 'dark', 'light'];
-  const next = order[(order.indexOf(a.theme) + 1) % order.length];
-  applyTheme(a, next, true);
+function toggleTheme(a) {
+  applyTheme(a, a.theme === 'dark' ? 'light' : 'dark', true);
 }
 
 /**
- * Apply a theme choice to the document root and announce it.
+ * Apply a theme to the document root and announce it.
  * @param {object} a the application instance
- * @param {'auto'|'dark'|'light'} theme the chosen theme
+ * @param {'dark'|'light'} theme the chosen theme
  * @param {boolean} announce true to emit `theme-changed` on the bus
  * @returns {void}
  */
 function applyTheme(a, theme, announce) {
-  a.theme = theme;
-  const root = document.documentElement;
-  if (theme === 'auto') root.removeAttribute('data-theme');
-  else root.setAttribute('data-theme', theme);
+  a.theme = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', a.theme);
   if (a.el.themeBtn) {
-    const label = theme === 'auto' ? 'Auto' : (theme === 'dark' ? 'Dark' : 'Light');
-    fmt.setText(a.el.themeBtn, label === 'Auto' ? 'A' : label[0]);
-    fmt.setAttr(a.el.themeBtn, 'title', `Colour theme: ${label} — click to change`);
+    fmt.setAttr(a.el.themeBtn, 'aria-pressed', a.theme === 'light' ? 'true' : 'false');
+    fmt.setAttr(a.el.themeBtn, 'title',
+      a.theme === 'light' ? 'Light theme — switch to dark' : 'Dark theme — switch to light');
+    fmt.setText(a.el.themeBtn, a.theme === 'light' ? '◑' : '◐');
   }
-  if (announce) a.ctx.bus.emit('theme-changed', resolvedTheme(a));
-}
-
-/**
- * @param {object} a the application instance
- * @returns {'dark'|'light'} the theme actually being displayed
- */
-function resolvedTheme(a) {
-  if (a.theme === 'dark' || a.theme === 'light') return a.theme;
-  return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
-    ? 'light' : 'dark';
+  try {
+    fmt.invalidateThemeTokens();
+  } catch (_err) { /* the token cache is an optimisation; failing to clear it is not fatal */ }
+  if (announce) a.ctx.bus.emit('theme-changed', a.theme);
 }
 
 /**
  * Open the glossary popover for a tag or parameter id (§9.6). A missing entry renders NO info
- * affordance — `glossaryFor` returning null is a contract, not an error.
+ * affordance — `glossaryFor` returning null is a contract, not an error (§6.22.1).
  * @param {object} a the application instance
  * @param {Element} anchorEl the element the popover points at
  * @param {string} id a P&ID tag, config path, concept id or alias
@@ -1170,26 +1236,45 @@ function resolvedTheme(a) {
 function showGlossary(a, anchorEl, id) {
   const entry = glossaryFor(id);
   if (!entry) return;
-  overlay.showPopover(a.overlayHost, {
-    anchorEl, content: glossaryContent(entry), placement: 'top', maxWidth: 300,
+  overlay.showGlossaryPopover(a.overlayHost, {
+    anchorEl,
+    entry,
+    placement: 'top',
+    onSeeAlso: (nextId) => showGlossary(a, anchorEl, nextId),
   });
 }
 
 /**
- * Render a glossary entry as DOM: what it is, why it matters, units and typical range.
- * @param {{term:string, short:string, why:string, typical:string, seeAlso:string[]}} entry the entry
- * @returns {Element} the popover body
+ * The status strip's Quality chip popover: every `run.qualityFlags` bit currently set (§5.3), and
+ * the per-sensor verdict behind them.
+ * @param {object} a the application instance
+ * @param {Element} anchorEl the chip
+ * @returns {void}
  */
-function glossaryContent(entry) {
-  return h('div', { class: 'glossary' },
-    h('strong', {}, entry.term),
-    h('p', {}, entry.short),
-    h('p', {}, entry.why),
-    h('p', { class: 'glossary__typical' }, entry.typical));
+function showQualityPopover(a, anchorEl) {
+  const run = a.ctx.run;
+  const body = h('div', { class: 'glossary' }, h('strong', {}, 'Data quality'));
+  const ul = h('ul', {});
+  for (const sensor of ['UV', 'COND', 'PH', 'PRESS']) {
+    ul.appendChild(h('li', {}, `${sensor}: ${sensorQuality(run, sensor)}`));
+  }
+  body.appendChild(ul);
+
+  const set = QF_LABELS.filter(([bit]) => (run.qualityFlags & bit) !== 0);
+  if (set.length === 0) {
+    body.appendChild(h('p', {}, 'No quality flags are set: every sensor is reporting normally.'));
+  } else {
+    const flags = h('ul', {});
+    for (const [, label] of set) flags.appendChild(h('li', {}, label));
+    body.appendChild(flags);
+  }
+  const g = glossaryFor('quality-flags');
+  if (g) body.appendChild(h('p', { class: 'glossary__typical' }, g.why));
+  overlay.showPopover(a.overlayHost, { anchorEl, content: body, placement: 'top', maxWidth: 340 });
 }
 
 /**
- * The `SIMULATED` chip's popover: what the model does, and what it deliberately does not.
+ * The `SIMULATED` chip's popover: what the model does, and what it deliberately does not (§9.6).
  * @param {object} a the application instance
  * @returns {Element} the popover body
  */
@@ -1197,34 +1282,112 @@ function honestyContent(a) {
   const cfg = a.ctx.config;
   return h('div', { class: 'glossary' },
     h('strong', {}, 'This is a simulation, not an instrument'),
-    h('p', {}, 'A one-dimensional packed bed with axial dispersion, film and pore mass transfer, and a '
-      + `${cfg.column.isothermMode} isotherm. Sensors carry real noise, drift, filtering and delay volumes.`),
-    h('p', {}, 'Deliberately absent: radial gradients, per-cell protein charge, replay and scrubbing, '
-      + 'and any network or cloud component. Numbers here are physically consistent, not certified.'),
+    h('p', {}, 'A one-dimensional packed bed with axial dispersion, film and pore mass transfer and '
+      + `a ${cfg.column.isothermMode} isotherm. The sensors carry real noise, drift, filtering and `
+      + 'delay volumes, so they lie in the ways real sensors lie.'),
+    h('p', {}, 'Deliberately absent: radial gradients, per-cell protein charge, replay and '
+      + 'scrubbing, and any network or cloud component. The numbers are physically consistent; they '
+      + 'are not a substitute for a qualified run.'),
     h('p', { class: 'glossary__typical' },
-      `Preset ${cfg.presetId} · ${cfg.scale} · seed ${cfg.seed} · grid nz=${cfg.column.nz}.`));
+      `${cfg.presetId} · ${cfg.scale} · seed ${cfg.seed} · grid nz=${cfg.column.nz}`
+      + `${a.benchmark ? ` · ${a.benchmark.msPerSimSecond.toFixed(2)} ms per simulated second` : ''}`));
 }
 
 /**
- * The status strip's quality chip popover: every `run.qualityFlags` bit currently set (§5.3).
+ * The Help modal: the ways into the app, and a searchable index of the whole glossary.
+ * Every word of definition comes from `data/glossary.js`; this function contributes the search box
+ * and the layout only.
  * @param {object} a the application instance
- * @param {Element} anchorEl the chip
  * @returns {void}
  */
-function showQualityPopover(a, anchorEl) {
-  const flags = a.ctx.run.qualityFlags;
-  const body = h('div', { class: 'glossary' }, h('strong', {}, 'Data quality'));
-  const set = QF_LABELS.filter(([bit]) => (flags & bit) !== 0);
-  if (set.length === 0) {
-    body.appendChild(h('p', {}, 'Every sensor is reporting normally.'));
-  } else {
-    const ul = h('ul', {});
-    for (const [, label] of set) ul.appendChild(h('li', {}, label));
-    body.appendChild(ul);
-  }
-  const g = glossaryFor('quality-flags');
-  if (g) body.appendChild(h('p', { class: 'glossary__typical' }, g.why));
-  overlay.showPopover(a.overlayHost, { anchorEl, content: body, placement: 'top', maxWidth: 320 });
+function showHelp(a) {
+  const ids = Object.keys(GLOSSARY);
+  const list = h('div', { class: 'btn-row' });
+  const detail = h('div', { class: 'glossary' });
+
+  const showEntry = (id) => {
+    const entry = GLOSSARY[id];
+    while (detail.firstChild) detail.removeChild(detail.firstChild);
+    if (!entry) return;
+    detail.appendChild(h('strong', {}, entry.term));
+    detail.appendChild(h('p', {}, entry.short));
+    detail.appendChild(h('p', {}, entry.why));
+    detail.appendChild(h('p', { class: 'glossary__typical' }, entry.typical));
+  };
+
+  const render = (needle) => {
+    const q = needle.trim().toLowerCase();
+    const hits = [];
+    for (const id of ids) {
+      const e = GLOSSARY[id];
+      if (q === '' || id.toLowerCase().indexOf(q) >= 0
+        || e.term.toLowerCase().indexOf(q) >= 0 || e.short.toLowerCase().indexOf(q) >= 0) {
+        hits.push(id);
+      }
+      if (hits.length >= 30) break;
+    }
+    while (list.firstChild) list.removeChild(list.firstChild);
+    for (const id of hits) {
+      list.appendChild(button('btn btn--ghost btn--sm', GLOSSARY[id].term, () => showEntry(id)));
+    }
+    if (hits.length === 0) list.appendChild(h('p', { class: 'field__hint' }, 'No matches.'));
+  };
+
+  const search = /** @type {HTMLInputElement} */ (h('input', {
+    type: 'text', class: 'numfield__input', placeholder: 'Search the glossary…',
+    'aria-label': 'Search the glossary',
+  }));
+  search.addEventListener('input', () => render(search.value));
+
+  const body = h('div', {},
+    h('p', {}, `${ids.length} entries cover every instrument tag, every configurable parameter and `
+      + 'every concept the simulator models. The same text is behind the ⓘ on any label on screen.'),
+    h('div', { class: 'numfield' }, search),
+    list,
+    detail);
+  render('');
+
+  overlay.showModal(a.overlayHost, {
+    title: 'Help and glossary',
+    content: body,
+    dismissible: true,
+    actions: [
+      {
+        label: 'Take the tour',
+        variant: 'ghost',
+        onClick: (hd) => {
+          overlay.dismiss(hd);
+          if (a.onboarding) onboarding.startTour(a.onboarding);
+        },
+      },
+      {
+        label: 'Keyboard shortcuts',
+        variant: 'ghost',
+        onClick: (hd) => { overlay.dismiss(hd); overlay.showCheatSheet(a.overlayHost, KEYMAP); },
+      },
+      {
+        label: hintsOn(a) ? 'Turn coach hints off' : 'Turn coach hints on',
+        variant: 'ghost',
+        onClick: (hd) => {
+          overlay.dismiss(hd);
+          if (!a.onboarding) return;
+          a.onboarding.hintsEnabled = !a.onboarding.hintsEnabled;
+          toast(a, a.onboarding.hintsEnabled
+            ? 'Coach hints on — at most one card every 20 seconds, never blocking.'
+            : 'Coach hints off for this session.', 'info');
+        },
+      },
+      { label: 'Close', variant: 'primary', onClick: (hd) => overlay.dismiss(hd) },
+    ],
+  });
+}
+
+/**
+ * @param {object} a the application instance
+ * @returns {boolean} whether the coach-hint scheduler is currently armed
+ */
+function hintsOn(a) {
+  return !!(a.onboarding && a.onboarding.hintsEnabled);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1232,8 +1395,8 @@ function showQualityPopover(a, anchorEl) {
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Subscribe the shell to the bus. Everything that holds a derived value keyed on `config` is
- * rebuilt on `config-replaced`; the startup benchmark is re-run on `preset-loaded` (§6.32).
+ * Subscribe the shell to the bus. Every derived value keyed on `config` is dropped on
+ * `config-replaced`, and the startup benchmark is re-run on `preset-loaded` (§6.32).
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -1241,13 +1404,14 @@ function wireBus(a) {
   const bus = a.ctx.bus;
   const invalidate = () => {
     a.demandCache = null;
-    a.alarmSig = '';
-    a.liveAlarmId = '';
+    a.progressPct = -1;
+    a.alarmSig = null;
+    a.liveAlarmId = null;
     a.silenced.clear();
     a.lastEventCount = a.ctx.run.events ? a.ctx.run.events.length : 0;
     a.simFailed = false;
     a.structural = true;
-    rebuildSpeedOptions(a);
+    if (a.el.speedOpts.length !== a.ctx.config.sim.speedOptions.length) buildSpeedOptions(a);
   };
   bus.on('config-replaced', invalidate);
   bus.on('run-reset', invalidate);
@@ -1256,54 +1420,31 @@ function wireBus(a) {
     runStartupBenchmark(a);
     invalidate();
   });
-  bus.on('scenario-applied', () => { setTab(a, 'run'); });
+  bus.on('scenario-applied', () => setTab(a, 'run'));
   bus.on('run-ended', () => { a.structural = true; });
   bus.on('request-tab', (tabId) => setTab(a, tabId));
-  if (window.matchMedia) {
-    const mq = window.matchMedia('(prefers-color-scheme: light)');
-    const onChange = () => { if (a.theme === 'auto') bus.emit('theme-changed', resolvedTheme(a)); };
-    if (mq.addEventListener) mq.addEventListener('change', onChange);
-    else if (mq.addListener) mq.addListener(onChange);
-  }
-}
-
-/**
- * Rebuild the speed segmented control when `config.sim.speedOptions` changes with the preset.
- * @param {object} a the application instance
- * @returns {void}
- */
-function rebuildSpeedOptions(a) {
-  const opts = a.ctx.config.sim.speedOptions;
-  const same = a.el.speedOpts.length === opts.length
-    && a.el.speedOpts.every((el, i) => Number(el.dataset.speed) === opts[i]);
-  if (same) return;
-  const parent = a.el.speedOpts.length > 0 ? a.el.speedOpts[0].parentNode : null;
-  if (!parent) return;
-  while (parent.firstChild) parent.removeChild(parent.firstChild);
-  a.el.speedOpts = [];
-  for (const s of opts) {
-    const opt = button('segmented__opt', `${s}×`, () => act(a, () => sim.setSpeed(a.ctx, s)), {
-      role: 'radio', 'aria-checked': 'false', title: `Run the simulation at ${s}× real time`,
-    });
-    opt.dataset.speed = String(s);
-    a.el.speedOpts.push(opt);
-    parent.appendChild(opt);
-  }
+  bus.on('show-glossary', (payload) => {
+    if (payload && payload.anchorEl && payload.id) showGlossary(a, payload.anchorEl, payload.id);
+  });
+  bus.on('display-units-changed', () => { a.structural = true; });
 }
 
 /**
  * Install the one document-level key handler. Shell actions execute here; view actions go out on
- * the bus as `('key-action', { action, combo, event })` so no second listener is ever needed.
+ * the bus as `('key-action', { action, combo, event })`, so no second listener is ever needed.
  * @param {object} a the application instance
  * @returns {void}
  */
 function wireKeyboard(a) {
   document.addEventListener('keydown', (e) => {
+    // A control that already consumed the key (the tab strip's arrows, a numfield's stepper, an
+    // open dialog) wins: the global registry never double-handles.
+    if (e.defaultPrevented) return;
     const combo = normaliseCombo(e);
     const entry = KEYMAP[combo];
     if (!entry) return;
     if (typingInField() && combo !== 'Escape') return;
-    if (handleKeyAction(a, entry.action, e)) e.preventDefault();
+    if (handleKeyAction(a, entry.action, e, combo)) e.preventDefault();
   });
 }
 
@@ -1312,9 +1453,10 @@ function wireKeyboard(a) {
  * @param {object} a the application instance
  * @param {string} action the action id from `KEYMAP`
  * @param {KeyboardEvent} e the originating event
+ * @param {string} combo the normalised combo, forwarded to the views
  * @returns {boolean} true when the event was consumed and should be prevented
  */
-function handleKeyAction(a, action, e) {
+function handleKeyAction(a, action, e, combo) {
   const run = a.ctx.run;
   if (action.startsWith('tab:')) { setTab(a, action.slice(4)); return true; }
   if (action.startsWith('speed:')) {
@@ -1328,10 +1470,12 @@ function handleKeyAction(a, action, e) {
       if (run.state === 'RUNNING') act(a, () => sim.hold(a.ctx));
       else doStartOrContinue(a);
       return true;
+    case 'start-run': doStartOrContinue(a); return true;
     case 'hold': act(a, () => sim.hold(a.ctx)); return true;
     case 'continue': act(a, () => sim.resume(a.ctx)); return true;
     case 'skip-block': confirmSkip(a); return true;
     case 'end-run': openEndPopover(a, a.el.endBtn); return true;
+    case 'pause-toggle': togglePause(a); return true;
     case 'estop': {
       const now = performance.now();
       if (a.estopArm_ms > 0 && now - a.estopArm_ms < ESTOP_DOUBLE_MS) {
@@ -1347,19 +1491,19 @@ function handleKeyAction(a, action, e) {
     case 'speed-down': stepSpeed(a, -1); return true;
     case 'mark-fraction': act(a, () => sim.markFraction(a.ctx)); return true;
     case 'cheat-sheet': overlay.showCheatSheet(a.overlayHost, KEYMAP); return true;
-    case 'export-method': exportFile(a, 'method'); return true;
+    case 'export-method': exportMethod(a); return true;
     case 'import-method': importMethodFile(a); return true;
     case 'perf-overlay':
       a.perfOn = !a.perfOn;
-      if (a.perfOn) a.el.perf.removeAttribute('hidden');
-      else a.el.perf.setAttribute('hidden', '');
+      a.el.perf.hidden = !a.perfOn;
+      a.perfRows = null;
       return true;
     case 'dismiss':
-      a.ctx.bus.emit('key-action', { action, combo: 'Escape', event: e });
-      return false;                     // let the overlay host's own Esc handling run too
+      a.ctx.bus.emit('key-action', { action, combo, event: e });
+      return false;                     // the overlay host's own capture-phase Esc handling runs too
     default:
       // Chart, legend and pooling live in the views; they own these.
-      a.ctx.bus.emit('key-action', { action, combo: normaliseCombo(e), event: e });
+      a.ctx.bus.emit('key-action', { action, combo, event: e });
       return true;
   }
 }
@@ -1371,14 +1515,10 @@ function handleKeyAction(a, action, e) {
  */
 function wireResponsiveNote(a) {
   if (!window.matchMedia) return;
-  const mq = window.matchMedia('(max-width: 719px)');
-  const apply = () => {
-    if (mq.matches) a.el.narrowNote.removeAttribute('hidden');
-    else a.el.narrowNote.setAttribute('hidden', '');
-  };
+  const mq = window.matchMedia('(max-width: 719.98px)');
+  const apply = () => { a.el.narrowNote.hidden = !mq.matches; };
   if (mq.addEventListener) mq.addEventListener('change', apply);
   else if (mq.addListener) mq.addListener(apply);
-  a.narrowQuery = mq;
   apply();
 }
 
@@ -1394,7 +1534,7 @@ function wireResponsiveNote(a) {
  * guarded — a throwing panel is reported and, after three consecutive failures, taken out of the
  * loop, but the loop itself never stops.
  *
- * `document.hidden` pauses RENDERING only; the simulation keeps running and the 0.25 s wall clamp
+ * `document.hidden` pauses RENDERING only; the simulation keeps running, and the 0.25 s wall clamp
  * inside `advanceWall` stops a backgrounded tab from fast-forwarding (§6.32).
  *
  * @param {number} now_ms the `requestAnimationFrame` timestamp, milliseconds
@@ -1461,9 +1601,11 @@ export function frame(now_ms) {
         reportError(a, 'onboarding', err);
       }
     }
+    // Cleared only when a render actually happened: a structural change that lands while the tab is
+    // backgrounded must still reach the panels on the first visible frame.
+    a.structural = false;
   }
   const tR1 = performance.now();
-  a.structural = false;
 
   // ---- perf accounting -----------------------------------------------------------------------
   const p = a.perf;
@@ -1510,8 +1652,8 @@ function drainEvents(a) {
  * Repaint the persistent chrome from the current `run`. Called once per visible frame.
  *
  * `refreshAlarms` runs every frame but early-outs on an unchanged id signature, so the banner DOM
- * is rebuilt only when the active set actually changes; `structural` forces that comparison to be
- * redone after a `config-replaced`, when the whole alarm table may have been swapped.
+ * is rebuilt only when the active set changes; `structural` forces that comparison to be redone
+ * after a `config-replaced`, when the whole alarm table may have been swapped.
  *
  * @param {object} a the application instance
  * @param {boolean} structural true when list content may have changed
@@ -1519,7 +1661,7 @@ function drainEvents(a) {
  */
 function refreshShell(a, structural) {
   const { config, run } = a.ctx;
-  if (structural) a.alarmSig = '';
+  if (structural) a.alarmSig = null;
   refreshRunBar(a, config, run);
   refreshStatusStrip(a, config, run);
   refreshAlarms(a, config, run);
@@ -1534,15 +1676,17 @@ function refreshShell(a, structural) {
  * @returns {void}
  */
 function refreshRunBar(a, config, run) {
+  const el = a.el;
   const st = run.state;
 
   // 1 — state, method, block
   const pillClass = `pill pill--lg pill--${stateTone(st)}`;
-  if (a.el.statePill.className !== pillClass) a.el.statePill.className = pillClass;
-  fmt.setText(a.el.statePill, st);
+  if (el.statePill.className !== pillClass) el.statePill.className = pillClass;
+  fmt.setText(el.statePill, st);
+  fmt.setAttr(el.statePill, 'title', stateExplanation(st));
 
-  fmt.setText(a.el.presetName, config.name || config.presetId);
-  fmt.setText(a.el.methodName, (config.method && config.method.name) || 'No method');
+  fmt.setText(el.presetName, config.name || config.presetId);
+  fmt.setText(el.methodName, (config.method && config.method.name) || 'No method');
 
   const blocks = config.method ? config.method.blocks : null;
   if (blocks && blocks.length > 0) {
@@ -1550,76 +1694,82 @@ function refreshRunBar(a, config, run) {
     const b = blocks[i];
     const prog = blockProgress(config, run);
     const pct = Number.isFinite(prog.fraction) ? Math.round(prog.fraction * 100) : 0;
-    fmt.setText(a.el.blockName, `${i + 1}/${blocks.length} · ${b.name || b.id} · ${pct}%`);
+    fmt.setText(el.blockName, `${i + 1}/${blocks.length} · ${b.name || b.id} · ${pct}%`);
+    fmt.setAttr(el.blockName, 'title', `Block ${b.id} (${b.type}) — ${pct}% delivered, `
+      + `${fmt.fmtVolume(prog.remaining_mL, config)} remaining`);
   } else {
-    fmt.setText(a.el.blockName, '—');
+    fmt.setText(el.blockName, '—');
   }
 
   // 2 — transport
   const held = st === 'HELD' || st === 'PAUSED';
-  fmt.setText(a.el.startBtn, held ? 'Continue' : 'Start');
-  setEnabled(a.el.startBtn, st === 'IDLE' || st === 'READY' || held,
-    `Cannot start from ${st}.`, held ? 'Return to RUNNING (C)' : 'Run the pre-run checks and start (Space)');
-  setEnabled(a.el.holdBtn, st === 'RUNNING',
-    `Hold is only available while RUNNING (state is ${st}).`, 'Freeze the method, keep flow at setpoint (H)');
-  setEnabled(a.el.skipBtn, st === 'RUNNING' || st === 'HELD',
+  fmt.setText(el.startBtn, held ? 'Continue' : 'Start');
+  setEnabled(el.startBtn, st === 'IDLE' || st === 'READY' || held,
+    `Cannot start from ${st}.`,
+    held ? 'Return to RUNNING (C)' : 'Run the pre-run checks and start (Space)');
+  setEnabled(el.holdBtn, st === 'RUNNING',
+    `Hold is only available while RUNNING (state is ${st}).`,
+    'Freeze the method; flow stays at setpoint (H)');
+  setEnabled(el.skipBtn, st === 'RUNNING' || st === 'HELD',
     `A block can only be skipped while RUNNING or HELD (state is ${st}).`,
-    'Hold for 400 ms to skip this block (N)');
-  setEnabled(a.el.endBtn, st === 'RUNNING' || st === 'HELD' || st === 'PAUSED' || st === 'ALARM',
+    'Skip the current block — press and hold for 400 ms (N)');
+  setEnabled(el.endBtn, st === 'RUNNING' || st === 'HELD' || st === 'PAUSED' || st === 'ALARM',
     `Cannot end from ${st}.`, 'End now, or after the current block (E)');
+
+  // At run end the bar collapses to Reset: replay and scrubbing are D26b, so there is no transport
+  // bar and no post-run cursor. The Results tab is the only post-run surface.
   const resettable = st === 'ENDED' || st === 'FAULT' || st === 'READY';
-  setEnabled(a.el.resetBtn, resettable,
+  el.resetBtn.hidden = !resettable;
+  setEnabled(el.resetBtn, resettable,
     `Reset is available from READY, ENDED and FAULT (state is ${st}).`,
     'Return to IDLE and rebuild the fluid path');
 
-  // At run end the bar collapses to Reset plus the exports — there is no transport bar (D26b).
-  const finished = st === 'ENDED' || st === 'FAULT';
-  fmt.cls(a.el.shell, 'is-finished', finished);
-  if (finished) a.el.exportGroup.removeAttribute('hidden');
-  else a.el.exportGroup.setAttribute('hidden', '');
-
   // 4 — speed
-  for (const opt of a.el.speedOpts) {
+  for (const opt of el.speedOpts) {
     const on = Number(opt.dataset.speed) === run.speed;
     fmt.cls(opt, 'is-selected', on);
     fmt.setAttr(opt, 'aria-checked', on ? 'true' : 'false');
   }
-  fmt.setText(a.el.pauseBtn, st === 'PAUSED' || st === 'HELD' ? 'Resume' : 'Pause');
-  setEnabled(a.el.pauseBtn, st === 'RUNNING' || st === 'PAUSED' || st === 'HELD',
+  const paused = st === 'PAUSED' || st === 'HELD';
+  fmt.setText(el.pauseBtn, paused ? '▶' : '❚❚');
+  fmt.setAttr(el.pauseBtn, 'aria-pressed', paused ? 'true' : 'false');
+  fmt.setAttr(el.pauseBtn, 'aria-label', paused ? 'Resume the simulation' : 'Pause the simulation');
+  setEnabled(el.pauseBtn, st === 'RUNNING' || paused,
     `Nothing is running to pause (state is ${st}).`,
-    st === 'PAUSED' || st === 'HELD' ? 'Return to RUNNING' : 'Ramp flow to zero and freeze the clock');
+    paused ? 'Return to RUNNING (P)' : 'Ramp flow to zero and freeze the clock (P)');
 
-  // The honesty readout — never claim a speed the machine is not delivering (§2.1.1).
+  // The honesty readout — never claim a speed the machine is not delivering (§2.1.1, §9.4.3).
   if (run.speedDeficit > 1.01 && st === 'RUNNING') {
-    const eff = run.speed / run.speedDeficit;
-    fmt.setText(a.el.speedNote, `${run.speed}× (limited to ${formatSpeed(eff)}×)`);
-    fmt.setAttr(a.el.speedNote, 'title',
-      'The machine cannot keep up with the requested speed. Effective speed = speed / speedDeficit.');
-    fmt.cls(a.el.speedNote, 'is-limited', true);
+    fmt.setText(el.speedNote, `${run.speed}× (limited to ${formatSpeed(run.speed / run.speedDeficit)}×)`);
+    fmt.setAttr(el.speedNote, 'title',
+      'This machine cannot keep up with the requested speed. Effective speed is '
+      + 'run.speed / run.speedDeficit; a coarser column grid buys it back.');
+    fmt.cls(el.speedNote, 'is-limited', true);
   } else {
-    fmt.setText(a.el.speedNote, `${run.speed}×`);
-    fmt.setAttr(a.el.speedNote, 'title', 'Simulated seconds per real second');
-    fmt.cls(a.el.speedNote, 'is-limited', false);
+    fmt.setText(el.speedNote, `${run.speed}×`);
+    fmt.setAttr(el.speedNote, 'title', 'Simulated seconds per real second');
+    fmt.cls(el.speedNote, 'is-limited', false);
   }
 
   // 5 — progress
-  const CV = config.column.V_mL;
-  fmt.setText(a.el.counters,
-    `${fmt.fmtVolume(run.V_tot_mL, config)} · ${fmt.fmtCV(run.V_tot_mL, config)} · ${fmt.fmtTime(run.t_s)}`);
-  const frac = methodFraction(a, config, run);
-  const pct = Math.round(frac * 100);
-  a.el.progressFill.style.width = `${pct}%`;
-  fmt.setAttr(a.el.progressTrack, 'aria-valuenow', String(pct));
-  fmt.setAttr(a.el.progressTrack, 'aria-valuetext',
-    `${pct}% of the method, ${(run.V_tot_mL / CV).toFixed(2)} column volumes delivered`);
+  fmt.setText(el.counters,
+    `${fmt.fmtVolume(run.V_tot_mL, config)} · ${fmt.fmtCV(run.V_tot_mL, config)} · ${fmt.fmtClock(run.t_s)}`);
+  const pct = Math.round(methodFraction(a, config, run) * 100);
+  if (a.progressPct !== pct) {                 // a style write per frame is a style invalidation
+    a.progressPct = pct;
+    el.progressFill.style.width = `${pct}%`;
+    fmt.setAttr(el.progressTrack, 'aria-valuenow', String(pct));
+    fmt.setAttr(el.progressTrack, 'aria-valuetext',
+      `${pct}% of the method, ${(run.V_tot_mL / config.column.V_mL).toFixed(2)} column volumes delivered`);
+  }
 
-  // 6 — mode chip
+  // 6 — mode chip, and the amber P&ID outline `.shell.is-manual` draws (§9.4.4)
   const manual = !!run.manualOverride;
-  fmt.setText(a.el.modeChip, manual ? 'MANUAL CONTROL' : 'METHOD');
+  fmt.setText(el.modeChip, manual ? 'MANUAL' : 'METHOD');
   const modeClass = `pill ${manual ? 'pill--warn' : 'pill--neutral'}`;
-  if (a.el.modeChip.className !== modeClass) a.el.modeChip.className = modeClass;
-  fmt.setAttr(a.el.modeChip, 'aria-pressed', manual ? 'true' : 'false');
-  fmt.cls(a.el.shell, 'is-manual', manual);
+  if (el.modeChip.className !== modeClass) el.modeChip.className = modeClass;
+  fmt.setAttr(el.modeChip, 'aria-pressed', manual ? 'true' : 'false');
+  fmt.cls(el.shell, 'is-manual', manual);
 }
 
 /**
@@ -1629,17 +1779,17 @@ function refreshRunBar(a, config, run) {
  */
 function advanceSkipHold(a) {
   const p = Math.min(1, (performance.now() - a.skipHold.start_ms) / SKIP_HOLD_MS);
-  a.el.skipArc.setAttribute('stroke-dashoffset', String(a.el.skipArcLength * (1 - p)));
+  fmt.setAttr(a.el.skipArc, 'stroke-dashoffset', String(a.el.skipArcLength * (1 - p)));
   if (p >= 1) {
     a.skipHold.active = false;
-    a.el.skipArc.setAttribute('stroke-dashoffset', String(a.el.skipArcLength));
+    fmt.setAttr(a.el.skipArc, 'stroke-dashoffset', String(a.el.skipArcLength));
     act(a, () => sim.skipBlock(a.ctx));
   }
 }
 
 /**
- * Overall method progress as a fraction, weighted by block VOLUME so the bar matches the phase rail.
- * `methodDemand` is cached per `config` and rebuilt on `config-replaced`.
+ * Overall method progress as a fraction, weighted by block VOLUME so the run bar's thin bar agrees
+ * with the phase rail. `methodDemand` is cached per `config` and dropped on `config-replaced`.
  * @param {object} a the application instance
  * @param {object} config the frozen config
  * @param {object} run the run state
@@ -1663,12 +1813,13 @@ function methodFraction(a, config, run) {
   const blocks = config.method.blocks;
   const b = blocks[Math.max(0, Math.min(blocks.length - 1, run.blockIndex))];
   const start = b ? (a.demandCache.startById[b.id] || 0) : 0;
-  const done = start + Math.max(0, run.V_block_mL);
-  return Math.max(0, Math.min(1, done / total));
+  return Math.max(0, Math.min(1, (start + Math.max(0, run.V_block_mL)) / total));
 }
 
 /**
- * Repaint the status strip chips.
+ * Repaint the status strip. Each chip carries its sensor's `sensorQuality` verdict as a class, and
+ * `styles/app.css` renders that as colour; the Quality chip states the verdict in words, so the
+ * information is never colour alone (§5.3, §9.7).
  * @param {object} a the application instance
  * @param {object} config the frozen config
  * @param {object} run the run state
@@ -1676,20 +1827,52 @@ function methodFraction(a, config, run) {
  */
 function refreshStatusStrip(a, config, run) {
   const s = a.el.stat;
-  fmt.setText(s.p1, fmt.fmtPressure(run.press.P1disp_bar));
-  fmt.setText(s.dp, fmt.fmtPressure(run.press.P1disp_bar - run.press.P2disp_bar));
-  fmt.setText(s.flow, fmt.fmtFlow(run.Q_actual_mLs, config));
-  fmt.setText(s.pctb, fmt.fmtPct(run.pctB_colInlet));
-  fmt.setText(s.uv, fmt.fmtAbs(run.uv.Afilt[0]));
-  fmt.setText(s.cond, fmt.fmtCond(run.cond.kappaDisp_mScm));
-  fmt.setText(s.ph, fmt.fmtPH(run.ph.pHfilt));
-  fmt.setText(s.cv, fmt.fmtCV(run.V_tot_mL, config));
-  fmt.setText(s.clock, fmt.fmtTime(run.t_s));
+  fmt.setText(s.p1.value, fmt.fmtPressure(run.press.P1disp_bar));
+  fmt.setText(s.dp.value, fmt.fmtPressure(run.press.P1disp_bar - run.press.P2disp_bar));
+  fmt.setText(s.flow.value, fmt.fmtFlow(run.Q_actual_mLs, config));
+  fmt.setText(s.pctb.value, fmt.fmtPct(run.pctB_colInlet));
+  fmt.setText(s.uv.value, fmt.fmtAbs(run.uv.Afilt[0]));
+  fmt.setText(s.cond.value, fmt.fmtCond(run.cond.kappaDisp_mScm));
+  fmt.setText(s.ph.value, fmt.fmtPH(run.ph.pHfilt));
+  fmt.setText(s.cv.value, fmt.fmtCV(run.V_tot_mL, config));
+  fmt.setText(s.clock.value, fmt.fmtClock(run.t_s));
 
-  let count = 0;
-  for (const [bit] of QF_LABELS) if ((run.qualityFlags & bit) !== 0) count++;
-  fmt.setText(s.quality, count === 0 ? 'OK' : `${count} flag${count === 1 ? '' : 's'}`);
-  fmt.cls(s.quality, 'is-flagged', count > 0);
+  let worst = 'OK';
+  for (const spec of STATUS_CHIPS) {
+    if (!spec.sensor) continue;
+    const q = sensorQuality(run, spec.sensor);
+    applyQualityClass(s[spec.key].chip, q);
+    if (q !== 'OK' && worst === 'OK') worst = q;
+    else if (q === 'INVALID') worst = 'INVALID';
+  }
+  // Flow has no sensor of its own, but an automatic flow reduction means the number on screen is
+  // not the number the method asked for, and that must be visible.
+  applyQualityClass(s.flow.chip, (run.qualityFlags & QF.FLOW_REDUCED) !== 0 ? 'SUSPECT' : 'OK');
+
+  let nFlags = 0;
+  const names = [];
+  for (const [bit, label] of QF_LABELS) {
+    if ((run.qualityFlags & bit) === 0) continue;
+    nFlags++;
+    names.push(label);
+  }
+  fmt.setText(s.quality.value, nFlags === 0 ? 'OK' : `${worst} · ${nFlags}`);
+  applyQualityClass(s.quality.chip, worst);
+  fmt.setAttr(s.quality.chip, 'title', nFlags === 0
+    ? 'Every sensor is reporting normally. Press for the per-sensor verdicts.'
+    : `${nFlags} quality flag${nFlags === 1 ? '' : 's'} set: ${names.join(' · ')}`);
+}
+
+/**
+ * Map a `sensorQuality` verdict onto the status chip's state classes.
+ * @param {Element} chip the chip element
+ * @param {'OK'|'SUSPECT'|'INVALID'|'BYPASSED'} q the verdict
+ * @returns {void}
+ */
+function applyQualityClass(chip, q) {
+  fmt.cls(chip, 'is-warn', q === 'SUSPECT');
+  fmt.cls(chip, 'is-invalid', q === 'INVALID');
+  fmt.cls(chip, 'is-off', q === 'BYPASSED');
 }
 
 /**
@@ -1720,12 +1903,13 @@ function refreshAlarms(a, config, run) {
 
   const list = a.el.alarmList;
   while (list.firstChild) list.removeChild(list.firstChild);
+  for (const def of active.slice(0, MAX_BANNERS)) list.appendChild(buildBanner(a, def, active.length));
 
-  const shown = active.slice(0, MAX_BANNERS);
-  for (const def of shown) list.appendChild(buildBanner(a, def, active.length));
-  if (active.length > MAX_BANNERS) {
-    list.appendChild(h('div', { class: 'banner__count' },
-      `+${active.length - MAX_BANNERS} more active alarm${active.length - MAX_BANNERS === 1 ? '' : 's'} — see the System tab`));
+  const extra = active.length - MAX_BANNERS;
+  if (extra > 0) {
+    list.appendChild(button('btn btn--ghost btn--sm',
+      `+${extra} more active alarm${extra === 1 ? '' : 's'} — open the System tab`,
+      () => setTab(a, 'system')));
   }
 
   const top = active[0];
@@ -1737,11 +1921,11 @@ function refreshAlarms(a, config, run) {
     fmt.setText(a.el.alarmAssertive, rank >= SEVERITY_RANK.CRITICAL ? text : '');
     fmt.setText(a.el.alarmPolite, rank > 0 && rank < SEVERITY_RANK.CRITICAL ? text : '');
   }
-  fmt.cls(a.el.shell, 'has-alarms', active.length > 0);
 }
 
 /**
- * Build one alarm banner (§9.4.2): colour bar, icon, severity word, message, detail, Ack, Silence.
+ * Build one alarm banner (§9.4.2): colour bar, glyph, severity word, message, detail, Ack, Silence
+ * and the glossary affordance.
  * @param {object} a the application instance
  * @param {object} def the `AlarmDef` row from `config.alarms`
  * @param {number} total how many alarms are active in total
@@ -1751,38 +1935,60 @@ function buildBanner(a, def, total) {
   const sev = def.severity || 'WARN';
   const banner = h('div', { class: `banner banner--${sev.toLowerCase()}` });
   banner.appendChild(h('span', { class: 'banner__bar', 'aria-hidden': 'true' }));
-  banner.appendChild(h('span', { class: 'banner__icon', 'aria-hidden': 'true' }, SEVERITY_GLYPH[sev] || '!'));
+  banner.appendChild(h('span', { class: 'banner__icon', 'aria-hidden': 'true' },
+    SEVERITY_GLYPH[sev] || '!'));
 
-  const text = h('div', { class: 'banner__text' });
-  text.appendChild(h('span', { class: 'banner__sev' }, sev));
-  text.appendChild(h('span', { class: 'banner__msg' }, def.name));
-  const g = glossaryFor(def.signal || 'alarm-state');
-  text.appendChild(h('span', { class: 'banner__detail' },
-    `${def.id} · action ${def.action}${g ? ` · ${g.term}` : ''}`));
-  banner.appendChild(text);
+  banner.appendChild(h('div', { class: 'banner__text' },
+    h('span', { class: 'banner__sev' }, sev),
+    h('span', { class: 'banner__msg' }, def.name),
+    h('span', { class: 'banner__detail' }, describeAlarm(def))));
 
   const actions = h('div', { class: 'banner__actions' });
   if (def.ackRequired || def.latching) {
-    actions.appendChild(button('btn btn--ghost', 'Ack', () => {
+    actions.appendChild(button('btn btn--ghost btn--sm', 'Ack', () => {
       act(a, () => sim.acknowledgeAlarm(a.ctx, def.id));
-      a.alarmSig = '';
+      a.alarmSig = null;
     }, { 'aria-label': `Acknowledge ${def.name}` }));
   }
-  actions.appendChild(button('btn btn--ghost', 'Silence', () => {
+  actions.appendChild(button('btn btn--ghost btn--sm', 'Silence', () => {
     a.silenced.add(def.id);
-    a.alarmSig = '';
-    toast(a, `${def.id} hidden from the banner. It stays active in the event log.`, 'info');
-  }, { 'aria-label': `Silence the banner for ${def.name}`, title: 'Hide this banner; the alarm stays active' }));
-  actions.appendChild(button('btn btn--icon', 'i', (e) => {
-    showGlossary(a, /** @type {Element} */ (e.currentTarget), def.signal || 'alarm-state');
-  }, { 'aria-label': `What ${def.name} means` }));
-  if (total > 1) actions.appendChild(h('span', { class: 'banner__count' }, `${total} active`));
+    a.alarmSig = null;
+    toast(a, `${def.id} hidden from the banner. It is still active and still in the event log.`, 'info');
+  }, {
+    'aria-label': `Silence the banner for ${def.name}`,
+    title: 'Hide this banner for the session. The alarm stays active and stays logged.',
+  }));
+  if (glossaryFor(def.signal || 'alarm-state')) {
+    const info = button('info-dot', 'i', (e) => {
+      showGlossary(a, /** @type {Element} */ (e.currentTarget), def.signal || 'alarm-state');
+    }, { 'aria-label': `What ${def.name} means` });
+    actions.appendChild(info);
+  }
+  if (total > 1) actions.appendChild(h('span', { class: 'banner__count' }, String(total)));
   banner.appendChild(actions);
   return banner;
 }
 
 /**
- * Repaint the `Ctrl+Alt+P` performance overlay (§6.32).
+ * One line of context under an alarm's name: what it watches, and what it will do about it.
+ * @param {object} def the `AlarmDef` row
+ * @returns {string} the detail line
+ */
+function describeAlarm(def) {
+  const parts = [def.id];
+  if (def.signal && def.op && typeof def.threshold === 'number') {
+    parts.push(`${def.signal} ${def.op} ${def.threshold}`);
+  } else if (def.evalKey) {
+    parts.push(def.evalKey);
+  }
+  if (def.persist_s > 0) parts.push(`held ${def.persist_s} s`);
+  parts.push(`action ${def.action}`);
+  return parts.join(' · ');
+}
+
+/**
+ * Repaint the `Ctrl+Alt+P` performance overlay (§6.32). Rows are created once and then written to,
+ * so the overlay costs a handful of text assignments per frame.
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -1790,7 +1996,7 @@ function renderPerf(a) {
   const run = a.ctx.run;
   const p = a.perf;
   const rows = [
-    ['frame', `${p.frame_ms.toFixed(1)} ms (${(1000 / Math.max(p.frame_ms, 0.001)).toFixed(0)} fps)`],
+    ['frame', `${p.frame_ms.toFixed(1)} ms · ${(1000 / Math.max(p.frame_ms, 0.001)).toFixed(0)} fps`],
     ['sim', `${p.sim_ms.toFixed(2)} ms`],
     ['render', `${p.render_ms.toFixed(2)} ms`],
     ['ticks/frame', String(p.ticks)],
@@ -1803,15 +2009,20 @@ function renderPerf(a) {
     ['courant', run.diag.courant.toFixed(3)],
     ['active cells', String(run.diag.activeCells)],
     ['nz', String(a.ctx.config.column.nz)],
+    ['boot bench', a.benchmark ? `${a.benchmark.msPerSimSecond.toFixed(2)} ms/sim-s` : 'not run'],
     ['log rows', String(run.log ? run.log.n : 0)],
   ];
-  const el = a.el.perf;
-  while (el.firstChild) el.removeChild(el.firstChild);
-  for (const [k, v] of rows) {
-    el.appendChild(h('div', { class: 'perf-overlay__row' },
-      h('span', { class: 'perf-overlay__k' }, k),
-      h('span', { class: 'perf-overlay__v num' }, v)));
+
+  if (!a.perfRows || a.perfRows.length !== rows.length) {
+    while (a.el.perf.firstChild) a.el.perf.removeChild(a.el.perf.firstChild);
+    a.perfRows = rows.map(([k]) => {
+      const value = h('span', { class: 'perf-overlay__v' }, '');
+      a.el.perf.appendChild(h('div', { class: 'perf-overlay__row' },
+        h('span', { class: 'perf-overlay__k' }, k), value));
+      return value;
+    });
   }
+  for (let i = 0; i < rows.length; i++) fmt.setText(a.perfRows[i], rows[i][1]);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1829,7 +2040,7 @@ function errText(err) {
 
 /**
  * Surface a caught error in the chrome instead of freezing. The bar is rebuilt, not stacked, so a
- * repeating fault does not grow the DOM without bound.
+ * fault that repeats every frame does not grow the DOM without bound.
  * @param {object} a the application instance
  * @param {string} source where it came from, e.g. `'run view'`
  * @param {*} err the thrown value
@@ -1837,23 +2048,23 @@ function errText(err) {
  */
 function reportError(a, source, err) {
   console.error(`[app] ${source} failed:`, err);
-  if (!a.el.shell) return;
-  if (a.el.errorBar && a.el.errorBar.parentNode) a.el.errorBar.parentNode.removeChild(a.el.errorBar);
-  const bar = h('div', { class: 'shell-error', role: 'alert' });
-  bar.appendChild(h('span', { class: 'shell-error__msg' }, `${source}: ${errText(err)}`));
+  const slot = a.el && a.el.errorSlot;
+  if (!slot) return;
+  while (slot.firstChild) slot.removeChild(slot.firstChild);
+
+  const bar = h('div', { class: 'shell-error', role: 'alert' },
+    h('span', { class: 'shell-error__msg' }, `${source}: ${errText(err)}`));
   const actions = h('div', { class: 'shell-error__actions' });
-  actions.appendChild(button('btn btn--ghost', 'Copy details', () => {
+  actions.appendChild(button('btn btn--ghost btn--sm', 'Copy details', () => {
     const text = `${source}: ${errText(err)}\n${(err && err.stack) || ''}`;
     if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text);
     else console.log(text);
   }));
-  actions.appendChild(button('btn btn--ghost', 'Dismiss', () => {
-    if (bar.parentNode) bar.parentNode.removeChild(bar);
-    if (a.el.errorBar === bar) a.el.errorBar = null;
+  actions.appendChild(button('btn btn--ghost btn--sm', 'Dismiss', () => {
+    while (slot.firstChild) slot.removeChild(slot.firstChild);
   }));
   bar.appendChild(actions);
-  a.el.errorBar = bar;
-  a.el.shell.insertBefore(bar, a.el.alarmList ? a.el.alarmList.parentNode : a.el.shell.firstChild);
+  slot.appendChild(bar);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1874,6 +2085,25 @@ function stateTone(st) {
     case 'ALARM': return 'alarm';
     case 'FAULT': return 'alarm';
     default: return 'neutral';
+  }
+}
+
+/**
+ * One sentence explaining what a run state permits — the pill's tooltip (§5.5).
+ * @param {string} st a `run.state` value
+ * @returns {string} the explanation
+ */
+function stateExplanation(st) {
+  switch (st) {
+    case 'IDLE': return 'Idle — pumps at zero. Start runs the twelve pre-run checks first.';
+    case 'READY': return 'Ready — the pre-run checks passed. Start begins the method.';
+    case 'RUNNING': return 'Running — the method engine is driving the skid.';
+    case 'HELD': return 'Held — flow continues at setpoint; the block clock and block volume are frozen.';
+    case 'PAUSED': return 'Paused — flow has ramped to zero and the clock is frozen.';
+    case 'ALARM': return 'Alarm — the outlet is diverted to waste. Acknowledge, then Hold or Pause.';
+    case 'ENDED': return 'Ended — the Results tab has the analysis. Reset to arm another run.';
+    case 'FAULT': return 'Fault — flow stopped without a ramp. Only Reset recovers.';
+    default: return 'Run state';
   }
 }
 

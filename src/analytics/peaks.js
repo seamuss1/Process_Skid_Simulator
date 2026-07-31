@@ -614,6 +614,44 @@ function argMin(y, a, b) {
 }
 
 /**
+ * TOPOGRAPHIC prominence of the apex at `i` — the apex height above the higher of its two key
+ * cols, where a key col is the lowest point reached walking outward until a sample STRICTLY
+ * HIGHER than the apex (or the end of the trace) is met.
+ *
+ * NOT the drop to the two perpendicular-drop valleys that bound the integration window. Those
+ * valleys are the minima to the IMMEDIATELY ADJACENT apexes, so every fragment of a group that
+ * shares one summit — the ripples on a saturated flat top, the shoulders of a fused pair, the
+ * chatter on a noisy apex — measures its own height against a neighbour of the SAME height and
+ * scores ~0. Under the §2.4 default `p_min` that deletes the whole group, including the tallest
+ * member: a detector-clipped peak of true prominence 0.5 AU/cm (25x `p_min`) came back as zero
+ * peaks, and so did the 1.0 AU/cm apex of a 0.3 %-noise trace. §4.3 mitigation 5 requires the
+ * clipped peak to be REPORTED (flat-topped and flagged), which is only possible if the gate
+ * measures the summit against the baseline it actually stands on.
+ *
+ * The window-relative drop is still the right quantity for the SUSPECT flag — "this apex is not
+ * well separated from its neighbour" — and `detectPeaks` keeps computing it for exactly that.
+ *
+ * @param {ArrayLike<number>} y - the smoothed trace.
+ * @param {number} n - sample count.
+ * @param {number} i - apex index.
+ * @returns {number} prominence in the units of `y` (>= 0).
+ */
+function prominenceAt(y, n, i) {
+  const h = y[i];
+  let leftCol = h;
+  for (let k = i - 1; k >= 0; k--) {
+    if (y[k] > h) break;
+    if (y[k] < leftCol) leftCol = y[k];
+  }
+  let rightCol = h;
+  for (let k = i + 1; k < n; k++) {
+    if (y[k] > h) break;
+    if (y[k] < rightCol) rightCol = y[k];
+  }
+  return h - (leftCol > rightCol ? leftCol : rightCol);
+}
+
+/**
  * Detect and fully characterise peaks on THE uniform-volume grid.
  *
  * Detection runs on `ySmooth`/`dySmooth`; every MEASUREMENT (area, moments, widths, apex) runs on
@@ -631,11 +669,14 @@ function argMin(y, a, b) {
  *   w_min?:number, path_cm?:number, baseline?:'zero'|'anchored'}} [opts] - `A_on_AUcm` absolute
  *   apex-height gate (AU/cm); `f_on` apex-height gate as a fraction of the tallest peak;
  *   `s_on` minimum leading slope (AU/cm per mL); `s_off` trailing slope that must be reached
- *   (magnitude is used, sign is forced negative); `p_min` minimum prominence (AU/cm);
- *   `w_min` minimum baseline-window width (mL); `path_cm` flow-cell pathlength (cm, reporting
- *   only); `baseline` integration baseline.
+ *   (magnitude is used, sign is forced negative); `p_min` minimum TOPOGRAPHIC prominence (AU/cm,
+ *   see `prominenceAt`); `w_min` minimum peak equivalent width `area / A_max` (mL — the §2.4
+ *   spike rejector; it is NOT the span of the integration window); `path_cm` flow-cell
+ *   pathlength (cm, reporting only); `baseline` integration baseline.
  * @returns {Array<object>} Peak objects per §5.11.1, ascending in `VR_mL`. Volumes mL, heights
  *   AU/cm, areas AU/cm·mL, `mu2_mL2` mL², `HETP_cm` cm, plate counts and flags dimensionless.
+ *   `prominence_AUcm` is the topographic prominence the `p_min` gate was applied to (AU/cm), and
+ *   is reported so an operator can see why a shoulder was or was not kept.
  */
 export function detectPeaks(config, grid, ySmooth, dySmooth, opts) {
   const o = opts || {};
@@ -664,19 +705,35 @@ export function detectPeaks(config, grid, ySmooth, dySmooth, opts) {
 
   _ycScratch = ensureF64(_ycScratch, n);
 
+  // TWO STAGES, and the order matters. The height and prominence gates are properties of the
+  // apex and the trace alone, so they are applied FIRST; the perpendicular-drop boundaries are
+  // then drawn between the apexes that survived. Drawing the boundaries against every raw apex
+  // instead would let a rejected one cut a real peak's integration window in half — apex chatter
+  // on a 0.3 %-noise trace does exactly that, and halves the reported area of the product peak.
+  const kept = [];
+  const proms = [];
   for (let a = 0; a < apexes.length; a++) {
     const iApex = apexes[a];
     if (!(ySmooth[iApex] >= heightGate)) continue;
+    const prom = prominenceAt(ySmooth, n, iApex);
+    if (!(prom >= p_min)) continue;
+    kept.push(iApex);
+    proms.push(prom);
+  }
 
-    const leftLimit = a === 0 ? 0 : apexes[a - 1];
-    const rightLimit = a === apexes.length - 1 ? n - 1 : apexes[a + 1];
+  for (let a = 0; a < kept.length; a++) {
+    const iApex = kept[a];
+    const leftLimit = a === 0 ? 0 : kept[a - 1];
+    const rightLimit = a === kept.length - 1 ? n - 1 : kept[a + 1];
     const iStart = argMin(ySmooth, leftLimit, iApex);
     const iEnd = argMin(ySmooth, iApex, rightLimit);
     if (iEnd - iStart < 3) continue;
 
-    const prominence = ySmooth[iApex] - Math.max(ySmooth[iStart], ySmooth[iEnd]);
-    if (!(prominence >= p_min)) continue;
-    if (!(V[iEnd] - V[iStart] >= w_min)) continue;
+    // TWO DIFFERENT QUANTITIES, deliberately. `prominence_AUcm` is topographic (see
+    // `prominenceAt`) and is what `p_min` gated above; `windowDrop` is the drop to the two
+    // perpendicular-drop valleys that bound the integration window, and is what SUSPECT is about.
+    const prominence_AUcm = proms[a];
+    const windowDrop = ySmooth[iApex] - Math.max(ySmooth[iStart], ySmooth[iEnd]);
 
     let maxRise = -Infinity;
     for (let k = iStart; k <= iApex; k++) if (dySmooth[k] > maxRise) maxRise = dySmooth[k];
@@ -695,6 +752,20 @@ export function detectPeaks(config, grid, ySmooth, dySmooth, opts) {
     const Amax_AUcm = apexInfo.Amax_AUcm;
 
     const mom = moments(V, yRaw, iStart, iEnd, baselineFn);
+
+    // THE w_min GATE, on the width of the PEAK — not on the span of the window that contains it.
+    // §2.4 sets `w_min = 5 x dV_log` expressly to reject spikes (bubbles), and the window span
+    // cannot do that job: an isolated one-sample spike is smoothed into side lobes that make its
+    // perpendicular-drop window 0.160 mL wide, sixteen times the 0.05 mL default, so the gate
+    // never fired at its documented setting. The measure used instead is the EQUIVALENT WIDTH
+    // `area / A_max` — the width of the rectangle of the same area and height, taken off the
+    // baseline-corrected RAW trace as §5.11.1 requires every measurement to be. It is 0.0100 mL
+    // for the one-sample spike (exactly one sample, which is what "spike" means) against
+    // 5.013 mL for a sigma = 2 mL Gaussian, and unlike W_50 it is always defined: a truncated,
+    // fused or flat-topped peak has no half-height crossing but still has an area and a height,
+    // and none of those may be silently dropped by a width gate.
+    const wEq_mL = (Amax_AUcm > 0) ? mom.area / Amax_AUcm : 0;
+    if (w_min > 0 && !(wEq_mL >= w_min)) continue;
 
     const w50 = widthAt(V, yc, iApex, iStart, iEnd, 0.5);
     const w10 = widthAt(V, yc, iApex, iStart, iEnd, 0.1);
@@ -733,11 +804,11 @@ export function detectPeaks(config, grid, ySmooth, dySmooth, opts) {
       !Number.isFinite(w05.width_mL) || !Number.isFinite(Wb_mL);
     const suspect = iStart === 0 || iEnd === n - 1 ||
       (Number.isFinite(truncFrac) && truncFrac > 0.01) ||
-      (Amax_AUcm > 0 && prominence < 0.5 * ySmooth[iApex]);
+      (Amax_AUcm > 0 && windowDrop < 0.5 * ySmooth[iApex]);
 
     out.push({
       iStart, iApex, iEnd,
-      VR_mL, Amax_AUcm,
+      VR_mL, Amax_AUcm, prominence_AUcm,
       area_AUcm_mL: mom.area,
       mu1_mL: mom.mu1, mu2_mL2: mom.mu2, sigma_mL: mom.sigma, skew: mom.skew,
       W50_mL: w50.width_mL, W10_mL: w10.width_mL, W05_mL: w05.width_mL, Wb_mL,

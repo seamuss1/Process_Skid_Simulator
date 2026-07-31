@@ -372,7 +372,15 @@ export function massBalance(config, run) {
     res.out_umol[i] = outU;
     res.pool_umol[i] = run.massPool_umol[i];
     res.defect_umol[i] = run.massDefect_umol[i];
-    res.xi[i] = (inU - outU - res.column_umol[i] - res.defect_umol[i]) / Math.max(inU, 1e-12);
+    // SIGN. `defect_umol` is `col.massClamped_umol`, which accumulates the mass the unsafe clamps
+    // CREATED (`massClamped += -c*Vcell` when a negative c is raised to zero), so it enters the
+    // balance on the SAME side as the inflow: in + defect = out + accumulation. Subtracting it
+    // double-counts — the clamped mass is already inside `column_umol`, because
+    // physics/column.js maintains `mass0 + in - out + clamped = now` and `column_umol` is
+    // `now - mass0`, so `in - out - column` is IDENTICALLY `-clamped` before `defect` is even
+    // applied. With the wrong sign xi comes out at exactly -2*defect/in (Na -2.9e-5 on the
+    // shipped run) and DoD 7's |xi| < 1e-6 is unreachable no matter how clean the solver is.
+    res.xi[i] = (inU - outU + res.defect_umol[i] - res.column_umol[i]) / Math.max(inU, 1e-12);
   }
 
   // Logging-fidelity diagnostic: re-integrate the detector-plane truth channels against the logged

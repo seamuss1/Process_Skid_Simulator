@@ -24,7 +24,7 @@
  *
  * ================================ VERIFIED ANCHORS ====================================
  *   acetate pKa' at I = 0.1 / 1.0            -> 4.5460 / 4.4878   (the Ie <= 0.39 clamp is why)
- *   50 mM acetate, pH 5.00, required Na+     -> 35.54 mM  (contract prints 35.532; see NOTE-A)
+ *   50 mM acetate, pH 5.00, required Na+     -> 35.542 mM (contract prints 35.532; see NOTE-A)
  *   20 mM Tris,    pH 8.00, required Cl-     -> 10.690 mM (z0 = +1 so 2(1-z) = 0, zero shift)
  *   20 mM phosphate, pH 7.00, required Na+   -> 31.406 mM (exact)
  *   Buffer A (50 mM AcT, pH 5.00, Na 50 tot) -> titrant 36.014 mM, NaCl 13.986, I 0.0500
@@ -435,8 +435,11 @@ function saltIonIsCation(config, ion) {
  * 1000*([H+]-[OH-]) here would shift the titrant by the 0.01 mM of free proton at pH 5 and
  * break that identity. Every shipped buffer sits between pH 3.8 and 9.0, where the omitted term
  * is below 0.01 mM. It is also what reproduces the contract's 36.014 / 13.986 / 38.243 exactly;
- * the standalone 50 mM acetate anchor then lands at 35.54 against the printed 35.532
- * (2.2e-4 relative, well inside any stated tolerance).
+ * the standalone 50 mM acetate anchor then lands at 35.542 against the printed 35.532.
+ * THE PRINTED 35.532 IS A CONTRACT ERROR, not a tolerance: the 0.009917 mM gap is exactly the
+ * omitted 1000*([H+] - [OH-]) = 0.0100 mM at pH 5.00, so 35.532 is the answer to the charge
+ * balance §7.2.4 forbids. §6.6 cannot have both that anchor and §7.2.4's exactness guarantee;
+ * the anchor is the one to reprint (tests/chem.test.js C-28 carries the derivation).
  *
  * @param {object} config frozen config; reads `config.species`, `config.idxById`, `config.chem`
  * @param {{buffers:Array<{speciesId:string, total_mM:number, bufferId?:string, pKas?:number[]}>,

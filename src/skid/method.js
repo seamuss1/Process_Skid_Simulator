@@ -742,9 +742,12 @@ export function validateMethod(config, method) {
           x.gradient.endPctB = clamp(x.gradient.endPctB, 0, 100);
         }) });
     }
-    // flow
+    // flow — HOLD is exempt, exactly as it is in engine.js's PRC-04. A hold parks the skid with
+    // the pumps stopped, so Q = 0 is its correct flow; demanding Q >= Qmin here rejected three of
+    // the four shipped presets outright and left Start doing nothing, because a terminal HOLD that
+    // also bypasses the column must be at zero flow or the valve interlock trips.
     const Q_mLs = blockFlow_mLs(config, b, prevEnabled);
-    if (!Number.isFinite(Q_mLs) || Q_mLs < Qmin || Q_mLs > Qmax) {
+    if (b.type !== 'HOLD' && (!Number.isFinite(Q_mLs) || Q_mLs < Qmin || Q_mLs > Qmax)) {
       issue(errors, b.id, 'flow.value', 'error', 'FLOW_RANGE',
         'Resolved flow ' + (Number.isFinite(Q_mLs) ? (Q_mLs * 60).toFixed(2) + ' mL/min' : 'unresolved')
         + ' is outside [' + (Qmin * 60).toFixed(2) + ', ' + (Qmax * 60).toFixed(2) + '] mL/min.',

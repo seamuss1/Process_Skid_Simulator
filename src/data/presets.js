@@ -842,8 +842,12 @@ const TEMPLATE_IEX_STEP = [
 
 const TEMPLATE_SEC = [
   { type: 'EQUILIBRATION', cv: 2, flow: 25, pctB: 0, inlets: { a: 'A1', b: 'B1', sample: null } },
-  { type: 'LOAD', cv: 0.02, flow: 25, pctB: 0, inlets: { a: 'A1', b: 'B1', sample: 'S1' },
-    sample: 'LOOP_INJECT' },
+  // A LOOP_INJECT block must carry its loop volume or validateMethod rejects the template with
+  // LOOP_VOLUME_MISSING the moment it is picked. Sized in mL rather than CV because a sample loop
+  // is fixed hardware and does not scale with the column, and the load runs long enough to sweep
+  // ~2.5 loop volumes, which is what actually flushes a loop.
+  { type: 'LOAD', mL: 5, flow: 25, pctB: 0, inlets: { a: 'A1', b: 'B1', sample: 'S1' },
+    sample: 'LOOP_INJECT', loopVolume_mL: 2.0 },
   { type: 'ELUTION_ISOCRATIC', cv: 1.5, flow: 25, pctB: 0,
     inlets: { a: 'A1', b: 'B1', sample: null }, frac: 'PEAK' },
 ];
@@ -1231,17 +1235,38 @@ function buildTanks(def, draft) {
 }
 
 /**
- * Freeze `ionisedFraction` from the reference (inlet A1) tank's solved pH and the Davies-adjusted
+ * Freeze `ionisedFraction` from the reference (inlet A1) tank's RECIPE pH and the Davies-adjusted
  * pKa ladder. Acetate at pH 5.00, pKa' 4.5892 gives 0.72028, so 50 mM AcT contributes 36.014 mM of
  * co-ion equivalent and the Donnan group sums balance exactly (§7.2.4, §5.8.2).
  * Per-cell speciation inside the bed is deferred (D3) — this is a frozen approximation on purpose.
+ *
+ * WHICH pH (this is not cosmetic — it is §7.2.4's exactness guarantee):
+ * the RECIPE pH the tank was titrated to (5.00000) and the ionic strength `solveCounterIon`
+ * converged on, NOT `derived.pH` / `derived.I_molL`, which are what `solvePH` reports for the
+ * finished vector (5.00042). The two differ by 4.2e-4 pH because the recipe solve deliberately
+ * omits the water term the pH solve carries (chem/ph.js NOTE-A). Taking the solved value moves
+ * the co-ion sum by 0.010 mM and the acetate fraction from 0.72028 to 0.72048, which leaves
+ * Na = 50.000 against Cl + f*AcT = 50.010 — i.e. the Donnan group sums C and A are no longer
+ * equal and the shipped tank is no longer charge balanced. `chem/ph.js::buildTankVector` step 7
+ * already writes the recipe-pH value for exactly this reason; this pass exists only to pin every
+ * species to ONE reference tank (buildTankVector runs per tank, so Buffer B would otherwise win),
+ * and it must not re-derive from a different pH than the one that made the vector.
  */
-function deriveIonisedFractions(species, tanks, inletAssignments) {
+function deriveIonisedFractions(config, species, tanks, inletAssignments) {
   const refId = inletAssignments && inletAssignments.A1;
   const ref = tanks.find((t) => t.id === refId) || tanks[0];
   if (!ref) return;
-  const pH = ref.derived.pH;
-  const I_molL = ref.derived.I_molL;
+  let pH = ref.derived.pH;
+  let I_molL = ref.derived.I_molL;
+  const refComp = ref.composition || {};
+  const refTitrated = Array.isArray(refComp.buffers) && refComp.buffers.length > 0
+    && refComp.targetPH !== null && refComp.targetPH !== undefined;
+  if (refTitrated) {
+    const scratch = { cation_mM: 0, anion_mM: 0, I_molL: 0, pH: 7 };
+    solveCounterIon(config, refComp, refComp.targetPH, ref.T_C, scratch);
+    pH = refComp.targetPH;
+    I_molL = scratch.I_molL;
+  }
   const H_molL = Math.pow(10, -pH);
   for (const s of species) {
     if (s.charge === 0) { s.ionisedFraction = 1.0; continue; }   // |z| = 0 makes this a no-op
@@ -1369,7 +1394,7 @@ export function normalizePreset(presetId, overrides) {
   draft.sim.speedOptions = (draft.sim.speedOptions || SIM_DEFAULTS.speedOptions).slice();
 
   draft.tanks = buildTanks(def, draft);
-  deriveIonisedFractions(species, draft.tanks, draft.inletAssignments);
+  deriveIonisedFractions(draft, species, draft.tanks, draft.inletAssignments);
 
   const tankIndexById = new Map();
   for (let i = 0; i < draft.tanks.length; i++) tankIndexById.set(draft.tanks[i].id, i);
@@ -1379,13 +1404,32 @@ export function normalizePreset(presetId, overrides) {
 
   draft.alarms = buildAlarms(def, scaleRow, tankIndexById);
 
-  const phasesSrc = def.methodPhases;
-  const phases = typeof phasesSrc === 'function' ? phasesSrc(draft) : (phasesSrc || []);
-  let method = expandPresetMethod(draft, phases);
-  method = Object.assign(method, {
-    schemaVersion: SCHEMA_VERSION,
-    scale: def.scale,
-  }, def.methodMeta || {});
+  // A COMPLETE method supplied through the overrides wins over the preset's phase shorthand.
+  // This branch is what makes sim.loadMethod work at all: rebuild() hands the edited method in as
+  // `overrides.method`, and without it the override was silently discarded and the preset's own
+  // method rebuilt in its place — so every edit in the method editor reported success and changed
+  // nothing. Only `methodMeta` is preset-authored and must not clobber an authored method's own
+  // name/notes, so it is applied on the shorthand path only.
+  const authored = def.method;
+  const hasAuthored = !!authored && typeof authored === 'object'
+    && Array.isArray(authored.blocks) && authored.blocks.length > 0;
+
+  let method;
+  if (hasAuthored) {
+    method = Object.assign(cloneAuthored(authored), {
+      schemaVersion: SCHEMA_VERSION,
+      scale: def.scale,
+    });
+  } else {
+    const phasesSrc = def.methodPhases;
+    const phases = typeof phasesSrc === 'function' ? phasesSrc(draft) : (phasesSrc || []);
+    method = Object.assign(expandPresetMethod(draft, phases), {
+      schemaVersion: SCHEMA_VERSION,
+      scale: def.scale,
+    }, def.methodMeta || {});
+  }
+  // Patches apply on both paths: a scenario's methodPatches must still land when the operator has
+  // already loaded a method of their own. Patches for block ids that are absent simply no-op.
   method = applyMethodPatches(method, def.methodPatches);
   method = normalizeMethod(draft, method);
   resolveWatchSignals(method, tankIndexById);

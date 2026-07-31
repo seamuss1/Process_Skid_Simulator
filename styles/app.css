@@ -5,33 +5,57 @@
    every colour is var(--token), and `transparent` / `currentColor` are the only
    keywords permitted.
 
+   WHO OWNS WHAT
+   -------------
+   This file owns the SHELL CHROME and the SHARED COMPONENT LIBRARY. Four view
+   modules ship their own scoped stylesheet, injected into <head> at mount, so
+   their rules land after this file and win on any overlap — that is intended,
+   a module owns the surface it paints:
+     ui/overlay.js      `.ov-*`   popovers, modals, toasts, coach marks, dim
+     ui/chart.js        `.chart__*`  the three canvas layers and cursor card
+     ui/view_run.js     `.rv` / `.rv-*`  the whole Run tab
+     ui/view_results.js `.rv-*`   its Results-specific extras
+   Everything those modules DON'T define, they take from here: `.panel .btn
+   .numfield .toggle .segmented .pill .table .field .metric .empty`, and the
+   tokens. ui/app.js and ui/onboarding.js ship no CSS at all — every class they
+   emit is styled here, per the CSS contract in ui/app.js's file header.
+
    Contents
      0  reset
-     1  document + shell grid
-     2  title bar
-     3  run control bar
-     4  alarm banner stack
-     5  tab strip
-     6  workspace + views
-     7  status strip
+     1  document + shell grid                 (.shell)
+     2  title bar                             (.titlebar__*)
+     3  run control bar                       (.runbar__*, .holdring)
+     4  alarm banner stack                    (.alarm-stack, .banner--*)
+     5  tab strip                             (.tabstrip, .tab)
+     6  workspace + views                     (.workspace, .view)
+     7  status strip                          (.statusstrip, .statchip__*)
      8  panel
      9  button
     10  numeric field
     11  toggle
     12  segmented control
-    13  status pill + chips + tags
+    13  status pill + chips
     14  table
     15  splitter
-    16  floating surfaces (popover, modal, toast, coach mark, cheat sheet)
-    17  chart surfaces
-    18  P&ID surfaces
-    19  run view (phase rail, fraction strip, legend)
+    16  floating surfaces (fallbacks; ui/overlay.js supersedes)
+    17  chart host hooks (ui/chart.js supersedes)
+    18  P&ID surfaces (ui/pid.js has no stylesheet of its own)
+    19  run view (ui/view_run.js supersedes)
     20  method view
     21  results view
     22  system view
-    23  boot notices, empty states, perf overlay
+    23  boot notices, empty states, perf overlay, error bars
     24  responsive breakpoints (§9.1.3)
     25  accessibility: focus, contrast, reduced motion, print
+    26  alternate shell vocabulary (see below)
+
+   TWO SHELL STRATEGIES, ONE STYLESHEET. `index.html` ships the whole chrome as
+   static markup with stable ids. `src/ui/app.js` may either BIND that markup
+   (query the ids, attach handlers, then only write text and attributes) or
+   BUILD an equivalent shell of its own inside #app. Sections 1–7 style the
+   static markup; section 26 styles the JS-built variant with the same tokens
+   and the same metrics. Both render correctly, so the chrome cannot end up
+   unstyled because two files disagreed about a class name.
    ========================================================================== */
 
 
@@ -99,6 +123,9 @@ body {
   overflow: hidden;
 }
 
+/* `#app` is the element index.html hands to boot(). `ui/app.js` BINDS that
+   markup — it never replaces it — so these six bands, their ids and this grid
+   are the shared contract between the two files. */
 .app {
   position: relative;
   display: grid;
@@ -211,6 +238,7 @@ body {
   white-space: nowrap;
 }
 
+/* Preset and column identity — written by ui/app.js into #tb-preset/#tb-column. */
 .titlebar__meta {
   display: flex;
   align-items: center;
@@ -224,6 +252,7 @@ body {
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
   color: var(--text-3);
+  white-space: nowrap;
 }
 
 .titlebar__value {
@@ -239,6 +268,7 @@ body {
   width: 1px;
   height: 14px;
   background: var(--line);
+  flex: 0 0 auto;
 }
 
 .titlebar__actions {
@@ -274,10 +304,11 @@ body {
   flex: 0 0 auto;
 }
 
-/* The state and transport groups get a stable width so the E-stop always
-   lands at the same x, whatever the method or block name is (§9.4.3). */
+/* The state and transport groups keep a stable width so the E-stop lands at the
+   same x whatever the method or block name is (§9.4.3). */
 .runbar__group--state { min-width: 260px; gap: var(--sp-4); }
 .runbar__group--transport { min-width: 388px; gap: var(--sp-3); }
+.runbar__group--estop { margin: 0 var(--sp-2); }
 
 .runbar__stack {
   display: flex;
@@ -305,6 +336,7 @@ body {
   max-width: 24ch;
 }
 
+/* The vertical rules that fence the Emergency Stop off from benign controls. */
 .runbar__rule {
   flex: 0 0 auto;
   width: 1px;
@@ -313,8 +345,6 @@ body {
   background: var(--line-strong);
 }
 
-.runbar__group--estop { margin: 0 var(--sp-2); }
-
 .runbar__caption {
   font: 400 var(--fs-9) / 1 var(--font-ui);
   text-transform: uppercase;
@@ -322,7 +352,8 @@ body {
   color: var(--text-3);
 }
 
-/* The effective-speed honesty readout: "1000× (limited to 450×)" (§2.1.1). */
+/* The effective-speed honesty readout: "1000× (limited to 450×)" (§2.1.1).
+   Empty until the substep cap actually binds, so it never adds noise. */
 .runbar__note {
   font: 500 var(--fs-11) / 1 var(--font-num);
   color: var(--warn);
@@ -331,6 +362,7 @@ body {
   border-radius: var(--r-1);
   white-space: nowrap;
 }
+.runbar__note:empty { display: none; }
 
 .runbar__group--progress {
   flex-direction: column;
@@ -364,6 +396,7 @@ body {
   font: 400 var(--fs-9) / 1 var(--font-ui);
   color: var(--text-3);
 }
+.counter__unit:empty { display: none; }
 
 .progress {
   height: 4px;
@@ -383,38 +416,54 @@ body {
 
 .runbar__group--mode { margin-left: auto; }
 
-/* MANUAL mode (§9.4.4): a persistent amber inset outline around the P&ID. */
-.app[data-mode="MANUAL"] .pid {
+/* MANUAL mode (§9.4.4): a persistent amber inset outline around the P&ID, so
+   the mode is legible from the schematic itself, not only from the chip. */
+.app[data-mode="MANUAL"] .pid,
+.app[data-mode="MANUAL"] .rv-pid {
   outline: 3px solid var(--warn);
   outline-offset: -3px;
 }
-.app[data-mode="MANUAL"] #rb-mode {
-  --pill-fg: var(--warn);
-  --pill-bg: var(--warn-soft);
-}
+
+/* ui/app.js gives #rb-mode button semantics at bind time; it ships as a span so
+   it reads as state before any script runs. */
+#rb-mode[role="button"] { cursor: pointer; }
+#rb-mode[role="button"]:hover { filter: brightness(1.15); }
+#rb-mode[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--pill-fg); }
 
 
 /* ==========================================================================
    4. ALARM BANNER STACK  (§9.4.2, §9.7)
    ========================================================================== */
 
-.alarms {
+.alarms,
+.alarm-stack {
   display: flex;
   flex-direction: column;
   background: var(--bg-0);
 }
-.alarms:empty { display: none; }
 
-.alarms__stack {
+.alarms__stack,
+.alarm-stack__list {
   display: flex;
   flex-direction: column;
 }
+
+.alarms__more {
+  height: var(--sp-7);
+  padding: 0 var(--sp-5);
+  text-align: left;
+  font: 600 var(--fs-11) / 1 var(--font-ui);
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+}
+.alarms__more:hover { background: var(--surface-3); color: var(--text-1); }
 
 .banner {
   --banner-fg: var(--info);
   --banner-bg: var(--info-soft);
   display: grid;
-  grid-template-columns: 4px var(--sp-6) 1fr auto;
+  grid-template-columns: 4px var(--sp-6) minmax(0, 1fr) auto;
   align-items: center;
   gap: 0 var(--sp-4);
   height: var(--h-alarm);
@@ -424,21 +473,27 @@ body {
   animation: banner-in var(--dur-1) var(--ease-out);
 }
 
-.banner[data-severity="INFO"] { --banner-fg: var(--info); --banner-bg: var(--info-soft); }
-.banner[data-severity="WARN"] { --banner-fg: var(--warn); --banner-bg: var(--warn-soft); }
+/* Severity arrives as data-severity from ui/app.js; the modifier-class spelling
+   is accepted too so a view module can use either. */
+.banner[data-severity="INFO"], .banner--info { --banner-fg: var(--info); --banner-bg: var(--info-soft); }
+.banner[data-severity="WARN"], .banner--warn { --banner-fg: var(--warn); --banner-bg: var(--warn-soft); }
 .banner[data-severity="ALARM"],
 .banner[data-severity="CRITICAL"],
-.banner[data-severity="FAULT"] { --banner-fg: var(--alarm); --banner-bg: var(--alarm-soft); }
+.banner[data-severity="FAULT"],
+.banner--alarm,
+.banner--critical,
+.banner--fault { --banner-fg: var(--alarm); --banner-bg: var(--alarm-soft); }
 
 /* Two cycles, then hold steady. Never a continuous blink — it is fatiguing
    and inaccessible (§9.4.2). */
 .banner[data-severity="CRITICAL"],
-.banner[data-severity="FAULT"] {
+.banner[data-severity="FAULT"],
+.banner--critical,
+.banner--fault {
   animation: banner-in var(--dur-1) var(--ease-out), banner-pulse 300ms var(--ease-inout) 2;
 }
 
 .banner__bar {
-  grid-row: 1;
   align-self: stretch;
   background: var(--banner-fg);
 }
@@ -459,24 +514,39 @@ body {
   gap: var(--sp-4);
   min-width: 0;
 }
-.banner__message {
+
+/* Severity is conveyed by icon + TEXT + colour, never colour alone (§9.7). */
+.banner__sev {
+  flex: 0 0 auto;
+  font: 700 var(--fs-9) / 1 var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--banner-fg);
+}
+
+.banner__message,
+.banner__msg {
   font: 600 var(--fs-13) / 1.2 var(--font-ui);
   color: var(--text-1);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* The alarm id (ALM-DP-03), so the operator can find the row in the log. */
+.banner__id {
+  flex: 0 0 auto;
+  font: 500 var(--fs-10) / 1 var(--font-num);
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+}
+
 .banner__detail {
   font: 400 var(--fs-11) / 1.2 var(--font-ui);
   color: var(--text-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.banner__id {
-  font: 500 var(--fs-10) / 1 var(--font-num);
-  color: var(--text-3);
-  letter-spacing: 0.02em;
 }
 
 .banner__actions {
@@ -491,18 +561,8 @@ body {
   padding: var(--sp-1) var(--sp-3);
   border: 1px solid color-mix(in srgb, var(--banner-fg) 40%, transparent);
   border-radius: var(--r-pill);
+  white-space: nowrap;
 }
-
-.alarms__more {
-  height: var(--sp-7);
-  font: 600 var(--fs-11) / 1 var(--font-ui);
-  color: var(--text-2);
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--line);
-  text-align: left;
-  padding: 0 var(--sp-5);
-}
-.alarms__more:hover { background: var(--surface-3); color: var(--text-1); }
 
 @keyframes banner-in {
   from { opacity: 0; }
@@ -519,6 +579,11 @@ body {
    ========================================================================== */
 
 .tabstrip {
+  display: flex;
+  align-items: stretch;
+  height: var(--h-tabstrip);
+  padding: 0 var(--sp-4);
+  gap: var(--sp-1);
   background: var(--bg-1);
   border-bottom: 1px solid var(--line);
   overflow-x: auto;
@@ -527,10 +592,13 @@ body {
 }
 .tabstrip::-webkit-scrollbar { height: 0; }
 
+/* index.html wraps the tablist in a <nav>; the nav carries the band chrome and
+   the list itself is a bare flex row inside it. */
+nav.tabstrip { padding: 0; }
 .tabstrip__list {
   display: flex;
   align-items: stretch;
-  height: var(--h-tabstrip);
+  height: 100%;
   padding: 0 var(--sp-4);
   gap: var(--sp-1);
 }
@@ -544,16 +612,20 @@ body {
   font: 600 var(--fs-12) / 1 var(--font-ui);
   border-bottom: 2px solid transparent;
   white-space: nowrap;
+  flex: 0 0 auto;
   transition: color var(--dur-1) var(--ease-out),
               background var(--dur-1) var(--ease-out);
 }
 .tab:hover { color: var(--text-1); background: var(--surface-1); }
+
+.tab.is-active,
 .tab[aria-selected="true"] {
   color: var(--text-1);
   border-bottom-color: var(--accent);
   background: var(--surface-1);
 }
 
+/* Validation-error / active-alarm counts on the Method and System tabs. */
 .tab__badge {
   min-width: 16px;
   height: 16px;
@@ -590,12 +662,14 @@ body {
   overflow: hidden;
 }
 
-/* Run view: two-column grid, minmax(380px, 30%) / 1fr, gap 12 (§9.1.2). */
+/* Run view container. The §9.1.2 two-column split (minmax(380px, 30%) / 1fr, gap 12) is owned by
+   ui/view_run.js's own `.rv` root, which is the single child mounted here. This container must
+   therefore be ONE full-width column: a two-column template here put `.rv` in column 1 and left
+   column 2 empty, collapsing the chart host to ~79px so the chromatogram canvas never sized. */
 .view--run {
   display: grid;
-  grid-template-columns: minmax(var(--w-runleft-min), 30%) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  gap: var(--gap);
 }
 
 .runview__left {
@@ -629,8 +703,8 @@ body {
 .statusstrip {
   display: flex;
   align-items: center;
-  gap: var(--sp-5);
-  padding: 0 var(--sp-5);
+  gap: var(--sp-2);
+  padding: 0 var(--sp-4);
   background: var(--bg-1);
   border-top: 1px solid var(--line);
   overflow-x: auto;
@@ -639,6 +713,15 @@ body {
 }
 .statusstrip::-webkit-scrollbar { height: 0; }
 .statusstrip__spacer { flex: 1 1 auto; min-width: var(--sp-4); }
+
+/* The strip's chips are `.chip` (see §13). They get a hover affordance here
+   because ui/overlay.js attaches each one's glossary tooltip at bind time. */
+.statusstrip .chip {
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  transition: background var(--dur-1) var(--ease-out);
+}
+.statusstrip .chip:hover { background: var(--surface-2); border-color: var(--line); }
 
 
 /* ==========================================================================
@@ -1064,6 +1147,9 @@ textarea.input:hover { border-color: var(--line-strong); }
   border-radius: var(--r-2);
 }
 
+/* `.segmented__opt` is the name ui/app.js emits; `.segmented__btn` is the
+   equivalent used by the view modules. They style identically. */
+.segmented__opt,
 .segmented__btn {
   display: inline-flex;
   align-items: center;
@@ -1077,9 +1163,14 @@ textarea.input:hover { border-color: var(--line-strong); }
   transition: background var(--dur-1) var(--ease-out),
               color var(--dur-1) var(--ease-out);
 }
+.segmented__opt:hover,
 .segmented__btn:hover { color: var(--text-1); background: var(--surface-3); }
 
+.segmented__opt.is-selected,
+.segmented__btn.is-selected,
+.segmented__opt[aria-checked="true"],
 .segmented__btn[aria-checked="true"],
+.segmented__opt[aria-selected="true"],
 .segmented__btn[aria-selected="true"],
 .segmented__input:checked + .segmented__btn {
   background: var(--surface-3);
@@ -1098,6 +1189,7 @@ textarea.input:hover { border-color: var(--line-strong); }
 }
 
 .segmented--sm { height: 22px; }
+.segmented--sm .segmented__opt,
 .segmented--sm .segmented__btn { padding: 0 var(--sp-3); font-size: var(--fs-10); }
 
 
@@ -1123,11 +1215,13 @@ textarea.input:hover { border-color: var(--line-strong); }
   white-space: nowrap;
 }
 
-.pill[data-variant="ok"] { --pill-fg: var(--ok); --pill-bg: var(--ok-soft); }
-.pill[data-variant="warn"] { --pill-fg: var(--warn); --pill-bg: var(--warn-soft); }
-.pill[data-variant="alarm"] { --pill-fg: var(--alarm); --pill-bg: var(--alarm-soft); }
-.pill[data-variant="info"] { --pill-fg: var(--info); --pill-bg: var(--info-soft); }
-.pill[data-variant="neutral"] { --pill-fg: var(--text-2); --pill-bg: var(--neutral-soft); }
+/* Variants come in both flavours: the modifier classes ui/app.js emits, and a
+   data-variant form for view modules that prefer to write one attribute. */
+.pill--ok,      .pill[data-variant="ok"]      { --pill-fg: var(--ok);     --pill-bg: var(--ok-soft); }
+.pill--warn,    .pill[data-variant="warn"]    { --pill-fg: var(--warn);   --pill-bg: var(--warn-soft); }
+.pill--alarm,   .pill[data-variant="alarm"]   { --pill-fg: var(--alarm);  --pill-bg: var(--alarm-soft); }
+.pill--info,    .pill[data-variant="info"]    { --pill-fg: var(--info);   --pill-bg: var(--info-soft); }
+.pill--neutral, .pill[data-variant="neutral"] { --pill-fg: var(--text-2); --pill-bg: var(--neutral-soft); }
 
 .pill--lg {
   height: 28px;
@@ -1136,18 +1230,23 @@ textarea.input:hover { border-color: var(--line-strong); }
   font-weight: 700;
 }
 
-/* The run-state pill maps run.state to a variant so app.js only writes
-   data-state and the text (§5.5). */
-.state-pill[data-state="IDLE"] { --pill-fg: var(--text-2); --pill-bg: var(--neutral-soft); }
-.state-pill[data-state="READY"] { --pill-fg: var(--info); --pill-bg: var(--info-soft); }
-.state-pill[data-state="RUNNING"] { --pill-fg: var(--ok); --pill-bg: var(--ok-soft); }
-.state-pill[data-state="HELD"] { --pill-fg: var(--warn); --pill-bg: var(--warn-soft); }
-.state-pill[data-state="PAUSED"] { --pill-fg: var(--warn); --pill-bg: var(--warn-soft); }
-.state-pill[data-state="ALARM"] { --pill-fg: var(--alarm); --pill-bg: var(--alarm-soft); }
-.state-pill[data-state="ENDED"] { --pill-fg: var(--info); --pill-bg: var(--info-soft); }
-.state-pill[data-state="FAULT"] { --pill-fg: var(--alarm); --pill-bg: var(--alarm-soft); }
+/* The run-state pill. ui/app.js writes only `data-state` and the label, so the
+   IDLE→FAULT colour map lives here, next to the run state machine of §5.5. */
+.state-pill[data-state="IDLE"]    { --pill-fg: var(--text-2); --pill-bg: var(--neutral-soft); }
+.state-pill[data-state="READY"]   { --pill-fg: var(--info);   --pill-bg: var(--info-soft); }
+.state-pill[data-state="RUNNING"] { --pill-fg: var(--ok);     --pill-bg: var(--ok-soft); }
+.state-pill[data-state="HELD"]    { --pill-fg: var(--warn);   --pill-bg: var(--warn-soft); }
+.state-pill[data-state="PAUSED"]  { --pill-fg: var(--warn);   --pill-bg: var(--warn-soft); }
+.state-pill[data-state="ALARM"]   { --pill-fg: var(--alarm);  --pill-bg: var(--alarm-soft); }
+.state-pill[data-state="ENDED"]   { --pill-fg: var(--info);   --pill-bg: var(--info-soft); }
+.state-pill[data-state="FAULT"]   { --pill-fg: var(--alarm);  --pill-bg: var(--alarm-soft); }
 
-/* Chips: the status-strip readouts and small labels. */
+/* A pill that is also a button (the run bar's MANUAL toggle). */
+button.pill { cursor: pointer; }
+button.pill:hover { filter: brightness(1.15); }
+button.pill[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--pill-fg); }
+
+/* Chips: small inline labels outside the status strip. */
 .chip {
   display: inline-flex;
   align-items: baseline;
@@ -1178,16 +1277,17 @@ textarea.input:hover { border-color: var(--line-strong); }
 .chip--hero .chip__value { font-size: var(--fs-18); }
 .chip--quiet .chip__value { font-size: var(--fs-11); color: var(--text-2); font-weight: 500; }
 
+/* The physics honesty chip in the title bar (§9.6). */
 .chip--sim {
   height: 20px;
+  align-items: center;
   border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
   color: var(--text-3);
   font: 700 var(--fs-9) / 1 var(--font-ui);
   letter-spacing: 0.1em;
-  align-items: center;
-  border-radius: var(--r-pill);
-  cursor: help;
 }
+.chip--sim:hover { color: var(--text-2); border-color: var(--text-3); }
 
 /* sensorQuality (§5.3) is conveyed by colour AND a glyph, never colour alone. */
 .chip[data-quality="SUSPECT"] .chip__value,
@@ -1561,16 +1661,40 @@ textarea.input:hover { border-color: var(--line-strong); }
 }
 .cheatsheet__keys { display: flex; gap: var(--sp-2); flex: 0 0 auto; min-width: 96px; }
 
-/* --- scenario picker cards --- */
-.cardgrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: var(--sp-5);
-}
-.pickcard {
+/* --- onboarding: the first-run modal body, the scenario picker, the glossary
+       body (ui/onboarding.js; the floating frames themselves are ov-* and are
+       styled by ui/overlay.js's own stylesheet) --- */
+.onboarding { display: contents; }
+
+.onboard {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
+  gap: var(--sp-5);
+}
+.onboard__lede {
+  font: 400 var(--fs-13) / var(--lh-base) var(--font-ui);
+  color: var(--text-1);
+}
+.onboard__note {
+  font: 400 var(--fs-11) / var(--lh-base) var(--font-ui);
+  color: var(--text-3);
+  padding-left: var(--sp-4);
+  border-left: 2px solid var(--line);
+}
+
+.scenario-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--sp-4);
+  max-height: 56vh;
+  overflow: auto;
+}
+
+/* One scenario card. It is the only route to sim.loadScenario (§6.34). */
+.scenario {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
   padding: var(--sp-5);
   text-align: left;
   background: var(--surface-2);
@@ -1579,130 +1703,47 @@ textarea.input:hover { border-color: var(--line-strong); }
   transition: border-color var(--dur-1) var(--ease-out),
               background var(--dur-1) var(--ease-out);
 }
-.pickcard:hover { border-color: var(--accent); background: var(--surface-3); }
-.pickcard__title { font: 600 var(--fs-12) / 1.2 var(--font-ui); color: var(--text-1); }
-.pickcard__body { font: 400 var(--fs-11) / 1.4 var(--font-ui); color: var(--text-2); }
-.pickcard__spark { height: 40px; border-radius: var(--r-1); background: var(--bg-1); }
+.scenario:hover { border-color: var(--accent); background: var(--surface-3); }
+.scenario__name { font: 600 var(--fs-12) / 1.2 var(--font-ui); color: var(--text-1); }
+.scenario__outcome { font: 400 var(--fs-11) / 1.4 var(--font-ui); color: var(--text-2); }
+.scenario__hook {
+  font: 400 var(--fs-10) / 1.4 var(--font-ui);
+  color: var(--text-3);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--line-soft);
+}
+
+.glossary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  font: 400 var(--fs-11) / var(--lh-base) var(--font-ui);
+  color: var(--text-2);
+}
+.glossary__typical {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums lining-nums;
+  color: var(--text-1);
+}
 
 
 /* ==========================================================================
    17. CHART SURFACES  (§9.3, §6.26)
-   Three stacked canvases in one wrapper. Element selectors are used so the
-   chart module is free to name its canvases by id or class.
+   ---------------------------------------------------------------------------
+   `src/ui/chart.js` ships its own scoped stylesheet for the `.chart` /
+   `.chart__layer*` / `.chart__card*` surfaces it builds, so app.css defines
+   only the two things a HOST needs to know: the mode cursors, and that a chart
+   is allowed to shrink inside a grid or flex track. Everything visual about the
+   three canvases belongs to the module that paints them.
    ========================================================================== */
 
 .chart {
-  position: relative;
-  display: flex;
-  flex-direction: column;
   min-height: 0;
   min-width: 0;
   cursor: crosshair;
-  background: var(--surface-1);
-  border: 1px solid var(--line);
-  border-radius: var(--r-3);
-  overflow: hidden;
 }
-
-.chart__layers {
-  position: relative;
-  flex: 1 1 auto;
-  width: 100%;
-  min-height: 0;
-}
-
-.chart__layers > canvas,
-.chart canvas.chart__canvas {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-}
-
 .chart.is-panning { cursor: grabbing; }
 .chart.is-pooling { cursor: cell; }
-.chart.is-selecting { cursor: crosshair; }
-
-/* Cursor readout card — DOM, not canvas, so text is selectable (§9.3.4). */
-.readout {
-  position: absolute;
-  top: 0;
-  left: 0;
-  min-width: 168px;
-  padding: var(--sp-4);
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-3);
-  box-shadow: var(--shadow-2);
-  font: 400 var(--fs-11) / 1.4 var(--font-ui);
-  pointer-events: none;
-  z-index: var(--z-sticky);
-  /* moved by transform only — never by top/left, which would force layout */
-}
-.readout__x {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding-bottom: var(--sp-3);
-  margin-bottom: var(--sp-3);
-  border-bottom: 1px solid var(--line);
-  color: var(--text-2);
-}
-.readout__row {
-  display: grid;
-  grid-template-columns: 10px 1fr auto auto;
-  align-items: center;
-  gap: var(--sp-3);
-}
-.readout__swatch { width: 10px; height: 2px; border-radius: 1px; background: currentColor; }
-.readout__name { color: var(--text-2); }
-.readout__value { color: var(--text-1); font-weight: 600; text-align: right; }
-.readout__unit { color: var(--text-3); font-size: var(--fs-9); }
-
-/* Overview strip with the window brush. */
-.overview {
-  position: relative;
-  height: var(--h-overview);
-  flex: 0 0 var(--h-overview);
-  border-top: 1px solid var(--line);
-  background: var(--bg-1);
-  cursor: ew-resize;
-}
-.overview canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-.overview__brush {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  background: var(--accent-soft);
-  border-left: 1.5px solid var(--accent);
-  border-right: 1.5px solid var(--accent);
-}
-
-.chart__pill {
-  position: absolute;
-  top: var(--sp-4);
-  right: var(--sp-4);
-  z-index: var(--z-sticky);
-}
-
-.chart__empty {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-content: center;
-  gap: var(--sp-3);
-  text-align: center;
-  color: var(--text-3);
-  font-size: var(--fs-12);
-  pointer-events: none;
-}
-
-/* Legend focus mode dims every other trace to 20 % (§9.6). */
-.chart.is-focus-mode { --trace-dim: 0.2; }
-
-/* The accessible alternative to the canvas (§9.7). */
-.datatable-toggle { margin-left: auto; }
-
 
 /* ==========================================================================
    18. P&ID SURFACES  (§9.2)
@@ -1809,207 +1850,15 @@ textarea.input:hover { border-color: var(--line-strong); }
 
 
 /* ==========================================================================
-   19. RUN VIEW: phase rail, fraction strip, channel legend  (§6.28)
+   19. RUN VIEW  (§6.28)
+   ---------------------------------------------------------------------------
+   `src/ui/view_run.js` owns the whole Run tab under its own `.rv` / `.rv-*`
+   namespace and ships a scoped stylesheet built from the same tokens, so the
+   phase rail, fraction strip, channel legend and two-column split are defined
+   there rather than here. app.css contributes only the shell-level state hooks
+   the view reads (`.shell.is-manual`, §3) and the generic components it reuses
+   (`.panel`, `.btn`, `.numfield`, `.pill`, `.table`, `.splitter`).
    ========================================================================== */
-
-/* --- phase progress rail (fixed 64 px) --- */
-.rail {
-  display: flex;
-  align-items: stretch;
-  gap: 2px;
-  height: var(--h-phaserail);
-  padding: var(--sp-3);
-  background: var(--surface-1);
-  border: 1px solid var(--line);
-  border-radius: var(--r-3);
-  overflow: hidden;
-}
-
-.rail__block {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 2px;
-  min-width: 8px;
-  padding: 0 var(--sp-3);
-  border-radius: var(--r-1);
-  background: var(--surface-2);
-  border: 1px solid transparent;
-  text-align: left;
-  overflow: hidden;
-  transition: border-color var(--dur-1) var(--ease-out);
-}
-.rail__block:hover { border-color: var(--line-strong); }
-.rail__block.is-current { border-color: var(--accent); background: var(--surface-3); }
-.rail__block.is-done { opacity: 0.6; }
-.rail__block.is-disabled { opacity: 0.35; }
-
-.rail__block[data-kind="EQUILIBRATION"] { background: var(--phase-equil); }
-.rail__block[data-kind="LOAD"] { background: var(--phase-load); }
-.rail__block[data-kind="WASH"] { background: var(--phase-wash); }
-.rail__block[data-kind="ELUTION"] { background: var(--phase-elute); }
-.rail__block[data-kind="STRIP"],
-.rail__block[data-kind="CIP"] { background: var(--phase-strip); }
-
-/* Elapsed shading sweeping across the current block. Width is written every
-   frame; no transition, or the sweep would lag the process. */
-.rail__sweep {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 0%;
-  background: var(--accent-soft);
-  pointer-events: none;
-}
-.rail__name {
-  position: relative;
-  font: 600 var(--fs-11) / 1.1 var(--font-ui);
-  color: var(--text-1);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.rail__meta {
-  position: relative;
-  font: 400 var(--fs-9) / 1.1 var(--font-ui);
-  color: var(--text-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-variant-numeric: tabular-nums lining-nums;
-}
-
-/* --- fraction strip + collector (fixed 150 px) --- */
-.fracstrip {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-.fracstrip__head {
-  position: relative;
-  height: 14px;
-  flex: 0 0 14px;
-}
-.fracstrip__arrow {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 0;
-  height: 0;
-  border-left: 5px solid transparent;
-  border-right: 5px solid transparent;
-  border-top: 8px solid var(--accent);
-  /* transform is written per frame by view_run.js */
-}
-.fracstrip__vials {
-  display: flex;
-  align-items: flex-end;
-  gap: var(--sp-2);
-  min-height: 0;
-  flex: 1 1 auto;
-  padding: var(--sp-3) 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-
-.vial {
-  position: relative;
-  flex: 0 0 22px;
-  width: 22px;
-  height: 100%;
-  min-height: 40px;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  border: 1px solid var(--line);
-  border-top: 0;
-  border-radius: 0 0 var(--r-2) var(--r-2);
-  background: var(--surface-2);
-  overflow: hidden;
-}
-.vial__fill {
-  width: 100%;
-  background: var(--ch-uv280);
-  opacity: 0.55;
-}
-.vial__label {
-  position: absolute;
-  bottom: 2px;
-  left: 0;
-  right: 0;
-  text-align: center;
-  font: 500 var(--fs-9) / 1 var(--font-num);
-  color: var(--text-2);
-}
-.vial.is-active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.vial.is-pooled { background: var(--accent-soft); }
-.vial[data-quality="SUSPECT"] { border-color: var(--warn); }
-.vial[data-quality="INVALID"] { border-color: var(--alarm); }
-.vial--waste .vial__fill { background: var(--fluid-waste); }
-
-/* --- channel legend / readout table (fixed 132 px) --- */
-.legend {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-.legend__table { width: 100%; }
-.legend__row {
-  display: grid;
-  grid-template-columns: 22px 26px minmax(70px, 1fr) repeat(3, minmax(56px, auto)) 44px;
-  align-items: center;
-  gap: var(--sp-3);
-  height: var(--sp-8);
-  padding: 0 var(--sp-3);
-  border-bottom: 1px solid var(--line-soft);
-  font-size: var(--fs-11);
-}
-.legend__row:hover { background: var(--surface-2); }
-.legend__row.is-hidden { opacity: 0.45; }
-
-.legend__stroke {
-  width: 26px;
-  height: 12px;
-  overflow: visible;
-}
-.legend__name { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.legend__value {
-  color: var(--text-1);
-  font-weight: 600;
-  text-align: right;
-  font-variant-numeric: tabular-nums lining-nums;
-}
-.legend__minmax {
-  color: var(--text-3);
-  text-align: right;
-  font-variant-numeric: tabular-nums lining-nums;
-}
-.legend__axis {
-  justify-self: end;
-  font: 600 var(--fs-9) / 1 var(--font-ui);
-  color: var(--text-3);
-  padding: var(--sp-1) var(--sp-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-1);
-}
-.legend__axis:hover { color: var(--text-1); border-color: var(--line-strong); }
-
-/* Below 1024 px the legend collapses to two rows of chips (§9.1.3). */
-.legend__chips { display: none; flex-wrap: wrap; gap: var(--sp-3); padding: var(--sp-3); }
-
-/* --- manual control mirror panel (§9.4.4) --- */
-.manual {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: var(--sp-5);
-}
-.manual__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-4);
-}
-
 
 /* ==========================================================================
    20. METHOD VIEW  (§6.29)
@@ -2361,12 +2210,15 @@ textarea.input:hover { border-color: var(--line-strong); }
    23. BOOT NOTICES, EMPTY STATES, PERF OVERLAY
    ========================================================================== */
 
+/* The two pre-boot notices. They live OUTSIDE #app in index.html, because
+   boot() empties #app — a notice inside it would be deleted by the very code
+   whose failure it exists to report. */
 .bootnote {
-  position: absolute;
+  position: fixed;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: min(560px, calc(100% - var(--sp-9)));
+  width: min(560px, calc(100vw - var(--sp-9)));
   padding: var(--sp-7);
   background: var(--surface-1);
   border: 1px solid var(--line-strong);
@@ -2414,12 +2266,14 @@ textarea.input:hover { border-color: var(--line-strong); }
 }
 .empty__title { font: 600 var(--fs-13) / 1.2 var(--font-ui); color: var(--text-2); }
 
-.perf {
+/* Ctrl+Alt+P (§6.32). */
+.perf,
+.perf-overlay {
   position: fixed;
   top: calc(var(--h-titlebar) + var(--sp-4));
   right: var(--sp-4);
   z-index: var(--z-perf);
-  min-width: 220px;
+  min-width: 240px;
   padding: var(--sp-4);
   background: var(--overlay);
   border: 1px solid var(--line-strong);
@@ -2429,53 +2283,124 @@ textarea.input:hover { border-color: var(--line-strong); }
   color: var(--text-2);
   pointer-events: none;
 }
-.perf__row { display: flex; justify-content: space-between; gap: var(--sp-5); }
-.perf__value { color: var(--text-1); font-variant-numeric: tabular-nums lining-nums; }
+.perf__row,
+.perf-overlay__row { display: flex; justify-content: space-between; gap: var(--sp-5); }
+.perf__key,
+.perf-overlay__k { color: var(--text-3); }
+.perf__value,
+.perf-overlay__v { color: var(--text-1); font-variant-numeric: tabular-nums lining-nums; }
 .perf__value[data-over="true"] { color: var(--alarm); }
+
+/* A panel that threw. The shell survives; the failure is stated, not hidden. */
+.shell-error {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  background: var(--alarm-soft);
+  border-bottom: 1px solid var(--alarm);
+}
+.shell-error__msg {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: 500 var(--fs-12) / 1.4 var(--font-ui);
+  color: var(--text-1);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.shell-error__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex: 0 0 auto;
+}
+
+/* The "best viewed wider" note of §9.1.3, toggled by ui/app.js. */
+.shell-narrow-note {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--h-statusstrip);
+  z-index: var(--z-chrome);
+  padding: var(--sp-2) var(--sp-5);
+  background: var(--warn-soft);
+  border-top: 1px solid var(--warn);
+  color: var(--warn);
+  font: 600 var(--fs-10) / 1.4 var(--font-ui);
+  text-align: center;
+  pointer-events: none;
+}
 
 
 /* ==========================================================================
    24. RESPONSIVE  (§9.1.3)
    ========================================================================== */
 
-/* >= 1600 px: left column fixed 460 px, legend shows min/max columns. */
-@media (min-width: 1600px) {
-  .view--run { grid-template-columns: var(--w-runleft-wide) minmax(0, 1fr); }
+/* The Run/Method/Results views own their own internal responsive behaviour
+   (they ship scoped stylesheets — see the header note); the rules here govern
+   the shell chrome and the component library only. */
+
+/* The run control bar MUST NEVER SCROLL. The Emergency Stop, the speed control
+   and the state pill are what a user reaches for under pressure, and a control
+   you have to scroll to is a control you do not have (§9.4.3). Below 1600 px
+   the bar sheds decoration; below the 1280 px design minimum it wraps to two
+   rows rather than clipping. */
+@media (max-width: 1599.98px) {
+  .runbar { gap: var(--sp-4); }
+  .runbar__group--state { min-width: 220px; }
+  .runbar__group--transport { min-width: 250px; }
+  .runbar__group--progress { min-width: 220px; }
+  .runbar__caption { display: none; }
+  /* Icon-only for the secondary transport actions; the title still names the
+     action and its shortcut, and the Manual panel mirrors every control. */
+  .btn--toolbar:not(.btn--keep-label) .btn__label { display: none; }
+  .btn--toolbar:not(.btn--keep-label) { padding: 0 var(--sp-4); }
 }
 
-/* 1024–1280 px: legend collapses to chips; the phase rail drops labels. */
+@media (max-width: 1359.98px) {
+  .runbar__group--state { min-width: 186px; }
+  .runbar__group--progress { min-width: 196px; }
+  .runbar__counters { gap: var(--sp-4); }
+  .runbar__group--speed .segmented { height: 22px; }
+  .runbar__group--speed .segmented__btn,
+  .runbar__group--speed .segmented__opt { padding: 0 var(--sp-3); font-size: var(--fs-10); }
+  .runbar__method { max-width: 14ch; }
+  .runbar__block { max-width: 16ch; }
+}
+
+/* Below the 1280 px design minimum the bar WRAPS to two rows rather than
+   clipping. Two rows cost 28 px of workspace; a clipped safety bar costs you the
+   Emergency Stop. Deliberate — §9.1.3 describes the Run view at this width and
+   is silent on the chrome. */
 @media (max-width: 1279.98px) {
-  .legend__table { display: none; }
-  .legend__chips { display: flex; }
-  .rail__meta { display: none; }
-  .rail__name { font-size: var(--fs-10); }
+  .app {
+    grid-template-rows:
+      var(--h-titlebar) auto auto var(--h-tabstrip) minmax(0, 1fr) var(--h-statusstrip);
+  }
+  .runbar {
+    flex-wrap: wrap;
+    align-content: center;
+    row-gap: var(--sp-3);
+    padding-top: var(--sp-3);
+    padding-bottom: var(--sp-3);
+  }
+  .runbar__group--mode { margin-left: 0; }
+  .runbar__rule { height: var(--ctl-md); }
   .methodview { grid-template-columns: 240px minmax(0, 1fr) 280px; }
   .systemview__cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .resultsview__lower { grid-template-columns: 1.6fr 1fr; }
 }
 
-/* < 1024 px: the Run view stacks vertically; the status strip wraps. */
+/* < 1024 px: the status strip wraps to two lines (§9.1.3). */
 @media (max-width: 1023.98px) {
-  .app { grid-template-rows: var(--h-titlebar) auto auto var(--h-tabstrip) minmax(0, 1fr) auto; }
-
-  .runbar { flex-wrap: wrap; height: auto; padding: var(--sp-3) var(--sp-5); row-gap: var(--sp-3); }
-  .runbar__group--state,
-  .runbar__group--transport { min-width: 0; }
-  .runbar__group--mode { margin-left: 0; }
-
-  .view--run {
-    display: block;
-    overflow: auto;
+  .app {
+    grid-template-rows: var(--h-titlebar) auto auto var(--h-tabstrip) minmax(0, 1fr) auto;
   }
-  .runview__left,
-  .runview__right { display: flex; flex-direction: column; gap: var(--gap); }
-  .runview__left { margin-bottom: var(--gap); }
-  .pid { min-height: 420px; }
-  .chart { min-height: var(--h-chart-min); }
+  .runbar__group--state,
+  .runbar__group--transport,
+  .runbar__group--progress { min-width: 0; }
+  .statusstrip { flex-wrap: wrap; height: auto; padding: var(--sp-2) var(--sp-4); }
   .splitter { display: none; }
-
-  .statusstrip { flex-wrap: wrap; height: auto; padding: var(--sp-2) var(--sp-5); row-gap: 0; }
-
   .methodview { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto; height: auto; }
   .resultsview { grid-template-rows: 320px auto; }
   .resultsview__lower { grid-template-columns: minmax(0, 1fr); }
@@ -2483,39 +2408,10 @@ textarea.input:hover { border-color: var(--line-strong); }
   .systemview__logs { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* < 720 px wide: still functional, but say so. */
+/* < 720 px wide: still functional, and .shell-narrow-note says so. */
 @media (max-width: 719.98px) {
-  .app::before {
-    content: "Best viewed at 1280 px or wider. Everything still works.";
-    display: block;
-    grid-row: 1;
-    grid-column: 1;
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: var(--h-statusstrip);
-    z-index: var(--z-chrome);
-    padding: var(--sp-2) var(--sp-4);
-    background: var(--warn-soft);
-    color: var(--warn);
-    font: 600 var(--fs-10) / 1.4 var(--font-ui);
-    text-align: center;
-    pointer-events: none;
-  }
   .titlebar__meta { display: none; }
-}
-
-/* < 700 px tall: the phase rail collapses; the legend becomes a popover. */
-@media (max-height: 699.98px) {
-  /* Re-binding a layout token for this viewport, not defining one:
-     the value still originates in styles/tokens.css. */
-  .app { --h-phaserail: 28px; }
-  .rail { padding: var(--sp-1) var(--sp-2); }
-  .rail__meta { display: none; }
-  .rail__name { font-size: var(--fs-9); }
-  .runview__right { grid-template-rows: var(--h-phaserail) minmax(0, 1fr); }
-  .runview__right > .splitter,
-  .runview__right > .legend { display: none; }
+  .titlebar { gap: var(--sp-3); padding: 0 var(--sp-4); }
 }
 
 
@@ -2523,11 +2419,13 @@ textarea.input:hover { border-color: var(--line-strong); }
    25. ACCESSIBILITY  (§9.7)
    ========================================================================== */
 
-/* One focus rule, everywhere. Never outline:none without a replacement. */
+/* One focus rule, everywhere. Never outline:none without a replacement.
+   Deliberately NO `border-radius: inherit` here: `outline` already follows the
+   element's own border-radius in every current engine, and inheriting the
+   parent's radius would square off every focused button and pill. */
 :focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
-  border-radius: inherit;
 }
 /* Suppress the ring only where a bespoke one is drawn above. */
 .toggle__input:focus-visible,
@@ -2568,6 +2466,217 @@ textarea.input:hover { border-color: var(--line-strong); }
   .pid .seg-dash { opacity: 0.35; }
   .banner { animation: none; }
 }
+
+/* ==========================================================================
+   26. ALTERNATE SHELL VOCABULARY
+   ---------------------------------------------------------------------------
+   `src/ui/app.js` may either BIND the static shell index.html ships (the ids
+   and classes of §1–§7 above) or BUILD an equivalent shell of its own inside
+   #app under a `.shell` wrapper with slightly different element names. Both are
+   legitimate readings of the contract, and this stylesheet renders either — the
+   cost is the ~100 lines below, and the benefit is that the chrome can never
+   end up unstyled because two files disagreed about a class name.
+
+   Everything here maps onto the same tokens and the same metrics as §1–§7.
+   ========================================================================== */
+
+/* The JS-built shell is a CHILD of #app rather than #app itself. When it is
+   present, #app must stop being the band grid or the two nest and the workspace
+   collapses into the 44 px title row. */
+#app { height: 100%; min-height: 100%; }
+
+.app:has(> .shell) {
+  display: block;
+  grid-template-rows: none;
+}
+
+.shell {
+  position: relative;
+  display: grid;
+  grid-template-rows:
+    var(--h-titlebar)
+    var(--h-runbar)
+    auto
+    var(--h-tabstrip)
+    minmax(0, 1fr)
+    var(--h-statusstrip);
+  height: 100%;
+  min-height: 100%;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* -- title bar ------------------------------------------------------------ */
+.titlebar__title {
+  flex: 0 0 auto;
+  font: 600 var(--fs-13) / 1 var(--font-ui);
+  letter-spacing: 0.01em;
+  color: var(--text-1);
+  white-space: nowrap;
+}
+.titlebar__sub {
+  min-width: 0;
+  font: 500 var(--fs-11) / 1 var(--font-ui);
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 34ch;
+}
+.titlebar__sub:empty { display: none; }
+.titlebar__spacer { flex: 1 1 auto; min-width: var(--sp-4); }
+/* With a spacer present, the actions block must not also push itself right. */
+.titlebar__spacer ~ .titlebar__actions { margin-left: 0; }
+
+/* -- run bar -------------------------------------------------------------- */
+.runbar__label {
+  font: 400 var(--fs-9) / 1.2 var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-caps);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 26ch;
+}
+.runbar__label:empty { display: none; }
+
+.runbar__value {
+  font: 600 var(--fs-12) / 1.2 var(--font-ui);
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 34ch;
+}
+.runbar__value.num { font-variant-numeric: tabular-nums lining-nums; }
+.runbar__value:empty { display: none; }
+
+.runbar__speed-note {
+  font: 500 var(--fs-11) / 1 var(--font-num);
+  color: var(--text-3);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-1);
+  white-space: nowrap;
+}
+.runbar__speed-note:empty { display: none; }
+.runbar__speed-note.is-limited { color: var(--warn); background: var(--warn-soft); }
+
+.runbar__progress {
+  flex: 0 1 140px;
+  min-width: 60px;
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.runbar__progress-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: inherit;
+}
+
+/* E-stop and mode chip as direct children of .runbar. */
+.runbar > .btn--estop { flex: 0 0 auto; }
+.runbar > .pill { flex: 0 0 auto; margin-left: auto; }
+
+/* Skip Block's SVG progress ring (the static markup uses --hold-progress). */
+.holdring { flex: 0 0 auto; width: 18px; height: 18px; overflow: visible; }
+.holdring__track { stroke: var(--line-strong); stroke-width: 2; }
+.holdring__fill { stroke: var(--accent); stroke-width: 2; stroke-linecap: round; }
+
+/* -- status strip --------------------------------------------------------- */
+.statchip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+  height: var(--sp-7);
+  padding: 0 var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+  white-space: nowrap;
+  transition: background var(--dur-1) var(--ease-out);
+}
+.statchip:hover { background: var(--surface-2); border-color: var(--line); }
+.statchip__label {
+  font: 400 var(--fs-9) / 1 var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-caps);
+  color: var(--text-3);
+}
+.statchip__value {
+  font: 600 var(--fs-13) / 1 var(--font-ui);
+  color: var(--text-1);
+  min-width: 4ch;
+  text-align: right;
+}
+.statchip.is-warn .statchip__value { color: var(--warn); }
+.statchip.is-invalid .statchip__value { color: var(--alarm); }
+.statchip.is-off .statchip__value { color: var(--text-3); }
+
+/* -- shell-level state hooks ---------------------------------------------- */
+.shell.is-manual .pid,
+.shell.is-manual .rv-pid { outline: 3px solid var(--warn); outline-offset: -3px; }
+.shell.is-finished .runbar__progress-fill { background: var(--ok); }
+.shell.has-alarms .statusstrip {
+  border-top-color: var(--alarm);
+  box-shadow: inset 0 1px 0 0 var(--alarm);
+}
+
+/* -- error and narrow-viewport surfaces ----------------------------------- */
+.shell-error {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  background: var(--alarm-soft);
+  border-bottom: 1px solid var(--alarm);
+}
+.shell-error__msg {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: 500 var(--fs-12) / 1.4 var(--font-ui);
+  color: var(--text-1);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.shell-error__actions { display: flex; align-items: center; gap: var(--sp-3); flex: 0 0 auto; }
+
+.shell-narrow-note {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--h-statusstrip);
+  z-index: var(--z-chrome);
+  padding: var(--sp-2) var(--sp-5);
+  background: var(--warn-soft);
+  border-top: 1px solid var(--warn);
+  color: var(--warn);
+  font: 600 var(--fs-10) / 1.4 var(--font-ui);
+  text-align: center;
+  pointer-events: none;
+}
+
+/* The JS-built shell has no .runbar__group--* modifiers, so its groups size to
+   content; keep them from collapsing and let the bar wrap at narrow widths. */
+.shell .runbar__group { flex: 0 1 auto; min-width: 0; gap: var(--sp-3); }
+
+@media (max-width: 1279.98px) {
+  .shell {
+    grid-template-rows:
+      var(--h-titlebar) auto auto var(--h-tabstrip) minmax(0, 1fr) var(--h-statusstrip);
+  }
+  .shell .runbar > .pill { margin-left: 0; }
+}
+@media (max-width: 1023.98px) {
+  .shell {
+    grid-template-rows: var(--h-titlebar) auto auto var(--h-tabstrip) minmax(0, 1fr) auto;
+  }
+}
+
 
 @media print {
   body { background: transparent; overflow: visible; }

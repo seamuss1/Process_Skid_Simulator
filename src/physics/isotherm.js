@@ -721,17 +721,30 @@ export function relaxCell(model, c_mM, q_mM, cs_mM, kOv_s1, dt_s, phi, VcellMob_
   const C_KT = model.C_KT_mM, KT_MIN = model.KT_MIN, KT_MAX = model.KT_MAX;
   for (let i = 0; i < m; i++) {
     const ci = c_mM[i];
-    let Kt = (ci > C_KT) ? qstar_mM[i] / ci : ktLinear(model, i, x, csEff);
-    // NOTE: this clamp is NOT destination-neutral. q_inf below contains Kt, so clamping Kt while
-    // leaving q* unclamped moves the fixed point. It is safe IN PRACTICE at the ceiling because
-    // phi*Kt >> 1 on both sides of the clamp — it is not an identity. SBI at cs = 50 mM has a
-    // true Kt = Keq*(Lambda/cs)^nu = 5.4e7 and is clamped by a factor of 54 on every call.
-    if (!(Kt > KT_MIN)) Kt = KT_MIN;               // also catches NaN
-    else if (Kt > KT_MAX) Kt = KT_MAX;
+    // THE SECANT SLOPE, unclamped above. `KtDest` is what the DESTINATION is built from and it
+    // must stay the true secant q*/c, because that — and only that — makes `qinf` the
+    // mass-limited joint equilibrium:
+    //     qinf = (q* + phi*Kt*q0)/(1 + phi*Kt) = q*(c + phi*q0)/(c + phi*q*)  <=  q0 + c/phi,
+    // i.e. the destination can never demand more solute than the cell holds, so
+    // c_new = c - phi*th*(qinf - q0) >= c*(1 - th) >= 0 for any dt (T9).
+    //
+    // KT_MAX MUST NOT REACH IT. Clamping Kt in `qinf` while leaving q* unclamped breaks that
+    // identity: with Kt held at KT_MAX < q*/c the destination becomes q*/(1 + phi*KT_MAX), which
+    // is ABOVE the ceiling by exactly the factor the clamp removed, and c lands at ~-2e-9 mM on
+    // every clamped call. SBI at cs = 50 mM has a true Kt = Keq*(Lambda/cs)^nu = 5.4e7 and is
+    // clamped by a factor of 54, so a 200 000-substep load/wash/gradient cycle recorded 644 013
+    // clamp events and created 2.8e-2 umol of SBI out of nothing — a DoD 7 failure, not a
+    // rounding one. The clamp is kept where it is harmless and needed: the RATE.
+    let KtDest = (ci > C_KT) ? qstar_mM[i] / ci : ktLinear(model, i, x, csEff);
+    if (!(KtDest > KT_MIN)) KtDest = KT_MIN;       // also catches NaN
+    // The RATE clamp. k' = k_ov*(1/Kt + phi) is flat in Kt once phi*Kt >> 1, so bounding Kt here
+    // is worth <2e-8 relative on k' at the ceiling; it exists so `kOv/Kt` cannot underflow and
+    // `phi*Kt` cannot overflow on a pathological affinity.
+    const KtRate = KtDest > KT_MAX ? KT_MAX : KtDest;
 
-    const keff = kOv_s1[i] / Kt;                   // k_eff = k_ov / Kt, 1/s
-    const pk = phi * Kt;
-    const th = theta(keff * (1 + pk) * dt_s);      // k' = k_eff*(1 + phi*Kt)
+    const keff = kOv_s1[i] / KtRate;               // k_eff = k_ov / Kt, 1/s
+    const th = theta(keff * (1 + phi * KtRate) * dt_s);   // k' = k_eff*(1 + phi*Kt)
+    const pk = phi * KtDest;
     const q0 = q_mM[i];
     const qinf = (qstar_mM[i] + pk * q0) / (1 + pk);   // the cell's TRUE joint equilibrium
     const dq = th * (qinf - q0);

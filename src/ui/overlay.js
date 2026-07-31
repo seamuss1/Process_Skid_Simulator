@@ -277,11 +277,17 @@ function focusableWithin(el) {
  * nothing focusable — a text-only dialog still receives `Esc`.
  *
  * @param {HTMLElement} el  The container to trap inside. Must already be in the document.
+ * @param {{restoreTo?:Element|null}} [opts]  `restoreTo` overrides the element focus returns to.
+ *        **Required whenever the caller made the background `inert` first**: applying `inert` to an
+ *        ancestor blurs the focused element synchronously, so by the time this function runs
+ *        `document.activeElement` is already `<body>` and the operator's focus would be lost.
  * @returns {() => void} The restore function: removes the trap and returns focus to whatever had it
  *          when the trap was installed. Idempotent — calling it twice is harmless.
  */
-export function trapFocus(el) {
-  const previous = typeof document !== 'undefined' ? document.activeElement : null;
+export function trapFocus(el, opts) {
+  const previous = opts && 'restoreTo' in opts
+    ? opts.restoreTo
+    : (typeof document !== 'undefined' ? document.activeElement : null);
   if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
 
   function onKeyDown(e) {
@@ -471,10 +477,13 @@ export function dismiss(handle) {
   for (let k = 0; k < handle.cleanup.length; k += 1) handle.cleanup[k]();
   handle.cleanup.length = 0;
 
-  if (handle.releaseFocus) handle.releaseFocus();
+  // ORDER MATTERS. Un-inert the background and detach the surface BEFORE restoring focus:
+  // `element.focus()` is a no-op on an inert subtree, so restoring first would silently drop focus
+  // to <body>, and focusing a node that is still inside the surface being removed would drop it too.
   if (handle.inert) setBackgroundInert(host, false);
   if (handle.dimEl && handle.dimEl.parentNode) handle.dimEl.parentNode.removeChild(handle.dimEl);
   if (handle.el.parentNode) handle.el.parentNode.removeChild(handle.el);
+  if (handle.releaseFocus) handle.releaseFocus();
   if (typeof handle.onDismiss === 'function') handle.onDismiss(handle);
 }
 
@@ -612,7 +621,10 @@ export function attachTooltip(host, el, text, opts) {
     if (handle) { dismiss(handle); handle = null; }
   }
   function open() {
-    if (handle) return;
+    // The 250 ms delay means the target can be unmounted (a tab switch, a list reconcile) between
+    // the pointer entering and the tooltip opening. Anchoring to a detached node would strand the
+    // card at the viewport origin.
+    if (handle || !el.isConnected) return;
     const content = resolve();
     if (content === null) return;
     handle = showPopover(host, {
@@ -755,6 +767,8 @@ function actionButton(spec, handle) {
 export function showModal(host, opts) {
   const o = opts || {};
   const dismissible = o.dismissible !== false;
+  // Captured before anything is mounted: `setBackgroundInert` blurs whatever had focus.
+  const previouslyFocused = document.activeElement;
   handleSeq += 1;
   const titleId = 'ov-title-' + handleSeq;
 
@@ -800,7 +814,7 @@ export function showModal(host, opts) {
 
   handle.inert = true;
   setBackgroundInert(host, true);
-  handle.releaseFocus = trapFocus(modal);
+  handle.releaseFocus = trapFocus(modal, { restoreTo: previouslyFocused });
 
   return register(host, handle);
 }
@@ -970,6 +984,7 @@ export function showCoachMark(host, opts) {
   const step = Math.max(1, Math.round(o.step || 1));
   const total = Math.max(step, Math.round(o.total || step));
   const target = o.targetEl || null;
+  const previouslyFocused = document.activeElement;
   let skipped = false;
 
   const dim = h('div', {
@@ -1048,7 +1063,7 @@ export function showCoachMark(host, opts) {
 
   handle.inert = true;
   setBackgroundInert(host, true);
-  handle.releaseFocus = trapFocus(card);
+  handle.releaseFocus = trapFocus(card, { restoreTo: previouslyFocused });
 
   return register(host, handle);
 }
