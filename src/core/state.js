@@ -276,6 +276,11 @@ export function createRunState(config) {
       // alarms.CUSTOM_EVALUATORS.cvMoveUnderFlow (ALM-CV-02) and auto-cleared by
       // fluidics.updateValves. Declared here so the flag cannot survive a resetRunState.
       cvMoveUnderFlow: false,
+      // A column-valve position a block asked for that could not be commanded yet because the
+      // pumps had not finished ramping down. engine.serviceColumnValve retries it each control
+      // tick and clears it once the move is accepted. Declared here so a deferred move cannot
+      // survive a resetRunState. See the note in engine.startBlock.
+      cvPending: null,
       cvMoveUnderFlow_s: 0,
     },
 
@@ -492,6 +497,7 @@ export function resetRunState(config, run) {
   run.valves.loopFilled_mL = 0;
   run.valves.cvMoveUnderFlow = false;
   run.valves.cvMoveUnderFlow_s = 0;
+  run.valves.cvPending = null;
 
   for (let k = 0; k < run.tankVolume_mL.length; k++) {
     run.tankVolume_mL[k] = config.tanks[k].startVolume_mL;

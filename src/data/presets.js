@@ -430,13 +430,18 @@ export const PRESETS = {
       uv: { pathlength_mm: 0.2 } },
     tanks: pilotTanks(1, PILOT_FEED_PROTEINS),
     inletAssignments: PILOT_INLETS,
-    load: { basis: 'MG_PER_ML_RESIN', value: 15.0, feedTiterTotal_gL: 5.00,
+    // 8 mg/mL, not 15. Measured on the shipped gradient, 15 mg/mL broadens the product peak to
+    // W50 = 2.91 CV and pushes the aggregate apex from 19.4 CV out to 22.4 CV (overload
+    // displacement), so the four species merge into one hump. 8 mg/mL gives W50 = 2.19 CV and a
+    // 0.100 AU apex with the species resolved at 12.9 / 18.2 / 20.7 / 26.2 CV. Deliberate
+    // overload is its own teaching scenario ('overloaded-column', 60 mg/mL).
+    load: { basis: 'MG_PER_ML_RESIN', value: 8.0, feedTiterTotal_gL: 5.00,
       productTiter_gL: 4.25, productSpeciesId: 'mAb' },
     methodMeta: { methodId: 'm-cex-pilot', name: 'CEX Capture v3',
       globalDefaults: { flow: { mode: 'CM_H', value: 150 }, arm: { basis: 'CV', value: 0.05 },
         persistence_ticks: 5 },
       endState: { columnValve: 'BYPASS', outletValve: 'WASTE' },
-      notes: 'Bind-and-elute capture: 6 CV equilibration, 15 mg/mL load, 5 CV wash, 20 CV linear ' +
+      notes: 'Bind-and-elute capture: 6 CV equilibration, 8 mg/mL load, 5 CV wash, 20 CV linear ' +
         'salt gradient with peak fractionation, strip, CIP, re-equilibration.' },
     methodPhases: (config) => cexPhases(config, { flow_cmh: 150, gradientCV: 20 }),
     methodPatches: { B01: { autozero: true } },
@@ -457,7 +462,12 @@ export const PRESETS = {
       uv: { pathlength_mm: 0.2 } },
     tanks: pilotTanks(0.03, PILOT_FEED_PROTEINS),
     inletAssignments: PILOT_INLETS,
-    load: { basis: 'MG_PER_ML_RESIN', value: 15.0, feedTiterTotal_gL: 5.00,
+    // 8 mg/mL, not 15. Measured on the shipped gradient, 15 mg/mL broadens the product peak to
+    // W50 = 2.91 CV and pushes the aggregate apex from 19.4 CV out to 22.4 CV (overload
+    // displacement), so the four species merge into one hump. 8 mg/mL gives W50 = 2.19 CV and a
+    // 0.100 AU apex with the species resolved at 12.9 / 18.2 / 20.7 / 26.2 CV. Deliberate
+    // overload is its own teaching scenario ('overloaded-column', 60 mg/mL).
+    load: { basis: 'MG_PER_ML_RESIN', value: 8.0, feedTiterTotal_gL: 5.00,
       productTiter_gL: 4.25, productSpeciesId: 'mAb' },
     methodMeta: { methodId: 'm-cex-lab', name: 'CEX Capture v3 (lab)',
       globalDefaults: { flow: { mode: 'CM_H', value: 300 }, arm: { basis: 'CV', value: 0.05 },
@@ -501,7 +511,12 @@ export const PRESETS = {
         Object.assign(acetateBuffer(1000.0), { proteins: PILOT_FEED_PROTEINS })),
     ],
     inletAssignments: PILOT_INLETS,
-    load: { basis: 'MG_PER_ML_RESIN', value: 15.0, feedTiterTotal_gL: 5.00,
+    // 8 mg/mL, not 15. Measured on the shipped gradient, 15 mg/mL broadens the product peak to
+    // W50 = 2.91 CV and pushes the aggregate apex from 19.4 CV out to 22.4 CV (overload
+    // displacement), so the four species merge into one hump. 8 mg/mL gives W50 = 2.19 CV and a
+    // 0.100 AU apex with the species resolved at 12.9 / 18.2 / 20.7 / 26.2 CV. Deliberate
+    // overload is its own teaching scenario ('overloaded-column', 60 mg/mL).
+    load: { basis: 'MG_PER_ML_RESIN', value: 8.0, feedTiterTotal_gL: 5.00,
       productTiter_gL: 4.25, productSpeciesId: 'mAb' },
     methodMeta: { methodId: 'm-hic-pilot', name: 'HIC polish, descending salt',
       globalDefaults: { flow: { mode: 'CM_H', value: 150 }, arm: { basis: 'CV', value: 0.05 },

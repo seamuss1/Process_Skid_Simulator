@@ -526,7 +526,13 @@ export function startBlock(config, run, index) {
   if (block.inlets.b) switchInlet(config, run, 'B', block.inlets.b);
   switchInlet(config, run, 'S', block.inlets.sample || null);
   run.valves.sampleMode = block.sample ? block.sample.mode : null;
-  requestColumnValve(config, run, block.columnValve);
+  // The column valve is DEFERRED, not commanded outright. At a block boundary the pumps are still
+  // running at the previous block's flow, so a move requested here is rejected by the
+  // valve-under-flow interlock and raises ALM-CV-02 — which is what a terminal HOLD that bypasses
+  // the column used to do on every single run. A real skid ramps the pumps down first and then
+  // moves the valve, which is what serviceColumnValve does from the control tick.
+  run.valves.cvPending = block.columnValve;
+  serviceColumnValve(config, run);
   requestOutlet(config, run, block.outletDefault);
   const Q = blockFlow_mLs(config, block, prevEnabledBlock(config, index));
   if (Number.isFinite(Q)) run.Q_set_mLs = clamp(Q, 0, config.skid.Qmax_mLs);
@@ -1085,8 +1091,36 @@ export function applyWatchAction(config, run, action, param, watchId) {
  * @param {number} dtCtrl_s  `DT_PHYS * config.sim.ctrlEvery`, s
  * @returns {void}
  */
+/**
+ * Command a deferred column-valve move once the flow has fallen below the interlock gate.
+ *
+ * `startBlock` records the block's target position in `run.valves.cvPending` instead of commanding
+ * it immediately, because at a block boundary the pumps are still at the previous block's flow and
+ * `fluidics.requestColumnValve` would reject the move and raise ALM-CV-02. This retries, silently,
+ * every control tick until the gate opens — the sequence a real skid follows.
+ *
+ * Requesting a position the valve already holds is a no-op in fluidics, so the common case (a
+ * block that does not move the valve) clears on the first call with no interlock check at all.
+ *
+ * @param {object} config frozen config
+ * @param {object} run mutable run state
+ * @returns {void} clears `run.valves.cvPending` once the move is accepted
+ */
+export function serviceColumnValve(config, run) {
+  const v = run.valves;
+  const target = v.cvPending;
+  if (target == null) return;
+  if (v.cmdColumnValve === target) { v.cvPending = null; return; }
+  // Same gate fluidics.requestColumnValve applies. Checking it here keeps a deferred move from
+  // raising ALM-CV-02 once per control tick while the pumps coast down.
+  const gate_mLs = config.skid.QswitchMax_frac * config.skid.Qmax_mLs;
+  if (run.Q_actual_mLs > gate_mLs) return;
+  if (requestColumnValve(config, run, target).ok) v.cvPending = null;
+}
+
 export function controlTick(config, run, dtCtrl_s) {
   pushSlopeSamples(config, run);
+  serviceColumnValve(config, run);
   alarms.evaluateAlarms(config, run, dtCtrl_s);
   applyAlarmDemand(config, run);
   if (run.state === 'RUNNING') evaluateWatches(config, run, dtCtrl_s);

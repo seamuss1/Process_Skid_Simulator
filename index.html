@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="description" content="Process Skid Simulator — a training instrument for preparative chromatography column skids. Runs entirely in the browser: no build step, no dependencies, no network.">
+<title>Process Skid Simulator</title>
+
+<link rel="stylesheet" href="./styles/tokens.css">
+<link rel="stylesheet" href="./styles/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230B0F14'/%3E%3Crect x='11' y='5' width='10' height='22' rx='2' fill='none' stroke='%235DA9FF' stroke-width='2'/%3E%3Crect x='12.5' y='12' width='7' height='4' fill='%234CC9F0'/%3E%3Crect x='12.5' y='18' width='7' height='3' fill='%23B388FF'/%3E%3C/svg%3E">
+
+<script>
+/* Pre-paint theme stamp. Runs before first paint so there is no flash.
+   There is no localStorage in this build (architecture-v2 §12, D26a): the
+   theme resets to the OS preference on every reload, and ui/app.js's theme
+   toggle rewrites this same attribute for the session. */
+(function stampTheme() {
+  var theme = 'dark';
+  try {
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+      theme = 'light';
+    }
+  } catch (err) { /* matchMedia unavailable: stay dark */ }
+  document.documentElement.setAttribute('data-theme', theme);
+})();
+
+/* Boot diagnostics. ES modules are CORS-blocked on the file:// scheme, which
+   is the single most likely reason this page shows nothing at all, so say so
+   in the page rather than only in the console. */
+(function bootDiagnostics() {
+  var isFile = window.location.protocol === 'file:';
+  function reveal(id, text) {
+    function show() {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.hidden = false;
+      if (text) {
+        var slot = el.querySelector('[data-slot="detail"]');
+        if (slot) slot.textContent = text;
+      }
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', show, { once: true });
+    } else {
+      show();
+    }
+  }
+  if (isFile) reveal('boot-note');
+  window.addEventListener('error', function onBootError(ev) {
+    if (!window.__skidBooted) {
+      reveal('boot-error', String((ev && (ev.message || ev.type)) || 'Unknown error'));
+    }
+  }, true);
+})();
+</script>
+</head>
+
+<body>
+
+<!-- ===========================================================================
+     SHELL CONTRACT — read this before editing src/ui/app.js
+     ---------------------------------------------------------------------------
+     #app is the element passed to boot(). Everything below is STATIC structure
+     with stable ids; ui/app.js is expected to query these ids, wire handlers and
+     write text/attributes onto them. It must NOT reassign #app.innerHTML — the
+     shell exists here so that the document is meaningful and accessible before
+     any script runs.
+
+     Vertical band order (architecture-v2 §9.1.1):
+       #titlebar 44px · #run-controls 56px · #alarm-region (0 / 40px per alarm,
+       max 3 then "+N") · #tabstrip 36px · #workspace (flex, min 560px) ·
+       #statusstrip 28px.
+
+     State-driven attributes app.js sets (styled in styles/app.css):
+       #rb-state          data-state = IDLE|READY|RUNNING|HELD|PAUSED|ALARM|ENDED|FAULT
+       .banner            data-severity = INFO|WARN|ALARM|CRITICAL|FAULT
+       .pill              data-variant  = ok|warn|alarm|info|neutral
+       .tag / .chip       data-quality  = OK|SUSPECT|INVALID|BYPASSED
+       #app               data-mode     = METHOD|MANUAL   (drives the P&ID amber outline)
+       [role=tab]         aria-selected = true|false
+       .view              hidden        (only the active view's panel updates per frame)
+
+     Every view container is EMPTY on purpose: createRunView / createMethodView /
+     createResultsView / createSystemView own their contents.
+     ======================================================================== -->
+
+<div id="app" class="app" data-mode="METHOD">
+
+  <a class="skip-link" href="#run-controls">Skip to run controls</a>
+
+  <!-- ================= TITLE BAR (44px) ================= -->
+  <header id="titlebar" class="titlebar">
+    <div class="titlebar__brand">
+      <span class="titlebar__mark" aria-hidden="true"></span>
+      <h1 class="titlebar__name">Process Skid Simulator</h1>
+    </div>
+
+    <div class="titlebar__meta">
+      <span class="titlebar__label">Preset</span>
+      <span id="tb-preset" class="titlebar__value">—</span>
+      <span class="titlebar__sep" aria-hidden="true"></span>
+      <span class="titlebar__label">Column</span>
+      <span id="tb-column" class="titlebar__value">—</span>
+    </div>
+
+    <div class="titlebar__actions">
+      <button id="btn-scenarios" type="button" class="btn btn--ghost"
+              title="Load a teaching scenario">Scenarios</button>
+      <button id="btn-help" type="button" class="btn btn--ghost"
+              title="Glossary and help">Help</button>
+      <button id="btn-cheatsheet" type="button" class="btn btn--icon"
+              aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button>
+      <button id="btn-theme" type="button" class="btn btn--icon"
+              aria-label="Toggle light and dark theme" title="Toggle theme"
+              aria-pressed="false">◐</button>
+      <span id="tb-simulated" class="chip chip--sim" tabindex="0" role="note"
+            title="Every number on this screen is produced by a model, not an instrument. Plug flow with axial dispersion, SMA/Langmuir isotherms, no radial gradients unless the channelling knob is set. See Help for the full DEFERRED list.">SIMULATED</span>
+    </div>
+  </header>
+
+  <!-- ================= RUN CONTROL BAR (56px) ================= -->
+  <!-- §9.4.3, left to right: state · transport · E-stop · speed · progress · mode -->
+  <div id="run-controls" class="runbar" role="toolbar" aria-label="Run controls" tabindex="-1">
+
+    <!-- 1. state -->
+    <div class="runbar__group runbar__group--state">
+      <span id="rb-state" class="pill pill--lg state-pill" data-state="IDLE"
+            role="status" aria-live="polite">IDLE</span>
+      <span class="runbar__stack">
+        <span id="rb-method" class="runbar__method" title="Active method">No method</span>
+        <span id="rb-block" class="runbar__block" title="Current block and index">— · —</span>
+      </span>
+    </div>
+
+    <!-- 2. transport -->
+    <div class="runbar__group runbar__group--transport">
+      <button id="btn-start" type="button" class="btn btn--toolbar btn--primary"
+              title="Start run (Space / Ctrl+Enter)">
+        <span class="btn__glyph" aria-hidden="true">▶</span><span class="btn__label">Start</span>
+      </button>
+      <button id="btn-hold" type="button" class="btn btn--toolbar btn--ghost"
+              title="Hold — flow continues, block clock freezes (H)">
+        <span class="btn__glyph" aria-hidden="true">❚❚</span><span class="btn__label">Hold</span>
+      </button>
+      <button id="btn-skip" type="button" class="btn btn--toolbar btn--ghost btn--hold-to-act"
+              data-hold-ms="400"
+              title="Skip block — press and hold 400 ms (N)">
+        <span class="btn__ring" aria-hidden="true"></span>
+        <span class="btn__glyph" aria-hidden="true">⏭</span><span class="btn__label">Skip block</span>
+      </button>
+      <button id="btn-end" type="button" class="btn btn--toolbar btn--ghost"
+              aria-haspopup="dialog" title="End run (E)">
+        <span class="btn__glyph" aria-hidden="true">■</span><span class="btn__label">End</span>
+      </button>
+      <button id="btn-reset" type="button" class="btn btn--toolbar btn--ghost" hidden
+              title="Reset the skid back to IDLE">
+        <span class="btn__glyph" aria-hidden="true">⟲</span><span class="btn__label">Reset</span>
+      </button>
+    </div>
+
+    <!-- 3. emergency stop — fixed x, separated by a 16px gap and a rule -->
+    <span class="runbar__rule" role="separator" aria-orientation="vertical"></span>
+    <div class="runbar__group runbar__group--estop">
+      <button id="btn-estop" type="button" class="btn btn--estop"
+              title="Emergency stop (Shift+Esc twice within 1 s). Acts immediately. No undo.">
+        <span class="btn__glyph" aria-hidden="true">⏻</span>
+        <span class="btn__label">E-STOP</span>
+      </button>
+    </div>
+    <span class="runbar__rule" role="separator" aria-orientation="vertical"></span>
+
+    <!-- 4. simulation speed -->
+    <div class="runbar__group runbar__group--speed">
+      <span class="runbar__caption" id="speed-caption">Sim speed</span>
+      <div id="speed-group" class="segmented" role="radiogroup" aria-labelledby="speed-caption">
+        <button type="button" class="segmented__btn" role="radio" aria-checked="true"
+                data-speed="1" title="1× (key 1)">1×</button>
+        <button type="button" class="segmented__btn" role="radio" aria-checked="false"
+                data-speed="2" title="2× (key 2)">2×</button>
+        <button type="button" class="segmented__btn" role="radio" aria-checked="false"
+                data-speed="5" title="5× (key 3)">5×</button>
+        <button type="button" class="segmented__btn" role="radio" aria-checked="false"
+                data-speed="10" title="10× (key 4)">10×</button>
+        <button type="button" class="segmented__btn" role="radio" aria-checked="false"
+                data-speed="60" title="60× (key 5)">60×</button>
+        <button type="button" class="segmented__btn" role="radio" aria-checked="false"
+                data-speed="300" title="300× (key 6)">300×</button>
+        <button type="button" class="segmented__btn" role="radio" aria-checked="false"
+                data-speed="1000" title="1000× (key 7)">1000×</button>
+      </div>
+      <button id="btn-pause" type="button" class="btn btn--icon" aria-pressed="false"
+              aria-label="Pause simulation" title="Pause simulation (P)">❚❚</button>
+      <!-- honesty readout: rendered as "1000× (limited to 450×)" from
+           run.speed / run.speedDeficit whenever run.speedDeficit > 1.01 -->
+      <span id="rb-speed-note" class="runbar__note" hidden></span>
+    </div>
+
+    <!-- 5. progress -->
+    <div class="runbar__group runbar__group--progress">
+      <div class="runbar__counters">
+        <span class="counter"><span class="counter__label">Vol</span><span id="rb-volume" class="counter__value num">0.00</span><span class="counter__unit">mL</span></span>
+        <span class="counter"><span class="counter__label">CV</span><span id="rb-cv" class="counter__value num">0.000</span><span class="counter__unit">CV</span></span>
+        <span class="counter"><span class="counter__label">Time</span><span id="rb-time" class="counter__value num">00:00:00</span></span>
+      </div>
+      <div id="rb-progress" class="progress" role="progressbar" aria-label="Run progress"
+           aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <span id="rb-progress-fill" class="progress__fill"></span>
+      </div>
+    </div>
+
+    <!-- 6. mode -->
+    <div class="runbar__group runbar__group--mode">
+      <span id="rb-mode" class="pill" data-variant="neutral"
+            title="METHOD: the engine drives the skid. MANUAL: you do.">METHOD</span>
+    </div>
+  </div>
+
+  <!-- ================= ALARM BANNER STACK ================= -->
+  <!-- §9.7: one assertive region for CRITICAL/FAULT, one polite for WARN.
+       Only the newest alarm's TEXT is written into them, rebuilt not appended,
+       so a screen reader announces once. The visible banners live in
+       #alarm-stack and are never themselves live regions. -->
+  <div id="alarm-region" class="alarms" role="region" aria-label="Alarms">
+    <div id="alarm-live-assertive" class="sr-only" role="alert"
+         aria-live="assertive" aria-atomic="true"></div>
+    <div id="alarm-live-polite" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+    <div id="alarm-stack" class="alarms__stack"></div>
+    <button id="alarm-more" type="button" class="alarms__more" hidden
+            title="Show the remaining active alarms in the System tab"></button>
+  </div>
+
+  <!-- ================= TAB STRIP (36px) ================= -->
+  <nav class="tabstrip" aria-label="Workspace">
+    <div id="tabstrip" class="tabstrip__list" role="tablist" aria-label="Workspace views">
+      <button id="tab-run" type="button" class="tab" role="tab" aria-selected="true"
+              aria-controls="view-run" tabindex="0" title="Run (Alt+1)">
+        <span class="tab__label">Run</span>
+      </button>
+      <button id="tab-method" type="button" class="tab" role="tab" aria-selected="false"
+              aria-controls="view-method" tabindex="-1" title="Method (Alt+2)">
+        <span class="tab__label">Method</span>
+        <span id="tab-method-badge" class="tab__badge" hidden></span>
+      </button>
+      <button id="tab-results" type="button" class="tab" role="tab" aria-selected="false"
+              aria-controls="view-results" tabindex="-1" title="Results (Alt+3)">
+        <span class="tab__label">Results</span>
+      </button>
+      <button id="tab-system" type="button" class="tab" role="tab" aria-selected="false"
+              aria-controls="view-system" tabindex="-1" title="System, event log and alarms (Alt+4)">
+        <span class="tab__label">System</span>
+        <span id="tab-system-badge" class="tab__badge" hidden></span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ================= WORKSPACE ================= -->
+  <main id="workspace" class="workspace">
+
+    <!-- One empty container per view module. Contents are owned by
+         src/ui/view_*.js; nothing here but the panel semantics. -->
+    <section id="view-run" class="view view--run" role="tabpanel"
+             aria-labelledby="tab-run" tabindex="0"></section>
+
+    <section id="view-method" class="view view--method" role="tabpanel"
+             aria-labelledby="tab-method" tabindex="0" hidden></section>
+
+    <section id="view-results" class="view view--results" role="tabpanel"
+             aria-labelledby="tab-results" tabindex="0" hidden></section>
+
+    <section id="view-system" class="view view--system" role="tabpanel"
+             aria-labelledby="tab-system" tabindex="0" hidden></section>
+
+    <!-- Boot-time notices. Both are hidden until the inline head script shows
+         one; they sit inside the workspace so they are impossible to miss. -->
+    <div id="boot-note" class="bootnote" hidden>
+      <h2 class="bootnote__title">This page must be served over HTTP</h2>
+      <p class="bootnote__body">
+        ES modules are CORS-blocked on the <code>file://</code> scheme, so opening
+        <code>index.html</code> straight from disk loads nothing. From the repository root run:
+      </p>
+      <pre class="bootnote__cmd"><code>npm start</code></pre>
+      <p class="bootnote__body">
+        That starts <code>tools/serve.js</code> — a zero-dependency static server — and opens
+        <code>http://localhost:8080/index.html</code>. Any other static server on any port works
+        equally well; the app makes no network requests of its own.
+      </p>
+    </div>
+
+    <div id="boot-error" class="bootnote bootnote--error" hidden>
+      <h2 class="bootnote__title">The application failed to start</h2>
+      <p class="bootnote__body">
+        A module failed to load or threw during boot. The browser console has the stack trace.
+      </p>
+      <pre class="bootnote__cmd"><code data-slot="detail"></code></pre>
+    </div>
+  </main>
+
+  <!-- ================= STATUS STRIP (28px) ================= -->
+  <!-- §9.1.1: a deliberate redundant copy of Run-view data. It is the only
+       process state visible while the user is editing a method. -->
+  <footer id="statusstrip" class="statusstrip" aria-label="Live process values">
+    <span class="chip" id="st-p1" data-quality="OK">
+      <span class="chip__tag">P1</span><span class="chip__value num">—</span><span class="chip__unit">bar</span>
+    </span>
+    <span class="chip" id="st-dp" data-quality="OK">
+      <span class="chip__tag">ΔP</span><span class="chip__value num">—</span><span class="chip__unit">bar</span>
+    </span>
+    <span class="chip" id="st-flow" data-quality="OK">
+      <span class="chip__tag">Flow</span><span class="chip__value num">—</span><span class="chip__unit">mL/min</span>
+    </span>
+    <span class="chip" id="st-pctb" data-quality="OK">
+      <span class="chip__tag">%B</span><span class="chip__value num">—</span><span class="chip__unit">%</span>
+    </span>
+    <span class="chip chip--hero" id="st-uv280" data-quality="OK">
+      <span class="chip__tag">UV280</span><span class="chip__value num">—</span><span class="chip__unit">mAU</span>
+    </span>
+    <span class="chip" id="st-cond" data-quality="OK">
+      <span class="chip__tag">Cond</span><span class="chip__value num">—</span><span class="chip__unit">mS/cm</span>
+    </span>
+    <span class="chip" id="st-ph" data-quality="OK">
+      <span class="chip__tag">pH</span><span class="chip__value num">—</span>
+    </span>
+    <span class="chip" id="st-cv">
+      <span class="chip__tag">Total</span><span class="chip__value num">—</span><span class="chip__unit">CV</span>
+    </span>
+    <span class="chip" id="st-clock">
+      <span class="chip__tag">Sim</span><span class="chip__value num">00:00:00</span>
+    </span>
+    <span class="statusstrip__spacer"></span>
+    <span class="chip chip--quiet" id="st-flags" title="Active quality flags (run.qualityFlags)">
+      <span class="chip__tag">Flags</span><span class="chip__value num">0x0000</span>
+    </span>
+  </footer>
+
+  <!-- ================= FLOATING SURFACES =================
+       createOverlayHost(#overlay-host) owns popovers, modals, toasts, coach
+       marks, the tour dim and the "?" cheat sheet (§6.33). It is last in DOM
+       order so it stacks above the shell without a z-index fight. -->
+  <div id="overlay-host" class="overlay-host"></div>
+
+  <!-- Perf overlay, toggled by Ctrl+Alt+P (§6.32). -->
+  <div id="perf-overlay" class="perf" hidden aria-hidden="true"></div>
+
+</div><!-- /#app -->
+
+<script type="module">
+  import { boot } from './src/ui/app.js';
+  boot(document.getElementById('app'));
+  /* Only reached when the import resolved AND boot() returned without throwing.
+     Anything earlier leaves __skidBooted undefined, and the head script's
+     window 'error' listener reveals #boot-error instead of a blank page. */
+  window.__skidBooted = true;
+</script>
+
+</body>
+</html>
