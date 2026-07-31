@@ -1,41 +1,52 @@
 /**
- * @file src/ui/onboarding.js — the first-run experience, the six-step tour, the coach-hint
- *                             scheduler, and the one-click scenario launcher.
- *
- * Contract: architecture-v2 §6.34 (this module), §9.6 (onboarding and teaching), §6.24 (the panel
- * shape), §6.33 (every floating surface comes from `ui/overlay.js`).
+ * @file src/ui/onboarding.js — the first-run window, the six-step tour, the coach-hint scheduler,
+ *                             and the one-click scenario launcher, in the FT-CLASSIC idiom.
  *
  * **The scenario picker is the ONLY UI surface that reaches `sim.loadScenario` and
  * `presets.listScenarios`.** Without this module the eight mandatory teaching scenarios ship
- * unreachable, which is exactly the defect §11 C-81 records.
+ * unreachable.
  *
- * All explanatory prose is `src/data/glossary.js` (§6.22.1) or the scenario's own
- * `expectedOutcome` / `teachingNotes` from `src/data/presets.js`. This file authors the connective
- * sentences only — it never re-writes a definition that already exists in the glossary.
+ * TEXT POLICY. The old prose-heavy intro is gone. The first-run window is now a compact beveled
+ * panel: **one short line, then a grid of eight scenario buttons**, each an icon plus a one-to-three
+ * word caption. The sentences that used to sit on the screen now live in the buttons' `title`
+ * tooltips, where the scenario's own `expectedOutcome` from `src/data/presets.js` is the text —
+ * this file authors captions, not explanations. All eight scenarios are one click away from both
+ * the first-run window and the launcher.
  *
- * STATE IS IN MEMORY FOR THE SESSION. There is no `localStorage` (§12 D26a), so the first-run modal
- * reappears on reload; the modal says so itself rather than pretending otherwise.
+ * The tour's coach marks keep their prose deliberately: a teaching card IS the explanation surface,
+ * and its text comes from `src/data/glossary.js` plus one connective sentence per step. Nothing else
+ * in this module puts a sentence on screen.
+ *
+ * STATE IS IN MEMORY FOR THE SESSION. There is no `localStorage`, so the first-run window reappears
+ * on reload.
  *
  * This module mutates nothing on `run` or `config`: it calls `core/sim.js` actions and surfaces
  * their `{ ok, reason }` verbatim.
  *
- * CSS CONTRACT — the classes this module emits, styled in `styles/app.css`:
- *   .onboarding (display:contents; the Panel.el §6.24 requires, contributing no layout)
- *   .onboard .onboard__lede .onboard__note
- *   .scenario-list .scenario .scenario__name .scenario__outcome .scenario__hook
- *   .modal--firstrun on the first-run dialog
+ * CSS CONTRACT — the classes this module emits. A complete beveled base sheet is injected once into
+ * `@layer chromaskid-onboarding`, so the window is correct with `styles/tokens.css` alone;
+ * `styles/app.css` is unlayered and therefore overrides every rule here without a specificity fight.
+ *   .onboarding (display:contents; the Panel `el`, contributing no layout)
+ *   .ob-lede .ob-grid .ob-sc .ob-sc__i .ob-sc__c .ob-sc__x
+ *   .modal--firstrun on the first-run window
  *
- * Tour anchors are tried in priority order per step (see `TOUR_STEPS`) and every step falls back to
- * the workspace, so a view that renames a class costs a precise spotlight, never the tour.
+ * TOUR ANCHOR CONTRACT — every step resolves the first selector that hits, and the primary selector
+ * is always a `[data-tour="…"]` attribute. Panels that want a precise spotlight should stamp:
+ *   data-tour="run-controls" | "toolbar" | "pid" | "trend" | "faceplate" | "fractions" |
+ *   "nav-method" | "status"
+ * Every step also falls back to the workspace, so a renamed class costs a precise spotlight, never
+ * the tour.
+ *
+ * @module ui/onboarding
  */
 
 import * as sim from '../core/sim.js';
 import * as presets from '../data/presets.js';
 import { glossaryFor } from '../data/glossary.js';
 import * as overlay from './overlay.js';
-import { h } from './format.js';
+import { h, hSvg } from './format.js';
 
-/** Minimum wall-clock gap between two coach hints, ms (§9.6: max one card per 20 s). */
+/** Minimum wall-clock gap between two coach hints, ms (max one card per 20 s). */
 const HINT_INTERVAL_MS = 20000;
 
 /** How long a coach hint stays on screen, ms. */
@@ -47,8 +58,165 @@ const HINT_WARMUP_MS = 4000;
 /** Conductivity rise, mS/cm above the running baseline, that means the salt front has arrived. */
 const COND_FRONT_RISE_mScm = 2.0;
 
+/* ══════════════════════════════════════════════════════════════════════════════════════════════
+ * BASE STYLES — beveled, square-cornered, token-only
+ * ════════════════════════════════════════════════════════════════════════════════════════════ */
+
+const BEV_RAISED = 'inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),'
+  + 'inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)';
+const BEV_SUNKEN = 'inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),'
+  + 'inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt)';
+
+/* The ordering statement is emitted by BOTH this module and ui/overlay.js, so whichever stylesheet
+   the browser parses first fixes the same order: onboarding's rules win over the overlay base. */
+const BASE_CSS = `@layer chromaskid-overlay, chromaskid-onboarding;
+@layer chromaskid-onboarding {
+.onboarding{display:contents;}
+.ob{display:flex;flex-direction:column;gap:6px;}
+.ob-lede{margin:0;font:400 11px/1.35 var(--font-ui);color:var(--ink-2);}
+/* Four fixed columns, so the eight scenarios always read as a 4x2 block however wide the window
+   the host stylesheet gives the dialog. Two columns once there is no room for four. */
+.ob-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;}
+@media (max-width:460px){.ob-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
+.ob-sc{display:flex;flex-direction:column;align-items:center;gap:4px;width:100%;min-height:66px;
+  padding:6px 4px 5px;background:var(--face);border:0;color:var(--ink);cursor:pointer;
+  box-shadow:${BEV_RAISED};font:700 9px/1.2 var(--font-ui);letter-spacing:.04em;
+  text-transform:uppercase;text-align:center;}
+.ob-sc:active{box-shadow:${BEV_SUNKEN};}
+.ob-sc:active .ob-sc__i,.ob-sc:active .ob-sc__c{transform:translate(1px,1px);}
+.ob-sc__i{display:block;color:var(--ink);}
+.ob-sc__c{display:block;min-height:22px;color:var(--ink);}
+.ob-sc__x{display:block;margin-top:auto;padding:0 3px;background:var(--fld-bg);
+  box-shadow:${BEV_SUNKEN};font:700 9px/1.5 var(--font-num);color:var(--fld-sp);
+  font-variant-numeric:tabular-nums;}
+}`;
+
+let baseCssInjected = false;
+
+/** Inject the base stylesheet once, as the first child of `<head>` so author rules win. */
+function injectBaseCss() {
+  if (baseCssInjected || typeof document === 'undefined') return;
+  baseCssInjected = true;
+  const head = document.head || document.documentElement;
+  const style = document.createElement('style');
+  style.setAttribute('data-owner', 'ui/onboarding.js');
+  style.textContent = BASE_CSS;
+  head.insertBefore(style, head.firstChild);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════
+ * ICONS — inline SVG, authored here, one per scenario
+ * ════════════════════════════════════════════════════════════════════════════════════════════ */
+
 /**
- * The six coach-mark steps of §9.6.
+ * Scenario pictograms on a 16×16 grid. `{d}` is a stroked path, `{d, fill:true}` a filled one,
+ * `{c:[cx,cy,r]}` a circle. Each one draws the *shape of the failure*, which is what the operator
+ * will actually see on the trend.
+ * @type {{[key:string]: Array<{d?:string, c?:number[], fill?:boolean}>}}
+ */
+const ICONS = {
+  /* two resolved gaussians on a baseline */
+  'textbook-clean': [
+    { d: 'M1 14 H15' },
+    { d: 'M1.5 14 C3 14 3 4 5 4 C7 4 7 14 8.5 14' },
+    { d: 'M8.5 14 C10 14 10 7.5 11.5 7.5 C13 7.5 13 14 14.5 14' },
+  ],
+  /* a square-topped, fronting peak: the column is full */
+  'overloaded-column': [
+    { d: 'M1 14 H15' },
+    { d: 'M1.5 14 L4.5 4 H11 L12 14' },
+  ],
+  /* a very steep ramp */
+  'gradient-too-steep': [
+    { d: 'M1 14 H15' },
+    { d: 'M2 13 L8 13 L10.5 2 L15 2' },
+  ],
+  /* a pressure gauge with the needle high */
+  'fouled-column-high-dp': [
+    { c: [8, 9, 5.5] },
+    { d: 'M8 9 L11.6 5.4' },
+    { d: 'M2.6 9 H4' },
+    { d: 'M12 9 H13.4' },
+    { d: 'M8 2.6 V4' },
+  ],
+  /* bubbles travelling down a pipe */
+  'air-in-the-line': [
+    { d: 'M1 4.5 H15' },
+    { d: 'M1 12.5 H15' },
+    { c: [4.5, 8.5, 1.7] },
+    { c: [8.5, 7.8, 1.2] },
+    { c: [12, 9.2, 1.5] },
+  ],
+  /* a droplet with the pH falling */
+  'wrong-buffer-ph': [
+    { d: 'M8 1.5 C5 6 4 8.2 4 10 A4 4 0 0 0 12 10 C12 8.2 11 6 8 1.5 Z' },
+    { d: 'M8 7 V11.4' },
+    { d: 'M6.3 9.7 L8 11.4 L9.7 9.7' },
+  ],
+  /* a snowflake */
+  'cold-room': [
+    { d: 'M8 1 V15' }, { d: 'M2 4.5 L14 11.5' }, { d: 'M14 4.5 L2 11.5' },
+    { d: 'M6 2.6 L8 4.2 L10 2.6' }, { d: 'M6 13.4 L8 11.8 L10 13.4' },
+  ],
+  /* a peak sitting to the left of the vials that should have caught it */
+  'uncompensated-fractionation': [
+    { d: 'M1 6.5 C2.5 6.5 2.5 1.5 4.5 1.5 C6.5 1.5 6.5 6.5 8 6.5' },
+    { d: 'M2 9 H5 V15 H2 Z' }, { d: 'M6.5 9 H9.5 V15 H6.5 Z' }, { d: 'M11 9 H14 V15 H11 Z' },
+  ],
+  /* the tour: a compass rose */
+  tour: [{ c: [8, 8, 6] }, { d: 'M10.8 5.2 L9.2 9.2 L5.2 10.8 L6.8 6.8 Z', fill: true }],
+  /* start with the shipped method and nothing applied */
+  blank: [{ d: 'M2 3 H14 V13 H2 Z' }, { d: 'M2 11 H14' }],
+  /* generic fallback: a warning triangle */
+  fault: [{ d: 'M8 2 L15 14 H1 Z' }, { d: 'M8 6.5 V10' }, { d: 'M8 11.6 V12.4' }],
+};
+
+/**
+ * Build one scenario pictogram.
+ * @param {string} key an {@link ICONS} key; unknown keys fall back to the warning triangle
+ * @param {number} [size=22] edge length in px
+ * @returns {SVGElement} the icon, always `aria-hidden` — the caption and the title carry the name
+ */
+function icon(key, size) {
+  const px = typeof size === 'number' && size > 0 ? Math.round(size) : 22;
+  const shapes = ICONS[key] || ICONS.fault;
+  const svg = hSvg('svg', {
+    viewBox: '0 0 16 16', width: px, height: px, class: 'ob-sc__i',
+    'aria-hidden': 'true', focusable: 'false',
+    fill: 'none', stroke: 'currentColor', 'stroke-width': 1.4,
+    'stroke-linecap': 'square', 'stroke-linejoin': 'miter',
+  });
+  for (let i = 0; i < shapes.length; i += 1) {
+    const s = shapes[i];
+    const paint = s.fill ? { fill: 'currentColor', stroke: 'none' } : {};
+    if (s.c) svg.appendChild(hSvg('circle', Object.assign({ cx: s.c[0], cy: s.c[1], r: s.c[2] }, paint)));
+    else svg.appendChild(hSvg('path', Object.assign({ d: s.d }, paint)));
+  }
+  return svg;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════
+ * TABLES
+ * ════════════════════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The one-to-three word caption on each scenario button. An id absent from this table falls back to
+ * the first two words of the scenario's own name, so a new scenario is never unreachable.
+ * @type {{[scenarioId:string]: string}}
+ */
+const SCENARIO_CAPTION = {
+  'textbook-clean': 'CLEAN',
+  'overloaded-column': 'OVERLOAD',
+  'gradient-too-steep': 'STEEP GRAD',
+  'fouled-column-high-dp': 'HIGH ΔP',
+  'air-in-the-line': 'AIR SLUG',
+  'wrong-buffer-ph': 'LOW PH',
+  'cold-room': 'COLD 5 °C',
+  'uncompensated-fractionation': 'FRAC LAG',
+};
+
+/**
+ * The six coach-mark steps.
  *
  * `selectors` is tried in order against the live document; the first hit anchors the spotlight.
  * `glossary` supplies the authoritative explanation, `lead` the one sentence that ties it to what
@@ -58,51 +226,58 @@ const COND_FRONT_RISE_mScm = 2.0;
  */
 const TOUR_STEPS = [
   {
-    title: 'The run bar is always here',
-    lead: 'Start, Hold, Skip block, End and the emergency stop never move and never hide behind a tab. '
-      + 'The pill on the left is the run state, and it decides what the other controls will let you do.',
+    title: 'The toolbar',
+    lead: 'Run, hold, continue, skip block, end and the emergency stop never move and never hide '
+      + 'behind a tab. Every button is an icon: hover it for its name. The lamp on the left is the '
+      + 'run state, and it decides what the other controls will let you do.',
     glossary: 'run-state',
-    selectors: ['[data-tour="run-controls"]', '#run-controls', '.runbar'],
+    selectors: ['[data-tour="run-controls"]', '[data-tour="toolbar"]', '.ft-toolbar', '#run-controls',
+      '.toolbar', '.runbar'],
   },
   {
-    title: 'The skid, drawn as a P&ID',
-    lead: 'Valves, pump, mixer, detectors and the column itself. Inside the column the packed bed is '
-      + 'painted live: coloured bands are protein moving down the bed, and the yellow edge is the salt front.',
+    title: 'The P&ID',
+    lead: 'Valves, pump, mixer, detectors and the column itself, drawn as a plant would draw them. '
+      + 'Pipes carry their service colour and march while they flow. Inside the column the packed '
+      + 'bed is painted live: coloured bands are protein, the yellow edge is the salt front.',
     glossary: 'C-101',
-    selectors: ['[data-tour="pid"]', '#view-run .rv-pid', '.rv-pid', '.pid-root', '#view-run'],
+    selectors: ['[data-tour="pid"]', '.ft-pid', '.pid-root', '#view-run .rv-pid', '.rv-pid'],
   },
   {
-    title: 'The chromatogram',
-    lead: 'UV, conductivity, pH, %B and pressure on shared axes. Press X to switch the x axis between '
-      + 'volume, column volumes and time — the same run tells three different stories.',
+    title: 'The trend',
+    lead: 'UV, conductivity, pH, %B, pressure and flow on shared axes, always visible under the '
+      + 'P&ID. A solid pen is the PV; a dashed pen of the same colour is its setpoint, so you read '
+      + 'the pair at a glance. Press X to switch the x axis between volume, column volumes and time.',
     glossary: 'UV-101',
-    selectors: ['[data-tour="chromatogram"]', '#view-run .rv-chart', '.rv-chart', '#view-run .chart', '#view-run'],
+    selectors: ['[data-tour="trend"]', '[data-tour="chromatogram"]', '.ft-trend', '#view-run .rv-chart',
+      '.rv-chart', '.chart'],
   },
   {
-    title: 'The phase rail',
-    lead: 'Every block of the method, drawn proportional to the volume it delivers, with the current '
-      + 'one shaded as it runs. Click a block to see the parameters it is running on.',
-    glossary: 'method.block',
-    selectors: ['[data-tour="phase-rail"]', '#view-run .rv-rail', '.rv-rail', '.rail'],
+    title: 'Faceplates',
+    lead: 'Click any instrument bubble on the P&ID and its faceplate opens: PV, setpoint, a bargraph '
+      + 'against the alarm limits, the AUTO/MAN lamps and whatever that tag can do. That is where '
+      + 'the numbers and the controls live, which is why the screen itself carries so few words.',
+    glossary: 'FT-101',
+    selectors: ['[data-tour="faceplate"]', '.pid-bubble', '.isa-bubble', '[data-tour="pid"]', '.ft-pid'],
   },
   {
-    title: 'Fractions and pooling',
-    lead: 'The collector fills vials as the peak passes. Afterwards, on the Results tab, you drag a '
-      + 'window across the chromatogram to pool them and the yield and purity update as you drag.',
+    title: 'Fractions',
+    lead: 'The collector fills vials as the peak passes. Afterwards, on the Results screen, you drag '
+      + 'a window across the chromatogram to pool them and the yield and purity update as you drag.',
     glossary: 'pool',
-    selectors: ['[data-tour="fractions"]', '#view-run .rv-frac', '.rv-frac', '.fracstrip'],
+    selectors: ['[data-tour="fractions"]', '.ft-frac', '#view-run .rv-frac', '.rv-frac', '.fracstrip'],
   },
   {
-    title: 'The Method tab',
-    lead: 'The blocks, their durations, gradients and fraction rules. Change one number, come back to '
-      + 'the Run tab and press Start — that loop is the whole point of the simulator.',
+    title: 'The method',
+    lead: 'The blocks, their durations, gradients and fraction rules. Change one number, come back '
+      + 'and press run — that loop is the whole point of the simulator.',
     glossary: 'block.duration',
-    selectors: ['[data-tour="tab-method"]', '#tab-method', '.tabstrip'],
+    selectors: ['[data-tour="nav-method"]', '[data-tour="tab-method"]', '#tab-method', '.ft-nav',
+      '.tabstrip'],
   },
 ];
 
 /**
- * The glossary concept each scenario is really teaching, shown as the picker's one-line hook.
+ * The glossary concept each scenario is really teaching, used for the launch hint.
  * Every id here resolves in `data/glossary.js`.
  * @type {{[scenarioId:string]: string}}
  */
@@ -118,7 +293,7 @@ const SCENARIO_HOOK = {
 };
 
 /**
- * Event type → the glossary entry the coach hint should teach from (§9.6).
+ * Event type → the glossary entry the coach hint should teach from.
  * An event type absent from this table never produces a hint.
  * @type {{[eventType:string]: string}}
  */
@@ -145,20 +320,22 @@ const HINT_FOR_EVENT = {
 /**
  * Create the onboarding panel.
  *
- * Mounted at boot step 4a (§6.32): after the four views, because the tour's coach marks measure
- * them, and before the rAF loop, because the tour may auto-load `textbook-clean` at 60×.
+ * Mounted at boot after the views, because the tour's coach marks measure them, and before the rAF
+ * loop, because the tour may auto-load `textbook-clean` at 60×.
  *
  * @param {Element} rootEl the shell element the (invisible) host node is appended to
  * @param {{config:object, run:object, bus:object, sim:object, fmt:object, overrides:object}} ctx
- *   the one §2.4 context
+ *   the one context
  * @param {object} overlayHost the `OverlayHost` from `ui/overlay.js::createOverlayHost`
  * @returns {{el:Element, mount:function():void, update:function(object):void,
  *            destroy:function():void, hintsEnabled:boolean}} the Panel, plus the public
- *   `hintsEnabled` flag the shell's Hints button toggles
+ *   `hintsEnabled` flag the shell's Hints control toggles
  */
 export function createOnboarding(rootEl, ctx, overlayHost) {
+  injectBaseCss();
+
   // `.onboarding` is `display: contents` — it satisfies the Panel contract's `el` without adding a
-  // box to the shell's six-row grid. Every surface this module shows is an overlay, not a child.
+  // box to the shell's grid. Every surface this module shows is an overlay, not a child.
   const el = h('div', { class: 'onboarding' });
   rootEl.appendChild(el);
 
@@ -207,7 +384,7 @@ export function createOnboarding(rootEl, ctx, overlayHost) {
 }
 
 /**
- * Show the first-run modal, once per session.
+ * Show the first-run window, once per session.
  * @param {object} o the onboarding instance
  * @returns {void}
  */
@@ -230,7 +407,7 @@ function destroy(o) {
 }
 
 /**
- * Dismiss the modal, the coach mark and any live hint.
+ * Dismiss the window, the coach mark and any live hint.
  * @param {object} o the onboarding instance
  * @returns {void}
  */
@@ -241,49 +418,99 @@ function dismissAll(o) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * FIRST-RUN MODAL
+ * THE SCENARIO GRID — shared by the first-run window and the launcher
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
- * The 560×420 first-run modal of §9.6: three ways in, and an honest note about session state.
+ * A one-to-three word caption for a scenario, falling back to the first two words of its name.
+ * @param {{id:string, name:string}} row a `listScenarios()` row
+ * @returns {string} the uppercase caption
+ */
+function captionFor(row) {
+  const fixed = SCENARIO_CAPTION[row.id];
+  if (fixed) return fixed;
+  const words = String(row.name || row.id).split(/[\s—-]+/).filter(Boolean).slice(0, 2);
+  return words.join(' ').toUpperCase().slice(0, 14);
+}
+
+/**
+ * Build the grid of eight scenario buttons: icon, caption, and the scenario's speed in a sunken
+ * chip. One click loads the configuration, applies the fault and starts the run.
+ *
+ * The explanation is not on the button — it is the button's `title`, which carries the scenario's
+ * own `expectedOutcome` from `data/presets.js` verbatim.
+ *
+ * @param {object} o the onboarding instance
+ * @returns {Element} the `.ob-grid` element
+ */
+function buildScenarioGrid(o) {
+  const grid = h('div', { class: 'ob-grid', role: 'group', 'aria-label': 'Teaching scenarios' });
+  const rows = presets.listScenarios();
+
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    const full = findScenario(row.id);
+    const speed = full && typeof full.speed === 'number' ? full.speed : 1;
+    const caption = captionFor(row);
+    const title = `${row.name} — ${row.expectedOutcome} Loads, applies its fault and starts at ${speed}×.`;
+
+    const btn = h('button', {
+      type: 'button',
+      class: 'ob-sc',
+      title,
+      // The accessible name starts with the visible caption, so voice control can address the
+      // button by what is written on it, and screen readers still get the whole outcome.
+      'aria-label': `${caption} — ${title}`,
+    },
+    icon(row.id, 22),
+    h('span', { class: 'ob-sc__c' }, caption),
+    h('span', { class: 'ob-sc__x' }, speed + '×'));
+
+    btn.addEventListener('click', () => {
+      closeModal(o);
+      launchScenario(o, row.id);        // one click: load, apply the fault, and start
+    });
+    grid.appendChild(btn);
+  }
+  return grid;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════
+ * FIRST-RUN WINDOW
+ * ════════════════════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The first-run window: one short line, then every scenario as a button. The tour and the plain
+ * start are the two dialog actions.
  * @param {object} o the onboarding instance
  * @returns {void}
  */
 function showFirstRunModal(o) {
-  const body = h('div', { class: 'onboard' },
-    h('p', { class: 'onboard__lede' },
-      'This is a simulated preparative chromatography skid. Nothing here is connected to hardware: '
-      + 'the bed, the sensors, the alarms and the fraction collector are all solved from physics on '
-      + 'your machine, at up to 1000× real time.'),
-    h('p', {},
-      'Pick a way in. A scenario is the fastest route to something interesting — each one loads a '
-      + 'complete method and a specific failure mode, and starts immediately so you can watch it happen.'),
-    h('p', { class: 'onboard__note' },
-      'Nothing is saved between reloads — there is no local storage, no account and no network. '
-      + 'This dialog will appear again next time you load the page, and your layout and unit '
-      + 'preferences last only for this session.'));
+  const body = h('div', { class: 'ob' },
+    h('p', { class: 'ob-lede' },
+      'Simulated skid — solved from physics, nothing connected, nothing saved.'),
+    buildScenarioGrid(o));
 
   // `showModal` closes nothing by itself: every action handler is handed the handle and dismisses.
   o.modalHandle = overlay.showModal(o.host, {
-    title: 'This is a simulated chromatography skid',
+    title: 'Select a start',
     content: body,
     className: 'modal--firstrun',
     dismissible: true,
     onDismiss: () => { o.modalHandle = null; },
     actions: [
       {
-        label: 'Take the 60-second tour',
-        variant: 'primary',
+        label: 'Tour',
+        icon: 'play',
+        title: 'Take the 60-second guided tour of the screen',
+        variant: 'ghost',
         onClick: (hd) => { overlay.dismiss(hd); startTour(o); },
       },
       {
-        label: 'Load a scenario',
-        variant: 'ghost',
-        onClick: (hd) => { overlay.dismiss(hd); showScenarioPicker(o); },
-      },
-      {
-        label: 'Start empty',
-        variant: 'ghost',
+        label: 'Idle',
+        icon: 'blank',
+        title: 'Start idle on the shipped method, with no scenario applied',
+        variant: 'primary',
         onClick: (hd) => overlay.dismiss(hd),
       },
     ],
@@ -291,7 +518,7 @@ function showFirstRunModal(o) {
 }
 
 /**
- * Close whatever modal onboarding currently owns.
+ * Close whatever window onboarding currently owns.
  * @param {object} o the onboarding instance
  * @returns {void}
  */
@@ -304,8 +531,8 @@ function closeModal(o) {
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Run the six-step coach-mark tour (§9.6). Back / Next / Skip come from the overlay's coach mark;
- * `Esc` exits through the same path. At the end `textbook-clean` is auto-loaded at 60×, because a
+ * Run the six-step coach-mark tour. Back / Next / Skip come from the overlay's coach mark; `Esc`
+ * exits through the same path. At the end `textbook-clean` is auto-loaded at 60×, because a
  * simulator that starts idle teaches nothing.
  *
  * @param {object} o the onboarding instance
@@ -366,7 +593,12 @@ function composeStepBody(step) {
  */
 function resolveTarget(o, selectors) {
   for (const sel of selectors) {
-    const el = document.querySelector(sel);
+    let el = null;
+    try {
+      el = document.querySelector(sel);
+    } catch (err) {
+      el = null;                       // a malformed selector costs this candidate, not the tour
+    }
     if (el) return el;
   }
   return document.querySelector('.workspace') || o.rootEl || document.body;
@@ -384,7 +616,7 @@ function endTour(o) {
 
 /**
  * Finish the tour and auto-load `textbook-clean`, which carries `autoStart: true` and `speed: 60`,
- * so something is moving within five seconds (§9.6).
+ * so something is moving within five seconds.
  * @param {object} o the onboarding instance
  * @returns {void}
  */
@@ -395,65 +627,39 @@ function finishTour(o) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * SCENARIO PICKER — the only caller of sim.loadScenario and presets.listScenarios
+ * SCENARIO LAUNCHER — the only caller of sim.loadScenario and presets.listScenarios
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Show the scenario picker: every shipped teaching scenario, each loading AND starting in one
- * click so the learner watches the failure mode rather than configuring it.
+ * Show the scenario launcher: every shipped teaching scenario as one icon button, each loading AND
+ * starting in one click so the learner watches the failure mode rather than configuring it.
  *
  * @param {object} o the onboarding instance
  * @returns {void}
  */
 export function showScenarioPicker(o) {
   closeModal(o);
-  const list = h('ul', { class: 'scenario-list' });
-  const rows = presets.listScenarios();
+  injectBaseCss();
 
-  for (const row of rows) {
-    const full = findScenario(row.id);
-    const hookId = SCENARIO_HOOK[row.id];
-    const hook = hookId ? glossaryFor(hookId) : null;
-    const speed = full && typeof full.speed === 'number' ? full.speed : 1;
-
-    const card = h('button', {
-      class: 'scenario', type: 'button',
-      title: `Load "${row.name}", apply its fault and start the run at ${speed}×`,
-    });
-    card.appendChild(h('span', { class: 'scenario__name' }, row.name));
-    card.appendChild(h('span', { class: 'scenario__outcome' }, row.expectedOutcome));
-    if (hook) card.appendChild(h('span', { class: 'scenario__hook' }, `${hook.term} — ${hook.short}`));
-    else if (full && full.teachingNotes && full.teachingNotes.length > 0) {
-      card.appendChild(h('span', { class: 'scenario__hook' }, full.teachingNotes[0]));
-    }
-    card.addEventListener('click', () => {
-      closeModal(o);
-      launchScenario(o, row.id);        // one click: load, apply the fault, and start
-    });
-    list.appendChild(h('li', {}, card));
-  }
-
-  const body = h('div', { class: 'onboard' },
-    h('p', { class: 'onboard__lede' },
-      'Each scenario replaces the configuration, applies its fault, and starts the run at the speed '
-      + 'that makes it readable. The chromatogram, the alarms and the P&ID all respond — nothing is '
-      + 'scripted, so the outcome is whatever the physics produces.'),
-    list,
-    h('p', { class: 'onboard__note' },
-      'When the run ends, the Results tab shows the measured outcome beside the scenario\'s teaching '
-      + 'notes, so you can check what you saw against what was supposed to happen.'));
+  const body = h('div', { class: 'ob' }, buildScenarioGrid(o));
 
   o.modalHandle = overlay.showModal(o.host, {
-    title: 'Teaching scenarios',
+    title: 'Scenarios',
     content: body,
+    className: 'modal--scenarios',
     dismissible: true,
     onDismiss: () => { o.modalHandle = null; },
-    actions: [{ label: 'Close', variant: 'ghost', onClick: (hd) => overlay.dismiss(hd) }],
+    actions: [{
+      label: 'Close',
+      title: 'Close without loading a scenario',
+      variant: 'primary',
+      onClick: (hd) => overlay.dismiss(hd),
+    }],
   });
 }
 
 /**
- * Load and start one scenario, surfacing any refusal verbatim (§9.4.4).
+ * Load and start one scenario, surfacing any refusal verbatim.
  * @param {object} o the onboarding instance
  * @param {string} scenarioId a `data/presets.js::SCENARIOS` id
  * @returns {void}
@@ -488,8 +694,10 @@ function launchScenario(o, scenarioId) {
 
   const full = findScenario(scenarioId);
   if (full) {
+    const hookId = SCENARIO_HOOK[scenarioId];
+    const hook = hookId ? glossaryFor(hookId) : null;
     queueHint(o, `scenario:${scenarioId}`,
-      `${full.name} — ${full.expectedOutcome}`);
+      `${full.name} — ${full.expectedOutcome}${hook ? ` ${hook.term}: ${hook.short}` : ''}`);
   }
   o.ctx.bus.emit('request-tab', 'run');
 }
@@ -512,13 +720,13 @@ function findScenario(id) {
  * Feed one event record to the coach-hint scheduler.
  *
  * Called by `ui/app.js` for every record appended to `run.events`, in order. At most one hint per
- * concept per session and at most one card per 20 s (§9.6); the newest candidate wins, so a burst
- * of events never queues a backlog of stale advice.
+ * concept per session and at most one card per 20 s; the newest candidate wins, so a burst of
+ * events never queues a backlog of stale advice.
  *
  * @param {object} o the onboarding instance
  * @param {{type:string, severity:string, source:string, message:string, detail:(object|null),
  *          t_s:number, V_mL:number, V_CV:number, blockId:(string|null)}} eventRecord
- *   an `EventRecord` from `run.events` (§5.10)
+ *   an `EventRecord` from `run.events`
  * @returns {void}
  */
 export function noteEvent(o, eventRecord) {
@@ -562,7 +770,7 @@ function queueHint(o, key, text) {
  * The per-frame half of onboarding: release a queued hint when the 20 s gate opens, and watch the
  * two derived signals that no event announces.
  *
- * Never blocks, never steals focus, and does nothing at all while the tour or a modal is open.
+ * Never blocks, never steals focus, and does nothing at all while the tour or a window is open.
  *
  * @param {object} o the onboarding instance
  * @param {{now_ms:number, dt_ms:number, tick:number, structural:boolean}} frameInfo the frame

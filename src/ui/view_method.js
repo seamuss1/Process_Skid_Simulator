@@ -29,7 +29,7 @@
  */
 
 import { setText, setAttr, cls, reconcileList, fmtVolume, fmtFlow, fmtTime, fmtCV,
-  linkedFlowGroup, readThemeTokens } from './format.js';
+  linkedFlowGroup } from './format.js';
 import { createOverlayHost, showPopover, showGlossaryPopover, showModal, showToast, dismiss,
   reportResult } from './overlay.js';
 import { BLOCK_TYPES, blockVolume_mL, blockFlow_mLs, targetPctB, blockPressureEstimate_bar,
@@ -48,18 +48,18 @@ import { exportMethodJSON, importMethodJSON, downloadText } from '../io/export.j
  * Keys are exactly the twelve `BLOCK_TYPES` of §5.4.3, in that order.
  */
 const TYPE_META = {
-  EQUILIBRATION:      { code: 'EQ', label: 'Equilibration',      token: '--text-3',      fallback: '#71818F' },
-  LOAD:               { code: 'LD', label: 'Sample load',        token: '--fluid-sample', fallback: '#C98A2B' },
-  WASH:               { code: 'WS', label: 'Wash',               token: '--ch-uv280',    fallback: '#4CC9F0' },
-  ELUTION_ISOCRATIC:  { code: 'EI', label: 'Isocratic elution',  token: '--band-2',      fallback: '#B388FF' },
-  ELUTION_LINEAR:     { code: 'EL', label: 'Linear gradient',    token: '--band-2',      fallback: '#B388FF' },
-  ELUTION_STEP:       { code: 'ES', label: 'Step elution',       token: '--band-2',      fallback: '#B388FF' },
-  STRIP:              { code: 'ST', label: 'Strip',              token: '--ch-cond',     fallback: '#F2A93B' },
-  CIP:                { code: 'CI', label: 'CIP',                token: '--fluid-cip',   fallback: '#2FA98C' },
-  RE_EQUILIBRATION:   { code: 'RE', label: 'Re-equilibration',   token: '--ok',          fallback: '#3FBF7F' },
-  HOLD:               { code: 'HD', label: 'Hold',               token: '--warn',        fallback: '#E8A33D' },
-  COLUMN_BYPASS:      { code: 'BP', label: 'Column bypass',      token: '--text-3',      fallback: '#71818F' },
-  PACKING_TEST:       { code: 'PT', label: 'Packing test',       token: '--info',        fallback: '#5DA9FF' },
+  EQUILIBRATION:      { code: 'EQ', label: 'Equilibration',      token: '--svc-a',       fallback: '#2D6FB8' },
+  LOAD:               { code: 'LD', label: 'Sample load',        token: '--svc-sample',  fallback: '#C8862B' },
+  WASH:               { code: 'WS', label: 'Wash',               token: '--pen-flow',    fallback: '#00E5FF' },
+  ELUTION_ISOCRATIC:  { code: 'EI', label: 'Isocratic elution',  token: '--svc-b',       fallback: '#8A5BC8' },
+  ELUTION_LINEAR:     { code: 'EL', label: 'Linear gradient',    token: '--svc-b',       fallback: '#8A5BC8' },
+  ELUTION_STEP:       { code: 'ES', label: 'Step elution',       token: '--svc-b',       fallback: '#8A5BC8' },
+  STRIP:              { code: 'ST', label: 'Strip',              token: '--pen-cond',    fallback: '#FF9A3C' },
+  CIP:                { code: 'CI', label: 'CIP',                token: '--svc-cip',     fallback: '#1FA98C' },
+  RE_EQUILIBRATION:   { code: 'RE', label: 'Re-equilibration',   token: '--svc-product', fallback: '#16C60C' },
+  HOLD:               { code: 'HD', label: 'Hold',               token: '--lamp-warn',   fallback: '#FFC000' },
+  COLUMN_BYPASS:      { code: 'BP', label: 'Column bypass',      token: '--svc-waste',   fallback: '#6B6B6B' },
+  PACKING_TEST:       { code: 'PT', label: 'Packing test',       token: '--pen-ph',      fallback: '#B39DFF' },
 };
 
 /** `duration.basis` options (§5.4.2). */
@@ -70,6 +70,17 @@ const ON_TIMEOUT = ['NEXT', 'HOLD', 'ALARM', 'REPEAT'];
 const FLOW_MODES = ['CM_H', 'ML_MIN', 'RESIDENCE_TIME_MIN', 'CV_PER_H', 'INHERIT'];
 /** The unit suffix each flow mode carries in the editor. */
 const FLOW_MODE_UNIT = { CM_H: 'cm/h', ML_MIN: 'mL/min', RESIDENCE_TIME_MIN: 'min', CV_PER_H: 'CV/h', INHERIT: '' };
+/** The `<option>` face for each flow mode: the unit it is entered in, never a description. */
+const FLOW_MODE_OPTION = { CM_H: 'cm/h', ML_MIN: 'mL/min', RESIDENCE_TIME_MIN: 'RT min',
+  CV_PER_H: 'CV/h', INHERIT: 'INHERIT' };
+/** What each flow mode means. Tooltip only (§9.6 — explanation never renders on the screen). */
+const FLOW_MODE_HINT = {
+  CM_H: 'Linear velocity through the bed.',
+  ML_MIN: 'Volumetric flow.',
+  RESIDENCE_TIME_MIN: 'Residence time — one column volume per this many minutes.',
+  CV_PER_H: 'Column volumes swept per hour.',
+  INHERIT: 'Takes the flow of the previous enabled block.',
+};
 /** `gradient.shape` options (§5.4.2). */
 const GRADIENT_SHAPES = ['ISOCRATIC', 'LINEAR', 'STEP', 'CONVEX', 'CONCAVE', 'MULTI_SEGMENT'];
 /** `columnValve` positions (§5.4.2). */
@@ -374,213 +385,285 @@ function makeWatch(index) {
 const STYLE_ID = 'vm-view-method-styles';
 let styleRefCount = 0;
 
-const STYLE_TEXT = [
-  '.vm-root{position:relative;display:flex;flex-direction:column;min-height:0;height:100%;',
-  '  font-family:var(--font-ui,system-ui,sans-serif);font-size:var(--fs-12,12px);color:var(--text-1,#E6EDF5);',
-  '  line-height:var(--lh-base,1.45);}',
-  '.vm-grid{display:grid;grid-template-columns:280px minmax(340px,1fr) 320px;gap:var(--sp-5,12px);',
-  '  flex:1 1 auto;min-height:0;padding:var(--sp-5,12px);align-items:stretch;}',
-  '.vm-rail{display:flex;flex-direction:column;gap:var(--sp-5,12px);min-height:0;overflow:auto;}',
-  '.vm-panel{background:var(--surface-1,#161E29);border:1px solid var(--line,#2A3441);',
-  '  border-radius:var(--r-3,8px);display:flex;flex-direction:column;min-height:0;overflow:hidden;}',
-  '.vm-panel--flex{flex:1 1 auto;}',
-  '.vm-hd{height:32px;flex:0 0 32px;display:flex;align-items:center;gap:var(--sp-4,8px);',
-  '  padding:0 var(--sp-5,12px);border-bottom:1px solid var(--line,#2A3441);',
-  '  font-size:var(--fs-11,11px);font-weight:600;text-transform:uppercase;letter-spacing:.06em;',
-  '  color:var(--text-3,#71818F);user-select:none;}',
-  '.vm-hd__sp{flex:1 1 auto;}',
-  '.vm-hd__n{font-family:var(--font-num,monospace);font-variant-numeric:tabular-nums lining-nums;',
-  '  color:var(--text-2,#A7B4C4);letter-spacing:0;}',
-  '.vm-scroll{flex:1 1 auto;min-height:0;overflow:auto;}',
-  '.vm-ft{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:var(--sp-3,6px);padding:var(--sp-4,8px);',
-  '  border-top:1px solid var(--line,#2A3441);background:var(--bg-1,#121821);}',
-  '.vm-btn{height:30px;padding:0 10px;border-radius:var(--r-2,5px);border:1px solid var(--line,#2A3441);',
-  '  background:transparent;color:var(--text-1,#E6EDF5);cursor:pointer;display:inline-flex;',
-  '  align-items:center;justify-content:center;gap:6px;white-space:nowrap;',
-  '  font:600 var(--fs-12,12px)/1 var(--font-ui,sans-serif);}',
-  '.vm-btn:hover:not(:disabled){background:var(--surface-2,#1C2733);}',
-  '.vm-btn:active:not(:disabled){background:var(--surface-3,#243040);}',
-  '.vm-btn:disabled{opacity:.45;cursor:not-allowed;}',
-  '.vm-btn--primary{background:var(--accent,#5DA9FF);border-color:var(--accent,#5DA9FF);color:var(--text-inv,#0B0F14);}',
-  '.vm-btn--primary:hover:not(:disabled){background:var(--accent-hover,#7CBBFF);}',
-  '.vm-btn--danger{border-color:var(--alarm,#F2544B);color:var(--alarm,#F2544B);}',
-  '.vm-btn--danger:hover:not(:disabled){background:var(--alarm-soft,rgba(242,84,75,.16));}',
-  '.vm-btn--sm{height:24px;padding:0 8px;font-size:var(--fs-11,11px);}',
-  '.vm-btn--icon{width:30px;padding:0;}',
-  '.vm-btn--sm.vm-btn--icon{width:24px;}',
-  '.vm-row{position:relative;display:grid;grid-template-columns:14px 4px 1fr auto;gap:var(--sp-4,8px);',
-  '  align-items:center;min-height:52px;padding:6px 8px 6px 4px;cursor:pointer;background:transparent;',
-  '  border-bottom:1px solid var(--line-soft,#212A35);user-select:none;',
-  '  transition:transform var(--dur-2,160ms) var(--ease-out,ease);}',
-  '.vm-row:hover{background:var(--surface-2,#1C2733);}',
-  '.vm-row.is-selected{background:var(--accent-soft,rgba(93,169,255,.14));box-shadow:inset 2px 0 0 var(--accent,#5DA9FF);}',
-  '.vm-row.is-off .vm-row__name,.vm-row.is-off .vm-row__sum{color:var(--text-3,#71818F);}',
-  '.vm-row.is-off .vm-row__name{text-decoration:line-through;}',
-  '.vm-row.is-drag{z-index:5;box-shadow:var(--shadow-2,0 6px 20px rgba(0,0,0,.45));',
-  '  background:var(--surface-3,#243040);transition:none;border-radius:var(--r-2,5px);}',
-  '.vm-row:focus-visible{outline:2px solid var(--focus,#8FD0FF);outline-offset:-2px;}',
-  '.vm-row__grip{color:var(--text-3,#71818F);font-size:13px;line-height:1;text-align:center;',
-  '  cursor:grab;touch-action:none;}',
-  '.vm-row.is-drag .vm-row__grip{cursor:grabbing;}',
-  '.vm-row__bar{width:4px;height:34px;border-radius:2px;background:var(--text-3,#71818F);}',
-  '.vm-row__mid{min-width:0;display:flex;flex-direction:column;gap:2px;}',
-  '.vm-row__top{display:flex;align-items:center;gap:6px;min-width:0;}',
-  '.vm-row__code{flex:0 0 auto;padding:3px 4px;border-radius:var(--r-1,3px);',
-  '  background:var(--surface-3,#243040);color:var(--text-2,#A7B4C4);',
-  '  font:700 9px/1 var(--font-num,monospace);letter-spacing:.06em;}',
-  '.vm-row__name{font-size:var(--fs-12,12px);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-  '.vm-row__sum{font-family:var(--font-num,monospace);font-variant-numeric:tabular-nums lining-nums;',
-  '  font-size:var(--fs-11,11px);color:var(--text-2,#A7B4C4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-  '.vm-row__right{display:flex;align-items:center;gap:6px;}',
-  '.vm-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:transparent;',
-  '  border:1px solid var(--line-strong,#3A4757);}',
-  '.vm-dot--ok{background:var(--ok,#3FBF7F);border-color:var(--ok,#3FBF7F);}',
-  '.vm-dot--warn{background:var(--warn,#E8A33D);border-color:var(--warn,#E8A33D);}',
-  '.vm-dot--err{background:var(--alarm,#F2544B);border-color:var(--alarm,#F2544B);}',
-  '.vm-insert{position:absolute;left:4px;right:4px;height:2px;background:var(--accent,#5DA9FF);',
-  '  border-radius:1px;pointer-events:none;display:none;z-index:6;}',
-  '.vm-insert.is-on{display:block;}',
-  '.vm-listwrap{position:relative;}',
-].join('\n') + '\n' + [
-  '.vm-sec{border-bottom:1px solid var(--line-soft,#212A35);}',
-  '.vm-sec__hd{width:100%;height:30px;display:flex;align-items:center;gap:6px;padding:0 var(--sp-5,12px);',
-  '  background:var(--bg-1,#121821);border:0;cursor:pointer;color:var(--text-2,#A7B4C4);text-align:left;',
-  '  font:600 var(--fs-11,11px)/1 var(--font-ui,sans-serif);text-transform:uppercase;letter-spacing:.06em;}',
-  '.vm-sec__hd:hover{color:var(--text-1,#E6EDF5);}',
-  '.vm-sec__caret{display:inline-block;width:10px;color:var(--text-3,#71818F);}',
-  '.vm-sec__body{padding:var(--sp-5,12px);display:grid;gap:var(--sp-4,8px) var(--sp-5,12px);',
-  '  grid-template-columns:repeat(auto-fill,minmax(178px,1fr));align-items:start;}',
-  '.vm-sec.is-collapsed .vm-sec__body{display:none;}',
-  '.vm-field{display:flex;flex-direction:column;gap:3px;min-width:0;}',
-  '.vm-field--span{grid-column:1/-1;}',
-  '.vm-field__lb{display:flex;align-items:center;gap:4px;font-size:var(--fs-11,11px);',
-  '  color:var(--text-3,#71818F);text-transform:uppercase;letter-spacing:.06em;font-weight:600;}',
-  '.vm-field__hint{font-family:var(--font-num,monospace);font-variant-numeric:tabular-nums lining-nums;',
-  '  font-size:var(--fs-11,11px);color:var(--text-3,#71818F);}',
-  '.vm-field__msg{font-size:var(--fs-11,11px);color:var(--alarm,#F2544B);display:none;}',
-  '.vm-field.is-invalid .vm-field__msg{display:block;}',
-  '.vm-field.is-invalid .vm-nf,.vm-field.is-invalid .vm-sel{border-color:var(--alarm,#F2544B);',
-  '  background:var(--alarm-soft,rgba(242,84,75,.16));}',
-  '.vm-info{width:14px;height:14px;padding:0;border:1px solid var(--line,#2A3441);border-radius:50%;',
-  '  background:transparent;color:var(--text-3,#71818F);cursor:help;display:inline-flex;',
-  '  align-items:center;justify-content:center;flex:0 0 auto;font:600 9px/1 var(--font-ui,sans-serif);}',
-  '.vm-info:hover{color:var(--accent,#5DA9FF);border-color:var(--accent,#5DA9FF);}',
-  '.vm-nf{display:flex;align-items:stretch;height:30px;border:1px solid var(--line,#2A3441);',
-  '  background:var(--surface-2,#1C2733);border-radius:var(--r-2,5px);overflow:hidden;}',
-  '.vm-nf:focus-within{border-color:var(--accent,#5DA9FF);}',
-  '.vm-nf input{flex:1 1 auto;min-width:0;width:100%;background:transparent;border:0;padding:0 6px;',
-  '  color:var(--text-1,#E6EDF5);text-align:right;font-variant-numeric:tabular-nums lining-nums;',
-  '  font:400 var(--fs-12,12px)/1 var(--font-num,monospace);}',
-  '.vm-nf input:focus{outline:none;}',
-  '.vm-nf input:focus-visible{outline:2px solid var(--focus,#8FD0FF);outline-offset:-2px;border-radius:3px;}',
-  '.vm-nf input:disabled{color:var(--text-3,#71818F);}',
-  '.vm-nf__step{display:none;flex-direction:column;width:14px;flex:0 0 14px;',
-  '  border-left:1px solid var(--line,#2A3441);}',
-  '.vm-nf:hover .vm-nf__step,.vm-nf:focus-within .vm-nf__step{display:flex;}',
-  '.vm-nf__step button{flex:1 1 0;border:0;background:var(--surface-3,#243040);cursor:pointer;padding:0;',
-  '  color:var(--text-2,#A7B4C4);font:400 7px/1 var(--font-ui,sans-serif);}',
-  '.vm-nf__step button:hover{background:var(--overlay,#2B3A4A);color:var(--text-1,#E6EDF5);}',
-  '.vm-nf__u{display:flex;align-items:center;padding:0 8px;border-left:1px solid var(--line,#2A3441);',
-  '  color:var(--text-3,#71818F);font-size:var(--fs-11,11px);user-select:none;white-space:nowrap;}',
-  '.vm-nf__usel{border:0;border-left:1px solid var(--line,#2A3441);background:var(--surface-3,#243040);',
-  '  color:var(--text-2,#A7B4C4);font-size:var(--fs-11,11px);padding:0 4px;cursor:pointer;max-width:96px;}',
-  '.vm-sel,.vm-txt{height:30px;border:1px solid var(--line,#2A3441);background:var(--surface-2,#1C2733);',
-  '  color:var(--text-1,#E6EDF5);border-radius:var(--r-2,5px);padding:0 6px;min-width:0;width:100%;',
-  '  font:400 var(--fs-12,12px)/1 var(--font-ui,sans-serif);}',
-  '.vm-ta{min-height:54px;border:1px solid var(--line,#2A3441);background:var(--surface-2,#1C2733);',
-  '  color:var(--text-1,#E6EDF5);border-radius:var(--r-2,5px);padding:6px;resize:vertical;width:100%;',
-  '  font:400 var(--fs-12,12px)/var(--lh-base,1.45) var(--font-ui,sans-serif);}',
-  '.vm-sel:focus-visible,.vm-txt:focus-visible,.vm-ta:focus-visible,.vm-btn:focus-visible,',
-  '.vm-info:focus-visible,.vm-card:focus-visible,.vm-issue:focus-visible',
-  '  {outline:2px solid var(--focus,#8FD0FF);outline-offset:2px;}',
-  '.vm-tg{display:inline-flex;align-items:center;gap:var(--sp-4,8px);cursor:pointer;position:relative;}',
-  '.vm-tg input{position:absolute;opacity:0;width:34px;height:18px;margin:0;cursor:pointer;}',
-  '.vm-tg__tr{width:34px;height:18px;flex:0 0 34px;border-radius:var(--r-pill,999px);position:relative;',
-  '  background:var(--surface-3,#243040);transition:background var(--dur-2,160ms) var(--ease-out,ease);}',
-  '.vm-tg__tr::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;',
-  '  background:var(--text-2,#A7B4C4);transition:transform var(--dur-2,160ms) var(--ease-out,ease);}',
-  '.vm-tg input:checked + .vm-tg__tr{background:var(--accent,#5DA9FF);}',
-  '.vm-tg input:checked + .vm-tg__tr::after{transform:translateX(16px);background:var(--text-inv,#0B0F14);}',
-  '.vm-tg input:focus-visible + .vm-tg__tr{outline:2px solid var(--focus,#8FD0FF);outline-offset:2px;}',
-  '.vm-tg__lb{font-size:var(--fs-12,12px);color:var(--text-1,#E6EDF5);}',
-].join('\n') + '\n' + [
-  '.vm-watch{border:1px solid var(--line,#2A3441);border-radius:var(--r-2,5px);',
-  '  background:var(--bg-1,#121821);padding:var(--sp-4,8px);display:grid;gap:var(--sp-4,8px);',
-  '  grid-template-columns:repeat(auto-fill,minmax(160px,1fr));}',
-  '.vm-watch__hd{grid-column:1/-1;display:flex;align-items:center;gap:6px;}',
-  '.vm-watch__id{font:700 var(--fs-11,11px)/1 var(--font-num,monospace);color:var(--text-2,#A7B4C4);}',
-  '.vm-pill{height:22px;display:inline-flex;align-items:center;padding:0 8px;border-radius:var(--r-pill,999px);',
-  '  font:700 var(--fs-11,11px)/1 var(--font-ui,sans-serif);text-transform:uppercase;letter-spacing:.04em;',
-  '  border:1px solid transparent;white-space:nowrap;}',
-  '.vm-pill--ok{background:var(--ok-soft,rgba(63,191,127,.14));color:var(--ok,#3FBF7F);border-color:var(--ok,#3FBF7F);}',
-  '.vm-pill--warn{background:var(--warn-soft,rgba(232,163,61,.16));color:var(--warn,#E8A33D);border-color:var(--warn,#E8A33D);}',
-  '.vm-pill--err{background:var(--alarm-soft,rgba(242,84,75,.16));color:var(--alarm,#F2544B);border-color:var(--alarm,#F2544B);}',
-  '.vm-pill--info{background:var(--accent-soft,rgba(93,169,255,.14));color:var(--accent,#5DA9FF);border-color:var(--accent,#5DA9FF);}',
-  '.vm-pill--mute{background:var(--surface-3,#243040);color:var(--text-3,#71818F);border-color:var(--line,#2A3441);}',
-  '.vm-prev{padding:var(--sp-5,12px);display:flex;flex-direction:column;gap:var(--sp-4,8px);}',
-  '.vm-prev canvas{display:block;width:100%;height:160px;border-radius:var(--r-2,5px);',
-  '  background:var(--bg-0,#0B0F14);border:1px solid var(--line-soft,#212A35);}',
-  '.vm-prev__stats{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-3,6px);}',
-  '.vm-stat{display:flex;flex-direction:column;gap:1px;min-width:0;}',
-  '.vm-stat__k{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-3,#71818F);}',
-  '.vm-stat__v{font-family:var(--font-num,monospace);font-variant-numeric:tabular-nums lining-nums;',
-  '  font-size:var(--fs-13,13px);font-weight:600;color:var(--text-1,#E6EDF5);white-space:nowrap;',
-  '  overflow:hidden;text-overflow:ellipsis;}',
-  '.vm-issue{display:grid;grid-template-columns:8px 1fr auto;gap:8px;align-items:start;width:100%;',
-  '  padding:8px var(--sp-5,12px);border:0;border-bottom:1px solid var(--line-soft,#212A35);',
-  '  background:transparent;text-align:left;cursor:pointer;color:inherit;}',
-  '.vm-issue:hover{background:var(--surface-2,#1C2733);}',
-  '.vm-issue__mk{width:8px;height:8px;border-radius:50%;margin-top:4px;}',
-  '.vm-issue__tx{min-width:0;display:flex;flex-direction:column;gap:2px;}',
-  '.vm-issue__hd{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;}',
-  '.vm-issue__code{font:700 var(--fs-11,11px)/1 var(--font-num,monospace);color:var(--text-2,#A7B4C4);}',
-  '.vm-issue__where{font-size:var(--fs-11,11px);color:var(--text-3,#71818F);}',
-  '.vm-issue__msg{font-size:var(--fs-11,11px);color:var(--text-1,#E6EDF5);}',
-  '.vm-empty{padding:var(--sp-5,12px);font-size:var(--fs-11,11px);color:var(--text-3,#71818F);}',
-  '.vm-card{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center;width:100%;',
-  '  padding:8px var(--sp-5,12px);border:0;border-bottom:1px solid var(--line-soft,#212A35);',
-  '  background:transparent;cursor:pointer;text-align:left;color:inherit;}',
-  '.vm-card:hover{background:var(--surface-2,#1C2733);}',
-  '.vm-card__nm{font-size:var(--fs-12,12px);font-weight:600;}',
-  '.vm-card__sub{font-family:var(--font-num,monospace);font-variant-numeric:tabular-nums lining-nums;',
-  '  font-size:var(--fs-11,11px);color:var(--text-3,#71818F);}',
-  '.vm-card svg{display:block;}',
-  '.vm-bar{flex:0 0 auto;display:flex;align-items:center;gap:var(--sp-4,8px);flex-wrap:wrap;',
-  '  padding:var(--sp-4,8px) var(--sp-5,12px);border-top:1px solid var(--line,#2A3441);',
-  '  background:var(--surface-1,#161E29);}',
-  '.vm-bar__sp{flex:1 1 auto;}',
-  '.vm-bar__msg{font-size:var(--fs-11,11px);color:var(--text-2,#A7B4C4);min-width:0;overflow:hidden;',
-  '  text-overflow:ellipsis;white-space:nowrap;}',
-  '.vm-note{margin:var(--sp-5,12px) var(--sp-5,12px) 0;padding:8px 10px;border-radius:var(--r-2,5px);',
-  '  border:1px solid var(--warn,#E8A33D);background:var(--warn-soft,rgba(232,163,61,.16));',
-  '  color:var(--text-1,#E6EDF5);font-size:var(--fs-11,11px);}',
-  '.vm-drop{position:absolute;inset:0;z-index:20;display:none;align-items:center;justify-content:center;',
-  '  background:rgba(0,0,0,.55);}',
-  '.vm-root.is-dropping .vm-drop{display:flex;}',
-  '.vm-drop__in{padding:24px 32px;border:2px dashed var(--accent,#5DA9FF);border-radius:var(--r-3,8px);',
-  '  background:var(--surface-1,#161E29);color:var(--text-1,#E6EDF5);font-weight:600;}',
-  '.vm-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;',
-  '  clip:rect(0 0 0 0);white-space:nowrap;border:0;}',
-  '.vm-fallback-toast{position:fixed;right:16px;bottom:16px;z-index:9999;max-width:340px;',
-  '  padding:10px 12px;border-radius:var(--r-2,5px);border:1px solid var(--line-strong,#3A4757);',
-  '  background:var(--overlay,#2B3A4A);color:var(--text-1,#E6EDF5);font-size:var(--fs-12,12px);',
-  '  box-shadow:var(--shadow-2,0 6px 20px rgba(0,0,0,.45));}',
-  '.vm-fallback-modal{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;',
-  '  justify-content:center;background:rgba(0,0,0,.55);}',
-  '.vm-fallback-modal__b{max-width:520px;width:calc(100% - 32px);max-height:80vh;overflow:auto;',
-  '  padding:var(--sp-6,16px);border-radius:var(--r-3,8px);border:1px solid var(--line-strong,#3A4757);',
-  '  background:var(--surface-1,#161E29);box-shadow:var(--shadow-2,0 6px 20px rgba(0,0,0,.45));}',
-  '.vm-fallback-modal h3{margin:0 0 8px;font-size:var(--fs-15,15px);}',
-  '.vm-fallback-modal__a{display:flex;gap:8px;justify-content:flex-end;margin-top:var(--sp-5,12px);}',
-  '@media (max-width:1279px){.vm-grid{grid-template-columns:260px 1fr;}',
-  '  .vm-rail{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;overflow:visible;}',
-  '  .vm-rail > .vm-panel{flex:1 1 300px;min-width:280px;}}',
-  '@media (max-width:1023px){.vm-grid{grid-template-columns:1fr;}',
-  '  .vm-panel{max-height:60vh;}}',
-  '@media (prefers-reduced-motion: reduce){.vm-row,.vm-tg__tr,.vm-tg__tr::after{transition:none;}}',
-  '@media (prefers-contrast: more){.vm-field__hint,.vm-stat__k,.vm-issue__where{color:var(--text-2,#A7B4C4);}',
-  '  .vm-panel,.vm-nf,.vm-sel,.vm-txt,.vm-ta{border-color:var(--line-strong,#3A4757);}}',
-].join('\n');
+const STYLE_TEXT = `
+.vm-root{
+  --screen:#6E6E6E;--face:#C7C3BC;--face-2:#BFBBB4;--face-3:#D2CEC7;
+  --bev-hi:#FFFFFF;--bev-lt:#E6E2DA;--bev-sh:#85817B;--bev-dk:#4A4744;
+  --ink:#101010;--ink-2:#3A3A3A;--ink-off:#7A7A7A;
+  --fld-bg:#0A0F0A;--fld-pv:#12FF4B;--fld-sp:#FFD400;--fld-out:#00E5FF;--fld-alarm:#FF3B30;
+  --fld-stale:#7A8A7A;--fld-eu:#9FB39F;
+  --lamp-off:#4A4744;--lamp-run:#16C60C;--lamp-warn:#FFC000;--lamp-alarm:#E81123;
+  --plot-bg:#000000;--plot-grid:#1F3D1F;--plot-axis:#C7C3BC;
+  --pen-flow:#00E5FF;--pen-pctb:#FF6EC7;--pen-press:#FFD400;--pen-uv:#12FF4B;
+  --pen-cond:#FF9A3C;--pen-ph:#B39DFF;--pen-temp:#FFFFFF;
+  --pipe-idle:#4A4744;--svc-a:#2D6FB8;--svc-b:#8A5BC8;--svc-sample:#C8862B;--svc-cip:#1FA98C;
+  --svc-product:#16C60C;--svc-waste:#6B6B6B;
+  --font-ui:system-ui,'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;
+  --font-num:ui-monospace,Consolas,'Cascadia Mono','Courier New',monospace;
+  position:relative;display:flex;flex-direction:column;min-height:0;height:100%;
+  background:var(--screen);color:var(--ink);font:400 11px/1.2 var(--font-ui);
+  -webkit-font-smoothing:antialiased;
+}
+:root[data-theme="dark"] .vm-root{
+  --screen:#2A2A2A;--face:#4A4744;--face-2:#3E3B38;--face-3:#565250;
+  --bev-hi:#7A7672;--bev-lt:#605C58;--bev-sh:#2E2B29;--bev-dk:#1A1817;
+  --ink:#E8E4DC;--ink-2:#B8B4AC;--ink-off:#8A8680;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme]) .vm-root{
+    --screen:#2A2A2A;--face:#4A4744;--face-2:#3E3B38;--face-3:#565250;
+    --bev-hi:#7A7672;--bev-lt:#605C58;--bev-sh:#2E2B29;--bev-dk:#1A1817;
+    --ink:#E8E4DC;--ink-2:#B8B4AC;--ink-off:#8A8680;
+  }
+}
+.vm-root *{box-sizing:border-box;border-radius:0}
+.vm-grid{display:grid;grid-template-columns:248px minmax(300px,1fr) 312px;gap:3px;
+  flex:1 1 auto;min-height:0;padding:3px;align-items:stretch}
+.vm-rail{display:flex;flex-direction:column;gap:3px;min-height:0;overflow:auto}
+.vm-panel{background:var(--face);padding:3px;display:flex;flex-direction:column;min-height:0;
+  overflow:hidden;box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
+  inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
+.vm-panel--flex{flex:1 1 auto}
+.vm-hd{height:20px;flex:0 0 20px;display:flex;align-items:center;gap:4px;padding:0 4px;
+  background:var(--face-2);color:var(--ink);user-select:none;
+  font:700 10px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.04em;
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
+  inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
+.vm-hd__sp{flex:1 1 auto}
+.vm-hd__n{min-width:34px;padding:1px 4px;text-align:right;background:var(--fld-bg);color:var(--fld-pv);
+  font:700 11px/1 var(--font-num);font-variant-numeric:tabular-nums lining-nums;letter-spacing:0;
+  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi)}
+.vm-scroll{flex:1 1 auto;min-height:0;overflow:auto;background:var(--face)}
+.vm-ft{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:2px;padding:2px;background:var(--face-2);
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
+  inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
+.vm-btn{height:20px;min-width:22px;padding:0 3px;border:0;background:var(--face);color:var(--ink);
+  cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:3px;
+  white-space:nowrap;font:700 10px/1 var(--font-num);letter-spacing:.06em;
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
+  inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
+.vm-btn svg{width:12px;height:12px;display:block;fill:none;stroke:currentColor;stroke-width:1.5;
+  stroke-linecap:square;pointer-events:none}
+.vm-btn:active:not(:disabled),.vm-btn[aria-pressed="true"]{
+  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),
+  inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt)}
+.vm-btn:active:not(:disabled) svg{transform:translate(1px,1px)}
+.vm-btn:disabled{color:var(--ink-off);cursor:not-allowed}
+.vm-btn--primary{background:var(--face-3)}
+.vm-btn--danger{color:#8E1710}
+.vm-btn--sm{height:18px;min-width:20px}
+.vm-btn--icon{width:22px;padding:0}
+.vm-btn--sm.vm-btn--icon{width:20px}
+.vm-row{position:relative;display:grid;grid-template-columns:12px 4px minmax(0,1fr) auto;gap:4px;
+  align-items:center;min-height:34px;padding:2px 3px;cursor:pointer;background:var(--face-3);
+  border-bottom:1px solid var(--bev-sh);user-select:none}
+.vm-row:hover{background:var(--face)}
+.vm-row.is-selected{background:var(--face-2);box-shadow:inset 3px 0 0 var(--fld-sp)}
+.vm-row.is-off .vm-row__name,.vm-row.is-off .vm-row__sum{color:var(--ink-off)}
+.vm-row.is-off .vm-row__name{text-decoration:line-through}
+.vm-row.is-drag{z-index:5;background:var(--face-2);
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
+  inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
+.vm-row:focus-visible{outline:2px solid #FFD400;outline-offset:-2px}
+.vm-row__grip{color:var(--ink-2);font-size:11px;line-height:1;text-align:center;cursor:grab;
+  touch-action:none}
+.vm-row.is-drag .vm-row__grip{cursor:grabbing}
+.vm-row__bar{width:4px;height:26px;background:var(--pipe-idle)}
+.vm-row__mid{min-width:0;display:flex;flex-direction:column;gap:1px}
+.vm-row__top{display:flex;align-items:center;gap:4px;min-width:0}
+.vm-row__code{flex:0 0 auto;padding:1px 3px;background:var(--face-2);color:var(--ink);
+  font:700 9px/1 var(--font-num);letter-spacing:.06em;
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk)}
+.vm-row__name{font:700 11px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.02em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vm-row__sum{font:400 10px/1 var(--font-num);font-variant-numeric:tabular-nums lining-nums;
+  color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vm-row__right{display:flex;align-items:center;gap:4px}
+.vm-dot,.vm-issue__mk{width:10px;height:10px;flex:0 0 10px;border-radius:50%;border:1px solid #2A2A2A;
+  background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.8) 0 1.2px,rgba(255,255,255,0) 2.2px),
+  var(--lamp-off)}
+.vm-dot--ok,.vm-issue__mk[data-s="ok"]{background:radial-gradient(circle at 33% 28%,
+  rgba(255,255,255,.85) 0 1.2px,rgba(255,255,255,0) 2.2px),var(--lamp-run)}
+.vm-dot--warn,.vm-issue__mk[data-s="warn"]{background:radial-gradient(circle at 33% 28%,
+  rgba(255,255,255,.85) 0 1.2px,rgba(255,255,255,0) 2.2px),var(--lamp-warn)}
+.vm-dot--err,.vm-issue__mk[data-s="alarm"]{background:radial-gradient(circle at 33% 28%,
+  rgba(255,255,255,.85) 0 1.2px,rgba(255,255,255,0) 2.2px),var(--lamp-alarm)}
+.vm-insert{position:absolute;left:2px;right:2px;height:2px;background:var(--fld-sp);
+  pointer-events:none;display:none;z-index:6}
+.vm-insert.is-on{display:block}
+.vm-listwrap{position:relative}
+.vm-sec{border-bottom:1px solid var(--bev-sh)}
+.vm-sec__hd{width:100%;height:18px;display:flex;align-items:center;gap:3px;padding:0 3px;border:0;
+  background:var(--face-2);cursor:pointer;color:var(--ink);text-align:left;
+  font:700 10px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.04em}
+.vm-sec__caret{display:inline-block;width:9px;color:var(--ink-2);font-size:9px;line-height:1}
+.vm-sec__body{padding:2px;display:grid;gap:1px 6px;background:var(--face);
+  grid-template-columns:repeat(auto-fill,minmax(206px,1fr));align-items:center}
+.vm-sec.is-collapsed .vm-sec__body{display:none}
+.vm-field{display:grid;grid-template-columns:88px minmax(0,1fr);align-items:center;gap:4px;
+  min-width:0;min-height:20px}
+.vm-field--span{grid-column:1/-1}
+.vm-field__lb{display:flex;align-items:center;gap:3px;font:700 10px/1 var(--font-ui);
+  color:var(--ink-2);text-transform:uppercase;letter-spacing:.04em;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.vm-field__body{min-width:0}
+.vm-field__hint{display:none}
+.vm-field__msg{display:none;grid-column:2;align-items:center;gap:3px;height:14px;padding:0 3px;
+  background:var(--lamp-alarm);color:#fff;font:700 9px/1 var(--font-num);letter-spacing:.04em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vm-field.is-invalid .vm-field__msg{display:flex}
+.vm-field.is-invalid .vm-nf,.vm-field.is-invalid .vm-sel,.vm-field.is-invalid .vm-txt{
+  outline:2px solid var(--fld-alarm);outline-offset:-2px}
+.vm-info{width:14px;height:14px;flex:0 0 14px;padding:0;border:0;background:var(--face);
+  color:var(--ink-2);cursor:help;display:inline-flex;align-items:center;justify-content:center;
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk)}
+.vm-info svg{width:10px;height:10px;display:block;fill:none;stroke:currentColor;stroke-width:1.5}
+.vm-info:hover{color:var(--ink)}
+.vm-nf{display:flex;align-items:stretch;height:18px;background:var(--fld-bg);overflow:hidden;
+  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),
+  inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt)}
+.vm-nf:focus-within{outline:2px solid #FFD400;outline-offset:-2px}
+.vm-nf input{flex:1 1 auto;min-width:0;width:100%;background:transparent;border:0;padding:0 3px;
+  color:var(--fld-sp);text-align:right;font:700 12px/1 var(--font-num);
+  font-variant-numeric:tabular-nums lining-nums}
+.vm-nf input:focus{outline:none}
+.vm-nf input:disabled{color:var(--fld-stale)}
+.vm-nf__v{flex:1 1 auto;min-width:0;padding:0 3px;text-align:right;color:var(--fld-pv);
+  font:700 12px/1 var(--font-num);font-variant-numeric:tabular-nums lining-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vm-nf__v[data-q="alarm"]{color:var(--fld-alarm)}
+.vm-nf__step{display:none;flex-direction:column;width:12px;flex:0 0 12px}
+.vm-nf:hover .vm-nf__step,.vm-nf:focus-within .vm-nf__step{display:flex}
+.vm-nf__step button{flex:1 1 0;border:0;background:var(--face);cursor:pointer;padding:0;
+  color:var(--ink);font:400 6px/1 var(--font-ui);
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk)}
+.vm-nf__step button:active{box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi)}
+.vm-nf__u{display:flex;align-items:center;padding:0 3px;color:var(--fld-eu);
+  font:400 10px/1 var(--font-num);user-select:none;white-space:nowrap}
+.vm-nf__usel{border:0;background:var(--face-3);color:var(--ink);font:400 10px/1 var(--font-ui);
+  padding:0 2px;cursor:pointer;max-width:88px}
+.vm-sel,.vm-txt{height:18px;border:0;background:var(--face-3);color:var(--ink);padding:0 2px;
+  min-width:0;width:100%;font:400 11px/1 var(--font-ui);
+  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),
+  inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt)}
+.vm-ta{min-height:38px;border:0;background:var(--face-3);color:var(--ink);padding:2px;
+  resize:vertical;width:100%;font:400 11px/1.3 var(--font-ui);
+  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi)}
+.vm-sel:focus-visible,.vm-txt:focus-visible,.vm-ta:focus-visible,.vm-btn:focus-visible,
+.vm-info:focus-visible,.vm-card:focus-visible,.vm-issue:focus-visible,.vm-sec__hd:focus-visible,
+.vm-nf__usel:focus-visible{outline:2px solid #FFD400;outline-offset:1px}
+.vm-tg{display:inline-flex;align-items:center;gap:4px;cursor:pointer;position:relative}
+.vm-tg input{position:absolute;opacity:0;width:26px;height:14px;margin:0;cursor:pointer}
+.vm-tg__tr{width:26px;height:14px;flex:0 0 26px;position:relative;background:var(--fld-bg);
+  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi)}
+.vm-tg__tr::after{content:"";position:absolute;top:2px;left:2px;width:10px;height:10px;
+  background:var(--face);box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk)}
+.vm-tg input:checked + .vm-tg__tr::after{left:14px;background:var(--lamp-run)}
+.vm-tg input:focus-visible + .vm-tg__tr{outline:2px solid #FFD400;outline-offset:1px}
+.vm-tg input:disabled + .vm-tg__tr{opacity:.55}
+.vm-tg__lb{font:700 10px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.04em;
+  color:var(--ink-2);white-space:nowrap}
+.vm-watch{background:var(--face-3);padding:3px;display:grid;gap:1px 6px;
+  grid-template-columns:repeat(auto-fill,minmax(168px,1fr));
+  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi)}
+.vm-watch__hd{grid-column:1/-1;display:flex;align-items:center;gap:4px;height:18px;padding:0 3px;
+  background:var(--face-2);
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk)}
+.vm-watch__id{font:700 10px/1 var(--font-num);letter-spacing:.06em;color:var(--ink)}
+.vm-pill{height:16px;display:inline-flex;align-items:center;padding:0 4px;background:var(--face);
+  color:var(--ink);font:700 9px/1 var(--font-num);text-transform:uppercase;letter-spacing:.06em;
+  white-space:nowrap;box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk)}
+.vm-pill--ok{background:var(--lamp-run);color:#06210A}
+.vm-pill--warn{background:var(--lamp-warn);color:#241A00}
+.vm-pill--err{background:var(--lamp-alarm);color:#FFFFFF}
+.vm-pill--info{background:var(--svc-a);color:#FFFFFF}
+.vm-pill--mute{background:var(--face-2);color:var(--ink-2)}
+.vm-prev{padding:3px;display:flex;flex-direction:column;gap:3px;background:var(--face)}
+.vm-prev canvas{display:block;width:100%;height:160px;background:var(--plot-bg);
+  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),
+  inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt)}
+.vm-prev__stats{display:grid;grid-template-columns:repeat(3,1fr);gap:3px}
+.vm-stat{display:flex;flex-direction:column;gap:1px;min-width:0}
+.vm-stat__k{font:700 9px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.04em;
+  color:var(--ink-2)}
+.vm-stat__v{background:var(--fld-bg);color:var(--fld-pv);padding:1px 3px;text-align:right;
+  font:700 12px/16px var(--font-num);font-variant-numeric:tabular-nums lining-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi)}
+.vm-issue{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:4px;align-items:center;
+  width:100%;min-height:22px;padding:2px 4px;border:0;border-bottom:1px solid var(--bev-sh);
+  background:var(--face-3);text-align:left;cursor:pointer;color:var(--ink)}
+.vm-issue:hover{background:var(--face)}
+.vm-issue__tx{min-width:0;display:flex;align-items:center;gap:4px;overflow:hidden}
+.vm-issue__hd{display:flex;gap:4px;align-items:center;flex:0 0 auto}
+.vm-issue__code{padding:1px 3px;background:var(--face-2);color:var(--ink);
+  font:700 10px/1 var(--font-num);letter-spacing:.04em}
+.vm-issue__where{font:400 9px/1 var(--font-num);color:var(--ink-2);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;max-width:96px}
+.vm-issue__msg{font:400 10px/1 var(--font-ui);color:var(--ink-2);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;min-width:0}
+.vm-empty{display:flex;align-items:center;gap:4px;margin:2px;padding:3px 4px;background:var(--fld-bg);
+  color:var(--fld-stale);font:700 10px/1 var(--font-num);letter-spacing:.06em}
+.vm-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px;align-items:center;width:100%;
+  min-height:26px;padding:2px 4px;border:0;border-bottom:1px solid var(--bev-sh);
+  background:var(--face-3);cursor:pointer;text-align:left;color:var(--ink)}
+.vm-card:hover{background:var(--face)}
+.vm-card__nm{font:700 11px/1.2 var(--font-ui);text-transform:uppercase;letter-spacing:.02em}
+.vm-card__sub{font:400 10px/1.2 var(--font-num);font-variant-numeric:tabular-nums lining-nums;
+  color:var(--ink-2)}
+.vm-card svg{display:block;background:var(--plot-bg)}
+.vm-bar{flex:0 0 24px;height:24px;display:flex;align-items:center;gap:3px;padding:0 3px;
+  background:var(--face-2);
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
+  inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
+.vm-bar__sp{flex:1 1 auto}
+.vm-bar__msg{display:flex;align-items:center;height:18px;padding:0 4px;background:var(--fld-bg);
+  color:var(--fld-pv);font:700 10px/1 var(--font-num);letter-spacing:.06em;min-width:0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi)}
+.vm-bar__msg[data-kind="alarm"]{color:var(--fld-alarm)}
+.vm-bar__msg[data-kind="warn"]{color:var(--fld-sp)}
+.vm-note{display:flex;align-items:center;gap:4px;height:20px;margin:3px 3px 0;padding:0 4px;
+  background:var(--fld-bg);color:var(--fld-sp);font:700 10px/1 var(--font-num);letter-spacing:.06em;
+  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi)}
+.vm-drop{position:absolute;inset:0;z-index:20;display:none;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.55)}
+.vm-root.is-dropping .vm-drop{display:flex}
+.vm-drop__in{padding:12px 18px;background:var(--face);color:var(--ink);
+  font:700 11px/1 var(--font-num);letter-spacing:.08em;
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
+  inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
+.vm-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+  clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.vm-fallback-toast{position:fixed;right:16px;bottom:16px;z-index:9999;max-width:340px;padding:6px 8px;
+  background:var(--face);color:var(--ink);font:400 11px/1.3 var(--font-ui);
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
+  inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
+.vm-fallback-modal{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;
+  justify-content:center;background:rgba(0,0,0,.55)}
+.vm-fallback-modal__b{max-width:520px;width:calc(100% - 32px);max-height:80vh;overflow:auto;padding:8px;
+  background:var(--face);color:var(--ink);
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
+  inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
+.vm-fallback-modal h3{margin:0 0 6px;font:700 12px/1 var(--font-ui);text-transform:uppercase;
+  letter-spacing:.04em}
+.vm-fallback-modal__a{display:flex;gap:4px;justify-content:flex-end;margin-top:8px}
+@media (max-width:1279px){
+  .vm-grid{grid-template-columns:236px minmax(0,1fr)}
+  .vm-rail{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;overflow:visible}
+  .vm-rail > .vm-panel{flex:1 1 280px;min-width:262px}
+}
+@media (max-width:1023px){
+  .vm-grid{grid-template-columns:minmax(0,1fr)}
+  .vm-panel{max-height:60vh}
+}
+@media (prefers-reduced-motion:reduce){
+  .vm-btn:active:not(:disabled) svg{transform:none}
+}
+@media (prefers-contrast:more){
+  .vm-root{--bev-sh:#5A5652;--ink-2:var(--ink)}
+}
+`;
 
 /**
  * Inject the scoped sheet once per document and bump the reference count.
@@ -671,6 +754,104 @@ function humanise(s) {
   const t = String(s).toLowerCase().replace(/_/g, ' ');
   return t.charAt(0).toUpperCase() + t.slice(1);
 }
+
+/**
+ * Icon geometry, authored here as 16×16 stroke paths — no icon font, no network, no web font (§0).
+ * Every control on this screen is one of these plus a `title` and an `aria-label`.
+ */
+const ICONS = {
+  add: ['M8 2.5v11', 'M2.5 8h11'],
+  duplicate: ['M5.5 5.5h8v8h-8z', 'M2.5 2.5h8v2', 'M2.5 2.5v8h2'],
+  del: ['M3.5 4.5h9', 'M6 4.5V2.5h4v2', 'M4.6 4.5 5.5 14h5l.9-9.5'],
+  up: ['M8 13.5V3', 'M3.5 7.5 8 3l4.5 4.5'],
+  down: ['M8 2.5V13', 'M3.5 8.5 8 13l4.5-4.5'],
+  undo: ['M3 8.5a5.5 5.5 0 1 1 2 4.2', 'M2.5 4.5v4h4'],
+  redo: ['M13 8.5a5.5 5.5 0 1 0-2 4.2', 'M13.5 4.5v4h-4'],
+  apply: ['M2.5 8.5 6 12l7.5-7.5'],
+  revert: ['M3 8.5a5.5 5.5 0 1 1 2 4.2', 'M2.5 4.5v4h4'],
+  recheck: ['M13.5 8a5.5 5.5 0 1 1-1.7-4', 'M13.5 1.5v3.2h-3.2'],
+  export: ['M8 1.5v8', 'M5 6.5 8 9.5l3-3', 'M2.5 11.5v3h11v-3'],
+  import: ['M8 9.5v-8', 'M5 4.5 8 1.5l3 3', 'M2.5 11.5v3h11v-3'],
+  info: ['M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z', 'M8 7v4.5', 'M8 4.4v.9'],
+  fix: ['M13 2.5a3.5 3.5 0 0 1-4.4 4.4L3.5 12l1 1 5.1-5.1A3.5 3.5 0 0 1 13 2.5z'],
+};
+
+/**
+ * One inline icon, in the SVG namespace.
+ * @param {Document} doc owning document
+ * @param {string} name a key of {@link ICONS}
+ * @returns {SVGElement} a 16×16 `<svg>`
+ */
+function svgIcon(doc, name) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = doc.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  for (const d of ICONS[name] || []) {
+    const path = doc.createElementNS(NS, 'path');
+    path.setAttribute('d', d);
+    svg.appendChild(path);
+  }
+  return svg;
+}
+
+/**
+ * A beveled icon-only button: the glyph carries the meaning, `title` and `aria-label` carry the
+ * words (§9.7 — an icon-only control still has an accessible name).
+ *
+ * @param {Document} doc owning document
+ * @param {string} name a key of {@link ICONS}
+ * @param {string} title the tooltip and the accessible name
+ * @param {function(Event):void} onClick the handler
+ * @param {string} [extraClass] additional class names
+ * @returns {HTMLButtonElement} the button
+ */
+function iconBtn(doc, name, title, onClick, extraClass) {
+  const b = mk(doc, 'button', 'vm-btn vm-btn--icon' + (extraClass ? ' ' + extraClass : ''));
+  b.type = 'button';
+  b.title = title;
+  b.setAttribute('aria-label', title);
+  add(b, svgIcon(doc, name));
+  if (onClick) b.addEventListener('click', onClick);
+  return b;
+}
+
+/**
+ * Where a message may be cut into clauses. A `.` or `;` counts ONLY when whitespace or the end of
+ * the string follows it, and the dashes only when spaced.
+ *
+ * The lookahead is the whole point. Nearly every `validateMethod` message quotes a number —
+ * `'Estimated column dP 1.23 bar exceeds the 1.00 bar trip.'` — and a bare `.` split cut that to
+ * `ESTIMATED COLUMN DP 1`, which is not an abbreviation of the message but a different, false
+ * statement about the pressure. A short clause still has to be TRUE.
+ * @type {RegExp}
+ */
+const CLAUSE_BREAK = /[.;](?=\s|$)|\s[—-]\s/;
+
+/**
+ * Shorten a sentence to the SHORT clause an FT-CLASSIC screen may carry: the first clause,
+ * uppercased, capped at `max` characters. The whole sentence belongs in the tooltip.
+ *
+ * @param {string} message the full message
+ * @param {number} [max=28] the character cap
+ * @returns {string} the short clause
+ */
+function shortClause(message, max) {
+  const cap = max || 28;
+  const s = String(message || '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  const cut = s.split(CLAUSE_BREAK)[0].trim();
+  const t = (cut || s).toUpperCase();
+  return t.length <= cap ? t : t.slice(0, cap - 1) + '…';
+}
+
+/**
+ * The unparseable-entry message. Written so {@link shortClause} renders `NOT A NUMBER` on the glass
+ * while the whole sentence stays behind the tooltip, which is the rule for every message here.
+ * @type {string}
+ */
+const BAD_NUMBER = 'Not a number — the entry was rejected and the draft was not written.';
 
 /* ═══════════════════════════════════════════════════════════════════════════════════════════════
  * 6. OVERLAY ADAPTERS
@@ -817,8 +998,13 @@ function glossaryBody(doc, entry) {
 /**
  * The shared label / body / hint / error scaffold every control sits in.
  *
+ * `label` is the FACE: 10 px uppercase, at most two words (FT-CLASSIC text policy). `title` is the
+ * unabbreviated name and goes to the tooltip and the accessible name, so shortening a tag on the
+ * glass never costs an operator the words.
+ *
  * @param {object} F the form context
- * @param {{label:string, glossary?:string, fieldPath?:string, span?:boolean}} o field options
+ * @param {{label:string, title?:string, unit?:string, glossary?:string, fieldPath?:string,
+ *          span?:boolean}} o field options
  * @returns {{el:HTMLElement, body:HTMLElement, setHint:function(string):void,
  *            setError:function(string|null):void, fieldPath:string|null}} the scaffold
  */
@@ -831,21 +1017,30 @@ function makeField(F, o) {
   const entry = o.glossary ? glossaryFor(o.glossary) : null;
   if (entry) {
     // §6.22.1: an entry is REQUIRED before a label may render an info affordance.
-    const b = mk(doc, 'button', 'vm-info', 'i');
+    const b = mk(doc, 'button', 'vm-info');
     b.type = 'button';
-    b.setAttribute('aria-label', 'About ' + o.label);
+    b.title = entry.term + ' — ' + entry.short;
+    b.setAttribute('aria-label', 'About ' + entry.term);
+    add(b, svgIcon(doc, 'info'));
     b.addEventListener('click', (ev) => { ev.stopPropagation(); popover(F.ui, b, entry); });
     add(lb, b);
   }
   const body = mk(doc, 'div', 'vm-field__body');
-  const hint = mk(doc, 'div', 'vm-field__hint');
   const msg = mk(doc, 'div', 'vm-field__msg');
-  add(el, lb, body, hint, msg);
+  add(el, lb, body, msg);
   add(F.parent, el);
+  // The label is the tag; every sentence this field would have shown lives in its tooltip, and an
+  // invalid field shows a SHORT clause with the full message behind it (FT-CLASSIC text policy).
+  const baseTitle = (o.title || o.label) + (o.unit ? ' (' + o.unit + ')' : '');
+  setAttr(el, 'title', baseTitle);
   return {
     el, body, fieldPath: o.fieldPath || null,
-    setHint(s) { setText(hint, s || ''); },
-    setError(s) { cls(el, 'is-invalid', !!s); setText(msg, s || ''); },
+    setHint(s) { setAttr(el, 'title', s ? baseTitle + ' — ' + s : baseTitle); },
+    setError(s) {
+      cls(el, 'is-invalid', !!s);
+      setText(msg, s ? shortClause(s) : '');
+      setAttr(msg, 'title', s || null);
+    },
   };
 }
 
@@ -897,10 +1092,10 @@ function numChrome(F, host, u) {
  * field invalid and is NOT written to the draft, so a half-typed `1.` never reaches the model.
  *
  * @param {object} F the form context
- * @param {{label:string, glossary?:string, fieldPath?:string, span?:boolean, unit?:string,
- *          step?:number, decimals?:number, min?:number, max?:number, integer?:boolean,
- *          get:function():number, set:function(number):void, hint?:function():string,
- *          disabled?:function():boolean}} o field options
+ * @param {{label:string, title?:string, glossary?:string, fieldPath?:string, span?:boolean,
+ *          unit?:string, step?:number, decimals?:number, min?:number, max?:number,
+ *          integer?:boolean, get:function():number, set:function(number):void,
+ *          hint?:function():string, disabled?:function():boolean}} o field options
  * @returns {object} the field scaffold
  */
 function numField(F, o) {
@@ -908,11 +1103,11 @@ function numField(F, o) {
   const step = o.step === undefined ? 1 : o.step;
   const parts = numChrome(F, f.body, { units: null, unit: o.unit || '', onUnit: () => {} });
   const input = parts.input;
-  input.setAttribute('aria-label', o.label + (o.unit ? ' in ' + o.unit : ''));
+  input.setAttribute('aria-label', (o.title || o.label) + (o.unit ? ' in ' + o.unit : ''));
   const decimals = () => (o.decimals === undefined ? autoDecimals(o.get()) : o.decimals);
   const commit = (raw) => {
     const v = parseFloat(String(raw).replace(',', '.'));
-    if (!Number.isFinite(v)) { f.setError('Enter a number.'); return; }
+    if (!Number.isFinite(v)) { f.setError(BAD_NUMBER); return; }
     let x = v;
     if (o.integer) x = Math.round(x);
     if (o.min !== undefined) x = Math.max(o.min, x);
@@ -957,8 +1152,8 @@ function numField(F, o) {
  * pool cut (§5.2, §5.4.6).
  *
  * @param {object} F the form context
- * @param {{label:string, glossary?:string, fieldPath?:string, span?:boolean, units:Array<string>,
- *          getUnit:function():string, setUnit:function(string):void,
+ * @param {{label:string, title?:string, glossary?:string, fieldPath?:string, span?:boolean,
+ *          units:Array<string>, getUnit:function():string, setUnit:function(string):void,
  *          get:function():number, set:function(number):void,
  *          hint?:function():string, config:object}} o field options
  * @returns {object} the field scaffold
@@ -980,10 +1175,10 @@ function unitNumField(F, o) {
     },
   });
   const input = parts.input;
-  input.setAttribute('aria-label', o.label);
+  input.setAttribute('aria-label', o.title || o.label);
   const commit = (raw) => {
     const v = parseFloat(String(raw).replace(',', '.'));
-    if (!Number.isFinite(v)) { f.setError('Enter a number.'); return; }
+    if (!Number.isFinite(v)) { f.setError(BAD_NUMBER); return; }
     f.setError(null);
     F.edit(() => o.set(toCanonical(o.config, v, curUnit())));
   };
@@ -1017,15 +1212,15 @@ function unitNumField(F, o) {
 /**
  * A `<select>` bound to one enum on the draft.
  * @param {object} F the form context
- * @param {{label:string, glossary?:string, fieldPath?:string, span?:boolean, options:Array<*>,
- *          labelFn?:function(*):string, get:function():*, set:function(*):void,
+ * @param {{label:string, title?:string, glossary?:string, fieldPath?:string, span?:boolean,
+ *          options:Array<*>, labelFn?:function(*):string, get:function():*, set:function(*):void,
  *          hint?:function():string, disabled?:function():boolean}} o field options
  * @returns {object} the field scaffold
  */
 function selectField(F, o) {
   const f = makeField(F, o);
   const sel = mk(F.doc, 'select', 'vm-sel');
-  sel.setAttribute('aria-label', o.label);
+  sel.setAttribute('aria-label', o.title || o.label);
   fillOptions(sel, o.options, o.labelFn || humanise);
   add(f.body, sel);
   sel.addEventListener('change', () => F.edit(() => o.set(decodeOption(sel.value))));
@@ -1043,8 +1238,9 @@ function selectField(F, o) {
 /**
  * A 34×18 toggle wrapping a real checkbox (§9.4.2).
  * @param {object} F the form context
- * @param {{label:string, glossary?:string, fieldPath?:string, span?:boolean, text?:string,
- *          get:function():boolean, set:function(boolean):void, hint?:function():string}} o options
+ * @param {{label:string, title?:string, glossary?:string, fieldPath?:string, span?:boolean,
+ *          text?:string, get:function():boolean, set:function(boolean):void,
+ *          hint?:function():string}} o options
  * @returns {object} the field scaffold
  */
 function toggleField(F, o) {
@@ -1052,7 +1248,7 @@ function toggleField(F, o) {
   const lab = mk(F.doc, 'label', 'vm-tg');
   const cb = mk(F.doc, 'input');
   cb.type = 'checkbox';
-  cb.setAttribute('aria-label', o.label);
+  cb.setAttribute('aria-label', o.title || o.label);
   const tr = mk(F.doc, 'span', 'vm-tg__tr');
   const tx = mk(F.doc, 'span', 'vm-tg__lb', o.text || '');
   add(lab, cb, tr, tx);
@@ -1071,8 +1267,9 @@ function toggleField(F, o) {
 /**
  * A single-line text field.
  * @param {object} F the form context
- * @param {{label:string, glossary?:string, fieldPath?:string, span?:boolean, placeholder?:string,
- *          get:function():string, set:function(string):void, hint?:function():string}} o options
+ * @param {{label:string, title?:string, glossary?:string, fieldPath?:string, span?:boolean,
+ *          placeholder?:string, get:function():string, set:function(string):void,
+ *          hint?:function():string}} o options
  * @returns {object} the field scaffold
  */
 function textField(F, o) {
@@ -1080,7 +1277,7 @@ function textField(F, o) {
   const inp = mk(F.doc, 'input', 'vm-txt');
   inp.type = 'text';
   inp.autocomplete = 'off';
-  inp.setAttribute('aria-label', o.label);
+  inp.setAttribute('aria-label', o.title || o.label);
   if (o.placeholder) inp.placeholder = o.placeholder;
   add(f.body, inp);
   inp.addEventListener('input', () => F.edit(() => o.set(inp.value)));
@@ -1254,23 +1451,26 @@ function drawPreview(cv, wCss, config, plan, selectedId, tok) {
   const V_mL = config.column.V_mL;
   const X = (v_mL) => x0 + span * clampN(v_mL / total, 0, 1);
 
-  const cLine = tok('--line-soft', '#212A35');
-  const cGrid = tok('--grid', 'rgba(255,255,255,0.06)');
-  const cText = tok('--text-3', '#71818F');
-  const cPctb = tok('--ch-pctb', '#E5E9EF');
-  const cFlow = tok('--ch-flow', '#64D9C4');
-  const cAlarm = tok('--alarm', '#F2544B');
-  const cSample = tok('--fluid-sample', '#C98A2B');
-  const cAccent = tok('--accent', '#5DA9FF');
-  const cAccentSoft = tok('--accent-soft', 'rgba(93,169,255,0.14)');
+  // FT-CLASSIC plot furniture: black field, dark-green graticule, service-coloured marks.
+  const cLine = tok('--plot-axis', '#C7C3BC');
+  const cGrid = tok('--plot-grid', '#1F3D1F');
+  const cText = tok('--fld-eu', '#9FB39F');
+  const cPctb = tok('--pen-pctb', '#FF6EC7');
+  const cFlow = tok('--pen-flow', '#00E5FF');
+  const cAlarm = tok('--fld-alarm', '#FF3B30');
+  const cSample = tok('--svc-sample', '#C8862B');
+  const cAccent = tok('--fld-sp', '#FFD400');
+  const cAccentSoft = 'rgba(255,212,0,0.16)';
   const fontNum = tok('--font-num', 'ui-monospace, monospace');
+  g.fillStyle = tok('--plot-bg', '#000000');
+  g.fillRect(0, 0, wCss, PV.H);
   g.font = '9px ' + fontNum;
   g.textBaseline = 'middle';
 
   if (plan.rows.length === 0) {
-    g.fillStyle = cText;
+    g.fillStyle = tok('--fld-stale', '#7A8A7A');
     g.textAlign = 'center';
-    g.fillText('No enabled blocks', wCss / 2, PV.H / 2);
+    g.fillText('NO BLOCKS', wCss / 2, PV.H / 2);
     return;
   }
 
@@ -1545,13 +1745,23 @@ export function createMethodView(rootEl, ctx) {
    * @returns {void}
    */
   function refreshTokens() {
-    let map = {};
-    try { map = readThemeTokens('current') || {}; } catch (e) { map = {}; }
+    // The FT-CLASSIC palette is declared on `.vm-root` itself, so the live computed value of this
+    // view's own root is the authority — a canvas cannot use `var()` and must be handed hex.
+    let cs = null;
+    try {
+      const view = doc.defaultView;
+      cs = (view && typeof view.getComputedStyle === 'function') ? view.getComputedStyle(root) : null;
+    } catch (e) { cs = null; }
+    const map = Object.create(null);
     S.tok = (name, fallback) => {
       let v = map[name];
-      if (v === undefined) v = map[name.replace(/^--/, '')];
-      const s = typeof v === 'string' ? v.trim() : '';
-      return s || fallback;
+      if (v === undefined) {
+        let read = '';
+        try { read = cs ? (cs.getPropertyValue(name) || '').trim() : ''; } catch (e) { read = ''; }
+        v = read;
+        map[name] = v;
+      }
+      return v || fallback;
     };
   }
   refreshTokens();
@@ -1810,7 +2020,8 @@ export function createMethodView(rootEl, ctx) {
   const listPanel = mk(doc, 'section', 'vm-panel');
   const listHd = mk(doc, 'div', 'vm-hd');
   const listCount = mk(doc, 'span', 'vm-hd__n', '0');
-  add(listHd, mk(doc, 'span', null, 'Blocks'), mk(doc, 'span', 'vm-hd__sp'), listCount);
+  listCount.title = 'Blocks in the draft method';
+  add(listHd, mk(doc, 'span', null, 'BLOCKS'), mk(doc, 'span', 'vm-hd__sp'), listCount);
   const listWrap = mk(doc, 'div', 'vm-listwrap vm-scroll');
   const listEl = mk(doc, 'div', 'vm-list');
   listEl.setAttribute('role', 'listbox');
@@ -1823,8 +2034,9 @@ export function createMethodView(rootEl, ctx) {
   // Centre: the block editor.
   const edPanel = mk(doc, 'section', 'vm-panel');
   const edHd = mk(doc, 'div', 'vm-hd');
-  const edTitle = mk(doc, 'span', null, 'Block');
+  const edTitle = mk(doc, 'span', null, 'BLOCK');
   const edId = mk(doc, 'span', 'vm-hd__n', '');
+  edId.title = 'Selected block id';
   add(edHd, edTitle, mk(doc, 'span', 'vm-hd__sp'), edId);
   const edBody = mk(doc, 'div', 'vm-scroll');
   edBody.setAttribute('role', 'group');
@@ -1836,16 +2048,22 @@ export function createMethodView(rootEl, ctx) {
 
   const pvPanel = mk(doc, 'section', 'vm-panel');
   const pvHd = mk(doc, 'div', 'vm-hd');
-  add(pvHd, mk(doc, 'span', null, 'Preview'));
+  add(pvHd, mk(doc, 'span', null, 'PREVIEW'));
   const pvBody = mk(doc, 'div', 'vm-prev');
   const canvas = mk(doc, 'canvas');
   canvas.setAttribute('role', 'img');
   const stats = mk(doc, 'div', 'vm-prev__stats');
   const statNodes = {};
-  for (const k of ['Total volume', 'Total time', 'Buffer A / B']) {
+  const STAT_TAGS = [
+    ['Total volume', 'V-TOT', 'Total volume of every enabled block'],
+    ['Total time', 'T-TOT', 'Total run time of every enabled block'],
+    ['Buffer A / B', 'A / B', 'Buffer A and buffer B demand, litres'],
+  ];
+  for (const [k, tag, title] of STAT_TAGS) {
     const s = mk(doc, 'div', 'vm-stat');
+    s.title = title;
     const v = mk(doc, 'div', 'vm-stat__v', '—');
-    add(s, mk(doc, 'div', 'vm-stat__k', k), v);
+    add(s, mk(doc, 'div', 'vm-stat__k', tag), v);
     add(stats, s);
     statNodes[k] = v;
   }
@@ -1854,32 +2072,34 @@ export function createMethodView(rootEl, ctx) {
 
   const vdPanel = mk(doc, 'section', 'vm-panel');
   const vdHd = mk(doc, 'div', 'vm-hd');
-  const vdCount = mk(doc, 'span', 'vm-hd__n', '');
-  add(vdHd, mk(doc, 'span', null, 'Validation'), mk(doc, 'span', 'vm-hd__sp'), vdCount);
+  const vdLamp = mk(doc, 'span', 'vm-dot');
+  const vdCount = mk(doc, 'span', 'vm-hd__n', '0/0');
+  vdCount.title = 'Errors / warnings';
+  add(vdHd, mk(doc, 'span', null, 'VALIDATION'), mk(doc, 'span', 'vm-hd__sp'), vdLamp, vdCount);
   const vdBody = mk(doc, 'div', 'vm-scroll');
   vdBody.setAttribute('role', 'list');
   add(vdPanel, vdHd, vdBody);
 
   const prcPanel = mk(doc, 'section', 'vm-panel');
   const prcHd = mk(doc, 'div', 'vm-hd');
-  const prcBtn = mk(doc, 'button', 'vm-btn vm-btn--sm', 'Re-check');
-  prcBtn.type = 'button';
-  prcBtn.title = 'Run the twelve pre-run checks against the installed method (PRC-01 … PRC-12)';
-  prcBtn.addEventListener('click', schedulePreRunChecks);
-  add(prcHd, mk(doc, 'span', null, 'Pre-run checks'), mk(doc, 'span', 'vm-hd__sp'), prcBtn);
+  const prcLamp = mk(doc, 'span', 'vm-dot');
+  const prcBtn = iconBtn(doc, 'recheck',
+    'Run the twelve pre-run checks against the installed method (PRC-01 … PRC-12)',
+    schedulePreRunChecks, 'vm-btn--sm');
+  add(prcHd, mk(doc, 'span', null, 'PRE-RUN'), mk(doc, 'span', 'vm-hd__sp'), prcLamp, prcBtn);
   const prcBody = mk(doc, 'div', 'vm-scroll');
   prcBody.setAttribute('role', 'list');
   add(prcPanel, prcHd, prcBody);
 
   const tplPanel = mk(doc, 'section', 'vm-panel');
   const tplHd = mk(doc, 'div', 'vm-hd');
-  add(tplHd, mk(doc, 'span', null, 'Templates'));
+  add(tplHd, mk(doc, 'span', null, 'TEMPLATES'));
   const tplBody = mk(doc, 'div', 'vm-scroll');
   add(tplPanel, tplHd, tplBody);
 
   const ioPanel = mk(doc, 'section', 'vm-panel');
   const ioHd = mk(doc, 'div', 'vm-hd');
-  add(ioHd, mk(doc, 'span', null, 'Method file'));
+  add(ioHd, mk(doc, 'span', null, 'FILE'));
   const ioFt = mk(doc, 'div', 'vm-ft');
   const fileInput = mk(doc, 'input');
   fileInput.type = 'file';
@@ -1893,23 +2113,21 @@ export function createMethodView(rootEl, ctx) {
 
   // Commit bar.
   const bar = mk(doc, 'div', 'vm-bar');
+  const barLamp = mk(doc, 'span', 'vm-dot');
   const barMsg = mk(doc, 'div', 'vm-bar__msg', '');
-  const btnRevert = mk(doc, 'button', 'vm-btn', 'Revert');
-  const btnApply = mk(doc, 'button', 'vm-btn vm-btn--primary', 'Apply method');
-  btnRevert.type = 'button';
-  btnApply.type = 'button';
-  btnRevert.addEventListener('click', () => {
+  const btnRevert = iconBtn(doc, 'revert', 'Discard draft edits and reload the installed method', () => {
     if (!S.dirty) { toast(ui, 'The draft already matches the installed method.', 'info'); return; }
     modal(ui, { title: 'Discard draft edits?',
       content: mk(doc, 'div', null, 'The block list will be reloaded from the installed method. '
         + 'This cannot be undone.'),
       actions: [{ label: 'Keep editing' }, { label: 'Discard', variant: 'danger', onClick: revert }] });
   });
-  btnApply.addEventListener('click', () => commit(false));
-  add(bar, barMsg, mk(doc, 'div', 'vm-bar__sp'), btnRevert, btnApply);
+  const btnApply = iconBtn(doc, 'apply', 'Install this method through sim.loadMethod',
+    () => commit(false), 'vm-btn--primary');
+  add(bar, barLamp, barMsg, mk(doc, 'div', 'vm-bar__sp'), btnRevert, btnApply);
 
   const drop = mk(doc, 'div', 'vm-drop');
-  add(drop, mk(doc, 'div', 'vm-drop__in', 'Drop a method .json to import'));
+  add(drop, mk(doc, 'div', 'vm-drop__in', 'DROP .JSON'));
   const live = mk(doc, 'div', 'vm-sr');
   live.setAttribute('aria-live', 'polite');
   add(root, note, grid, bar, drop, live);
@@ -1927,28 +2145,25 @@ export function createMethodView(rootEl, ctx) {
   /* ── list footer actions ──────────────────────────────────────────────────────────────────── */
 
   /**
-   * Build one footer button.
-   * @param {string} label visible label
+   * Build one footer button: an icon, with the words in `title` (§9.7).
+   * @param {string} name a key of {@link ICONS}
    * @param {string} title tooltip, which also explains why the button is disabled (§9.7)
    * @param {function():void} onClick handler
    * @returns {HTMLButtonElement} the button
    */
-  function ftBtn(label, title, onClick) {
-    const b = mk(doc, 'button', 'vm-btn vm-btn--sm', label);
-    b.type = 'button';
-    b.title = title;
-    b.addEventListener('click', onClick);
+  function ftBtn(name, title, onClick) {
+    const b = iconBtn(doc, name, title, onClick, 'vm-btn--sm');
     add(listFt, b);
     return b;
   }
 
-  const btnAdd = ftBtn('+ Add', 'Insert a new block after the selected one', () => openTypePalette());
-  const btnDup = ftBtn('Duplicate', 'Copy the selected block and insert it below', () => duplicateBlock());
-  const btnDel = ftBtn('Delete', 'Remove the selected block (Ctrl+Z undoes it)', () => deleteBlock());
-  const btnUp = ftBtn('↑', 'Move the selected block up (Alt+Up)', () => nudge(-1));
-  const btnDown = ftBtn('↓', 'Move the selected block down (Alt+Down)', () => nudge(1));
-  const btnUndo = ftBtn('Undo', 'Undo the last edit (Ctrl+Z)', undo);
-  const btnRedo = ftBtn('Redo', 'Redo (Ctrl+Shift+Z)', redo);
+  const btnAdd = ftBtn('add', 'Insert a new block after the selected one', () => openTypePalette());
+  const btnDup = ftBtn('duplicate', 'Copy the selected block and insert it below', () => duplicateBlock());
+  const btnDel = ftBtn('del', 'Remove the selected block (Ctrl+Z undoes it)', () => deleteBlock());
+  const btnUp = ftBtn('up', 'Move the selected block up (Alt+Up)', () => nudge(-1));
+  const btnDown = ftBtn('down', 'Move the selected block down (Alt+Down)', () => nudge(1));
+  const btnUndo = ftBtn('undo', 'Undo the last edit (Ctrl+Z)', undo);
+  const btnRedo = ftBtn('redo', 'Redo (Ctrl+Shift+Z)', redo);
 
   /** @returns {number} the selected block's index in the draft, or -1 */
   function selIndex() {
@@ -1963,14 +2178,14 @@ export function createMethodView(rootEl, ctx) {
   function openTypePalette() {
     if (S.readOnly) { toast(ui, readOnlyReason(), 'blocked'); return; }
     const body = mk(doc, 'div');
-    body.style.cssText = 'display:grid;grid-template-columns:repeat(2,1fr);gap:6px;';
+    body.style.cssText = 'display:grid;grid-template-columns:repeat(4,1fr);gap:4px;';
     for (const t of BLOCK_TYPES) {
       const meta = TYPE_META[t];
-      const b = mk(doc, 'button', 'vm-btn');
+      // The face carries the two-letter §5.4.3 code; the name is in the tooltip.
+      const b = mk(doc, 'button', 'vm-btn', meta.code);
       b.type = 'button';
-      b.style.justifyContent = 'flex-start';
-      const chip = mk(doc, 'span', 'vm-row__code', meta.code);
-      add(b, chip, mk(doc, 'span', null, meta.label));
+      b.title = meta.label;
+      b.setAttribute('aria-label', meta.label);
       b.addEventListener('click', () => addBlock(t));
       add(body, b);
     }
@@ -2230,7 +2445,7 @@ export function createMethodView(rootEl, ctx) {
    */
   function renderList() {
     const blocks = S.draft ? S.draft.blocks : [];
-    setText(listCount, String(blocks.length) + (blocks.length === 1 ? ' block' : ' blocks'));
+    setText(listCount, String(blocks.length));
     reconcileList(listEl, blocks, (b) => b.id, (b) => {
       const row = mk(doc, 'div', 'vm-row');
       row.setAttribute('role', 'option');
@@ -2416,15 +2631,15 @@ export function createMethodView(rootEl, ctx) {
     const config = ctx.config;
 
     if (!b) {
-      setText(edTitle, 'Block');
-      setText(edId, '');
-      const empty = mk(doc, 'div', 'vm-empty',
-        'No block selected. Add one with “+ Add”, or load a template from the right-hand rail.');
+      setText(edTitle, 'BLOCK');
+      setText(edId, '—');
+      const empty = mk(doc, 'div', 'vm-empty', 'NO BLOCK');
+      empty.title = 'No block is selected. Add one from the block list, or load a template.';
       add(edBody, empty);
       return;
     }
     const meta = TYPE_META[b.type] || { code: '??', label: b.type };
-    setText(edTitle, meta.label);
+    setText(edTitle, (meta.code || '??') + ' ' + (meta.label || b.type).toUpperCase());
     setText(edId, b.id);
 
     /* 1 ── identity ─────────────────────────────────────────────────────────────────────────── */
@@ -2449,14 +2664,14 @@ export function createMethodView(rootEl, ctx) {
         S.editorKey = '';
       },
       hint: () => typeHint(b.type) });
-    toggleField(F, { label: 'Enabled', text: b.enabled ? 'In the run' : 'Skipped',
+    toggleField(F, { label: 'Enabled', text: b.enabled ? 'IN RUN' : 'SKIP',
       get: () => b.enabled, set: (v) => { b.enabled = v; },
       hint: () => 'A disabled block stays in the file and is skipped at run time.' });
-    toggleField(F, { label: 'Autozero at start', glossary: 'block.autozero',
-      get: () => b.autozero, set: (v) => { b.autozero = v; }, text: 'Zero all UV channels',
+    toggleField(F, { label: 'Autozero', title: 'Autozero at block start', glossary: 'block.autozero',
+      get: () => b.autozero, set: (v) => { b.autozero = v; }, text: 'UV ZERO',
       hint: () => 'Zeroes UV 280/260/300 as this block begins.' });
-    toggleField(F, { label: 'Hold at end', glossary: 'block.holdAtEnd',
-      get: () => b.holdAtEnd, set: (v) => { b.holdAtEnd = v; }, text: 'Enter HELD',
+    toggleField(F, { label: 'Hold end', title: 'Hold at end of block', glossary: 'block.holdAtEnd',
+      get: () => b.holdAtEnd, set: (v) => { b.holdAtEnd = v; }, text: 'HELD',
       hint: () => 'HELD keeps flow at setpoint and freezes the block clock.' });
     textAreaField(F, { label: 'Notes', get: () => b.notes, set: (v) => { b.notes = v; } });
 
@@ -2491,10 +2706,11 @@ export function createMethodView(rootEl, ctx) {
     /* 3 ── flow ─────────────────────────────────────────────────────────────────────────────── */
     F.parent = section('Flow', 'flow');
     selectField(F, { label: 'Flow mode', glossary: 'block.flow', options: FLOW_MODES,
-      labelFn: (m) => ({ CM_H: 'Linear velocity (cm/h)', ML_MIN: 'Volumetric (mL/min)',
-        RESIDENCE_TIME_MIN: 'Residence time (min)', CV_PER_H: 'Column volumes per hour',
-        INHERIT: 'Inherit from previous block' })[m],
-      get: () => b.flow.mode, set: (v) => { b.flow.mode = v; S.editorKey = ''; } });
+      // The option face carries the unit the setpoint is expressed in; what each mode MEANS is in
+      // the field tooltip, not on the glass.
+      labelFn: (m) => FLOW_MODE_OPTION[m] || m,
+      get: () => b.flow.mode, set: (v) => { b.flow.mode = v; S.editorKey = ''; },
+      hint: () => FLOW_MODE_HINT[b.flow.mode] || '' });
     numField(F, { label: 'Setpoint', fieldPath: 'flow.value', unit: FLOW_MODE_UNIT[b.flow.mode],
       step: b.flow.mode === 'CM_H' ? 10 : 1, min: 0,
       get: () => b.flow.value, set: (v) => { b.flow.value = v; },
@@ -2517,7 +2733,7 @@ export function createMethodView(rootEl, ctx) {
     F.parent.appendChild(dpHintNode(b));
 
     /* 4 ── buffer ───────────────────────────────────────────────────────────────────────────── */
-    F.parent = section('Buffer and gradient', 'buffer');
+    F.parent = section('Gradient', 'buffer');
     selectField(F, { label: 'Shape', glossary: 'block.gradient', fieldPath: 'gradient.shape',
       options: GRADIENT_SHAPES, get: () => b.gradient.shape,
       set: (v) => { b.gradient.shape = v; S.editorKey = ''; },
@@ -2561,8 +2777,8 @@ export function createMethodView(rootEl, ctx) {
       disabled: () => b.type === 'COLUMN_BYPASS',
       hint: () => (b.type === 'COLUMN_BYPASS' ? 'Forced to BYPASS by the block type.'
         : (b.type === 'CIP' ? 'CIP allows DOWN, UP and CIP_DETECTOR_BYPASS only.' : '')) });
-    selectField(F, { label: 'Outlet when not collecting', glossary: 'block.outletDefault',
-      options: ['WASTE'].concat(fracPorts()),
+    selectField(F, { label: 'Outlet', title: 'Outlet when not collecting',
+      glossary: 'block.outletDefault', options: ['WASTE'].concat(fracPorts()),
       get: () => b.outletDefault, set: (v) => { b.outletDefault = v; } });
 
     buildSampleSection(b, config);
@@ -2620,15 +2836,21 @@ export function createMethodView(rootEl, ctx) {
    * @returns {HTMLElement} a full-width hint node
    */
   function dpHintNode(b) {
-    const el = mk(doc, 'div', 'vm-field vm-field--span');
-    const hint = mk(doc, 'div', 'vm-field__hint');
-    add(el, hint);
+    const el = mk(doc, 'div', 'vm-field');
+    const lb = mk(doc, 'div', 'vm-field__lb', 'PDT-EST');
+    const body = mk(doc, 'div', 'vm-field__body');
+    const box = mk(doc, 'div', 'vm-nf');
+    const val = mk(doc, 'span', 'vm-nf__v', '—');
+    add(box, val, mk(doc, 'span', 'vm-nf__u', 'bar'));
+    add(body, box);
+    add(el, lb, body);
     S.fields.push({ el, fieldPath: null, setError: () => {}, setHint: () => {}, refresh: () => {
       const dp = blockPressureEstimate_bar(ctx.config, b);
       const trip = dpTrip_bar(ctx.config);
-      setText(hint, 'Estimated column ΔP at this flow: ' + nf(dp, 3) + ' bar of the '
+      setText(val, nf(dp, 3));
+      setAttr(val, 'data-q', dp > trip ? 'alarm' : null);
+      setAttr(el, 'title', 'Estimated column ΔP at this flow: ' + nf(dp, 3) + ' bar of the '
         + nf(trip, 2) + ' bar trip (design-time estimate at 1.002 cP).');
-      hint.style.color = dp > trip ? S.tok('--alarm', '#F2544B') : '';
     } });
     return el;
   }
@@ -2642,10 +2864,12 @@ export function createMethodView(rootEl, ctx) {
   function buildSampleSection(b, config) {
     F.parent = section('Sample', 'sample');
     selectField(F, { label: 'Sample mode', glossary: 'block.sample', options: SAMPLE_MODES,
-      labelFn: (m) => (m === null ? 'None (buffer only)' : humanise(m)),
+      labelFn: humanise,
       get: () => b.sample.mode, set: (v) => { b.sample.mode = v; S.editorKey = ''; },
-      hint: () => (b.type === 'LOAD' && !b.sample.mode
-        ? 'A LOAD block requires a sample mode.' : '') });
+      hint: () => (b.sample.mode
+        ? ''
+        : (b.type === 'LOAD' ? 'A LOAD block requires a sample mode.'
+          : 'None — this block runs on buffer only.')) });
     if (b.sample.mode) {
       numField(F, { label: 'Loop volume', fieldPath: 'sample.loopVolume_mL', unit: 'mL',
         step: 1, min: 0, decimals: 2,
@@ -2661,12 +2885,15 @@ export function createMethodView(rootEl, ctx) {
           + ' mL of buffer A pushed after the sample.' });
     }
     if (config.load && config.load.derived) {
-      const el = mk(doc, 'div', 'vm-field vm-field--span');
-      const hint = mk(doc, 'div', 'vm-field__hint');
-      add(el, hint);
-      setText(hint, 'Configured load: ' + nf(config.load.derived.mass_g, 2) + ' g in '
-        + nf(config.load.derived.volume_mL, 0) + ' mL ('
-        + nf(config.load.derived.CV, 2) + ' CV) of feed.');
+      const d = config.load.derived;
+      const el = mk(doc, 'div', 'vm-field');
+      const body = mk(doc, 'div', 'vm-field__body');
+      const box = mk(doc, 'div', 'vm-nf');
+      add(box, mk(doc, 'span', 'vm-nf__v', nf(d.mass_g, 2)), mk(doc, 'span', 'vm-nf__u', 'g'));
+      add(body, box);
+      add(el, mk(doc, 'div', 'vm-field__lb', 'LOAD'), body);
+      setAttr(el, 'title', 'Configured load: ' + nf(d.mass_g, 2) + ' g in '
+        + nf(d.volume_mL, 0) + ' mL (' + nf(d.CV, 2) + ' CV) of feed.');
       add(F.parent, el);
     }
   }
@@ -2680,7 +2907,7 @@ export function createMethodView(rootEl, ctx) {
    */
   function buildFracSection(b, config) {
     const f = b.fractionation;
-    F.parent = section('Fraction collection', 'frac');
+    F.parent = section('Fractions', 'frac');
     selectField(F, { label: 'Collection mode', glossary: 'frac.mode', fieldPath: 'fractionation.mode',
       options: FRAC_MODES, get: () => f.mode, set: (v) => { f.mode = v; S.editorKey = ''; },
       hint: () => ({ OFF: 'Everything goes to the outlet default.',
@@ -2730,7 +2957,8 @@ export function createMethodView(rootEl, ctx) {
       selectField(F, { label: 'Stop on', glossary: 'frac.stopThreshold', options: STOP_TYPES,
         get: () => f.stopThreshold.type, set: (v) => { f.stopThreshold.type = v; S.editorKey = ''; } });
       if (f.stopThreshold.type === 'PCT_OF_PEAK_MAX') {
-        numField(F, { label: 'Stop at % of peak max', unit: '%', step: 5, min: 0, max: 100, decimals: 1,
+        numField(F, { label: 'Stop %', title: 'Stop at this percentage of the peak maximum',
+          unit: '%', step: 5, min: 0, max: 100, decimals: 1,
           get: () => f.stopThreshold.pctOfMax,
           set: (v) => {
             f.stopThreshold.pctOfMax = v;
@@ -2766,8 +2994,9 @@ export function createMethodView(rootEl, ctx) {
             } });
         }
       }
-      toggleField(F, { label: 'Peak max detection', glossary: 'frac.peakMaxDetection',
-        text: 'Mark the apex fraction', get: () => f.peakMaxDetection,
+      toggleField(F, { label: 'Apex detect', title: 'Peak maximum detection',
+        glossary: 'frac.peakMaxDetection',
+        text: 'APEX MARK', get: () => f.peakMaxDetection,
         set: (v) => { f.peakMaxDetection = v; } });
       unitNumField(F, { label: 'Apex prominence', config, units: SIGNAL_UNITS[fam()].level,
         getUnit: () => SIGNAL_UNITS[fam()].level[0],
@@ -2775,16 +3004,21 @@ export function createMethodView(rootEl, ctx) {
         get: () => f.peakMaxProminence, set: (v) => { f.peakMaxProminence = v; },
         hint: () => 'A local maximum below this prominence is not called an apex.' });
     } else {
-      spanField(F, 'Fraction size', 'fractionation.fixedVolume', f.fixedVolume, config, b, 0.05);
+      spanField(F, 'Fraction size', 'fractionation.fixedVolume', f.fixedVolume, config, b, 0.05,
+        'Size basis');
     }
-    spanField(F, 'Minimum fraction', 'fractionation.minFractionVolume', f.minFractionVolume, config, b, 0.01);
-    spanField(F, 'Maximum fraction', 'fractionation.maxFractionVolume', f.maxFractionVolume, config, b, 0.05);
+    spanField(F, 'Minimum fraction', 'fractionation.minFractionVolume', f.minFractionVolume,
+      config, b, 0.01, 'Min basis');
+    spanField(F, 'Maximum fraction', 'fractionation.maxFractionVolume', f.maxFractionVolume,
+      config, b, 0.05, 'Max basis');
     if (WINDOW_OPERATORS.length) {
-      spanField(F, 'Slope window', 'fractionation.slopeWindow', f.slopeWindow, config, b, 0.01);
+      spanField(F, 'Slope window', 'fractionation.slopeWindow', f.slopeWindow, config, b, 0.01,
+        'Window basis');
     }
     selectField(F, { label: 'First port', options: fracPorts(),
       get: () => f.firstPort, set: (v) => { f.firstPort = v; } });
-    numField(F, { label: 'Ports to use', step: 1, min: 1, integer: true, decimals: 0,
+    numField(F, { label: 'Port count', title: 'Number of collector ports to use',
+      unit: 'port', step: 1, min: 1, integer: true, decimals: 0,
       get: () => f.portCount, set: (v) => { f.portCount = v; },
       hint: () => 'This collector has ' + fracPorts().length + ' ports.' });
     selectField(F, { label: 'Overflow to', glossary: 'frac.overflowTo',
@@ -2807,15 +3041,16 @@ export function createMethodView(rootEl, ctx) {
    * millilitres and seconds in the hint.
    *
    * @param {object} Fc the form context
-   * @param {string} label the visible label
+   * @param {string} label the two-word face tag
    * @param {string} fieldPath the validation field path
    * @param {{basis:string, value:number}} span the span object on the draft
    * @param {object} config frozen config
    * @param {object} b the owning block, for the flow used by the `min` basis
    * @param {number} step the numfield step
+   * @param {string} basisLabel the two-word face tag of the basis selector beside it
    * @returns {void}
    */
-  function spanField(Fc, label, fieldPath, span, config, b, step) {
+  function spanField(Fc, label, fieldPath, span, config, b, step, basisLabel) {
     numField(Fc, { label, fieldPath, unit: span.basis, step, min: 0,
       get: () => span.value, set: (v) => { span.value = v; },
       hint: () => {
@@ -2825,7 +3060,7 @@ export function createMethodView(rootEl, ctx) {
         const s = (Number.isFinite(q) && q > 0) ? mL / q : NaN;
         return nf(mL, 2) + ' mL · ' + nf(s, 1) + ' s';
       } });
-    selectField(Fc, { label: label + ' basis', options: SPAN_BASES,
+    selectField(Fc, { label: basisLabel, title: label + ' basis', options: SPAN_BASES,
       get: () => span.basis, set: (v) => { span.basis = v; S.editorKey = ''; } });
   }
 
@@ -2836,28 +3071,25 @@ export function createMethodView(rootEl, ctx) {
    * @returns {void}
    */
   function buildWatchSection(b, config) {
-    const body = section('Watch conditions (' + b.watches.length + ')', 'watches');
+    const body = section('Watches (' + b.watches.length + ')', 'watches');
     body.className = 'vm-sec__body';
     body.style.gridTemplateColumns = '1fr';
     for (let k = 0; k < b.watches.length; k++) buildWatchCard(body, b, b.watches[k], k, config);
     const addWrap = mk(doc, 'div', 'vm-field vm-field--span');
-    const addBtn = mk(doc, 'button', 'vm-btn vm-btn--sm', '+ Add watch');
-    addBtn.type = 'button';
-    addBtn.title = 'A watch ends the block, or acts on it, when a signal condition holds';
-    addBtn.addEventListener('click', () => {
-      if (S.readOnly) { toast(ui, readOnlyReason(), 'blocked'); return; }
-      edit(() => { b.watches.push(makeWatch(b.watches.length)); }, true);
-      recomputeNow();
-    });
+    addWrap.style.gridTemplateColumns = 'auto 1fr';
+    const addBtn = iconBtn(doc, 'add',
+      'Add a watch: it ends the block, or acts on it, when a signal condition holds', () => {
+        if (S.readOnly) { toast(ui, readOnlyReason(), 'blocked'); return; }
+        edit(() => { b.watches.push(makeWatch(b.watches.length)); }, true);
+        recomputeNow();
+      }, 'vm-btn--sm');
     add(addWrap, addBtn);
-    add(body, addWrap);
     if (b.watches.length === 0) {
-      const e = mk(doc, 'div', 'vm-field vm-field--span');
-      const h = mk(doc, 'div', 'vm-field__hint',
-        'No watches — this block runs its full duration (§5.4.4c rule 11).');
-      add(e, h);
-      add(body, e);
+      const e = mk(doc, 'div', 'vm-empty', 'NO WATCHES');
+      e.title = 'No watches — this block runs its full duration (§5.4.4c rule 11).';
+      add(addWrap, e);
     }
+    add(body, addWrap);
   }
 
   /**
@@ -2874,17 +3106,15 @@ export function createMethodView(rootEl, ctx) {
     const hd = mk(doc, 'div', 'vm-watch__hd');
     const terminal = TERMINAL_ACTIONS.indexOf(w.action) >= 0;
     const pill = mk(doc, 'span', 'vm-pill ' + (terminal ? 'vm-pill--info' : 'vm-pill--mute'),
-      terminal ? 'terminal' : 'non-terminal');
+      terminal ? 'TERM' : 'NON-T');
     pill.title = terminal
       ? 'Terminal: the first satisfied terminal action ends evaluation for the tick.'
       : 'Non-terminal: every satisfied non-terminal action runs, in array order.';
-    const del = mk(doc, 'button', 'vm-btn vm-btn--sm vm-btn--danger', 'Remove');
-    del.type = 'button';
-    del.addEventListener('click', () => {
+    const del = iconBtn(doc, 'del', 'Remove this watch', () => {
       if (S.readOnly) { toast(ui, readOnlyReason(), 'blocked'); return; }
       edit(() => { b.watches.splice(k, 1); }, true);
       recomputeNow();
-    });
+    }, 'vm-btn--sm vm-btn--danger');
     add(hd, mk(doc, 'span', 'vm-watch__id', w.id || 'W' + (k + 1)), pill,
       mk(doc, 'span', 'vm-hd__sp'), del);
     add(card, hd);
@@ -2916,7 +3146,8 @@ export function createMethodView(rootEl, ctx) {
         a.pathlength_cm = config.skid.uv.pathlength_cm;
       } });
     if (WINDOW_OPERATORS.indexOf(w.operator) >= 0) {
-      spanField(F, 'Slope window', 'watches[' + k + '].slopeWindow', w.slopeWindow, config, b, 0.01);
+      spanField(F, 'Slope window', 'watches[' + k + '].slopeWindow', w.slopeWindow, config, b, 0.01,
+        'Window basis');
       if (w.operator === 'STABLE' || w.operator === 'PLATEAU') {
         unitNumField(F, { label: 'Stable tolerance', glossary: 'watch.stableTolerance', config,
           units: SIGNAL_UNITS[fam()].level,
@@ -2932,7 +3163,7 @@ export function createMethodView(rootEl, ctx) {
           hint: () => 'Both the slope AND the window range must sit inside this.' });
       }
     }
-    spanField(F, 'Arm after', 'watches[' + k + '].arm', w.arm, config, b, 0.05);
+    spanField(F, 'Arm after', 'watches[' + k + '].arm', w.arm, config, b, 0.05, 'Arm basis');
     numField(F, { label: 'Persistence', glossary: 'watch.persistence_ticks', unit: 'ticks',
       step: 1, min: 1, integer: true, decimals: 0,
       get: () => w.persistence_ticks, set: (v) => { w.persistence_ticks = v; },
@@ -2941,12 +3172,13 @@ export function createMethodView(rootEl, ctx) {
       fieldPath: 'watches[' + k + '].action', options: WATCH_ACTIONS,
       get: () => w.action, set: (v) => { w.action = v; w.actionParam = null; S.editorKey = ''; } });
     buildActionParam(w, k, config);
-    toggleField(F, { label: 'One shot', glossary: 'watch.oneShot', text: 'Fire once per block',
+    toggleField(F, { label: 'One shot', glossary: 'watch.oneShot', text: 'ONCE',
       get: () => w.oneShot, set: (v) => { w.oneShot = v; } });
-    toggleField(F, { label: 'Delay compensated', glossary: 'watch.useDelayCompensated',
-      text: 'Training aid — non-physical',
+    toggleField(F, { label: 'Delay comp', title: 'Delay-compensated watch',
+      glossary: 'watch.useDelayCompensated', text: 'COMP',
       get: () => w.useDelayCompensated, set: (v) => { w.useDelayCompensated = v; },
-      hint: () => 'Off is the honest behaviour: a UV watch fires after the transport delay.' });
+      hint: () => 'A training aid. Off is the honest behaviour: a UV watch fires after the '
+        + 'transport delay.' });
     F.parent = prev;
   }
 
@@ -3068,14 +3300,22 @@ export function createMethodView(rootEl, ctx) {
   function renderValidation() {
     const errs = S.validation.errors;
     const warns = S.validation.warnings;
-    setText(vdCount, errs.length + ' error' + (errs.length === 1 ? '' : 's') + ' · '
-      + warns.length + ' warning' + (warns.length === 1 ? '' : 's'));
+    setText(vdCount, errs.length + '/' + warns.length);
+    setAttr(vdCount, 'title', errs.length + ' error(s), ' + warns.length + ' warning(s)');
+    cls(vdLamp, 'vm-dot--err', errs.length > 0);
+    cls(vdLamp, 'vm-dot--warn', errs.length === 0 && warns.length > 0);
+    cls(vdLamp, 'vm-dot--ok', errs.length === 0 && warns.length === 0);
+    setAttr(vdLamp, 'title', errs.length > 0
+      ? 'At least one blocking error: Start is disabled until it is resolved.'
+      : (warns.length > 0 ? 'Warnings only: the method may still run.'
+        : 'No issues. Every block validates.'));
     const items = errs.concat(warns).map((it, i) => ({
       it, key: it.level + '|' + (it.blockId || '-') + '|' + (it.field || '-') + '|' + it.code + '|' + i,
     }));
     if (items.length === 0) {
       while (vdBody.firstChild) vdBody.removeChild(vdBody.firstChild);
-      const ok = mk(doc, 'div', 'vm-empty', 'No issues. Every block validates.');
+      const ok = mk(doc, 'div', 'vm-empty', 'NO ISSUES');
+      ok.title = 'No issues. Every block validates.';
       add(vdBody, ok);
       return;
     }
@@ -3094,9 +3334,11 @@ export function createMethodView(rootEl, ctx) {
       add(hd, code, where);
       const msg = mk(doc, 'span', 'vm-issue__msg');
       add(tx, hd, msg);
-      const fix = mk(doc, 'span', 'vm-btn vm-btn--sm', 'Fix');
+      const fix = mk(doc, 'span', 'vm-btn vm-btn--sm vm-btn--icon');
       fix.setAttribute('role', 'button');
+      fix.setAttribute('aria-label', 'Apply the one-click fix');
       fix.tabIndex = 0;
+      add(fix, svgIcon(doc, 'fix'));
       add(row, mkr, tx, fix);
       row._parts = { mkr, code, where, msg, fix };
       return row;
@@ -3104,12 +3346,13 @@ export function createMethodView(rootEl, ctx) {
       const it = x.it;
       const p = row._parts;
       const isErr = it.level === 'error';
-      p.mkr.style.background = S.tok(isErr ? '--alarm' : '--warn', isErr ? '#F2544B' : '#E8A33D');
+      setAttr(p.mkr, 'data-s', isErr ? 'alarm' : 'warn');
       setText(p.code, it.code);
       const blk = blockById(it.blockId);
-      setText(p.where, blk ? (blk.id + ' · ' + blk.name + (it.field ? ' · ' + it.field : ''))
-        : (it.blockId ? it.blockId : 'method'));
-      setText(p.msg, it.message);
+      setText(p.where, blk ? (blk.id + (it.field ? '·' + it.field : ''))
+        : (it.blockId ? it.blockId : 'METHOD'));
+      setAttr(p.where, 'title', blk ? blk.name : '');
+      setText(p.msg, shortClause(it.message, 36));
       p.fix.style.display = it.fix ? '' : 'none';
       p.fix.onclick = (ev) => {
         ev.stopPropagation();
@@ -3147,36 +3390,50 @@ export function createMethodView(rootEl, ctx) {
     while (prcBody.firstChild) prcBody.removeChild(prcBody.firstChild);
     const st = ctx.run.state;
     if (!S.prc) {
-      add(prcBody, mk(doc, 'div', 'vm-empty',
-        (st === 'IDLE' || st === 'READY')
-          ? 'Not run yet. “Re-check” runs PRC-01 … PRC-12 against the installed method.'
-          : 'Pre-run checks apply in IDLE and READY only; the run is ' + st + '.'));
+      const e = mk(doc, 'div', 'vm-empty', (st === 'IDLE' || st === 'READY') ? 'NOT RUN' : 'N/A ' + st);
+      e.title = (st === 'IDLE' || st === 'READY')
+        ? 'Not run yet. The re-check button runs PRC-01 … PRC-12 against the installed method.'
+        : 'Pre-run checks apply in IDLE and READY only; the run is ' + st + '.';
+      cls(prcLamp, 'vm-dot--err', false);
+      cls(prcLamp, 'vm-dot--warn', false);
+      cls(prcLamp, 'vm-dot--ok', false);
+      setAttr(prcLamp, 'title', e.title);
+      add(prcBody, e);
       return;
     }
     const fails = S.prc.failures || [];
     if (fails.length === 0) {
-      const wrap = mk(doc, 'div', 'vm-empty');
-      const pill = mk(doc, 'span', 'vm-pill vm-pill--ok', 'all 12 passed');
-      add(wrap, pill, mk(doc, 'span', null, ' The run is armed (READY).'));
+      const wrap = mk(doc, 'div', 'vm-empty', '');
+      wrap.title = 'All twelve pre-run checks passed. The run is armed (READY).';
+      add(wrap, mk(doc, 'span', 'vm-pill vm-pill--ok', 'PRC 12/12'));
+      cls(prcLamp, 'vm-dot--err', false);
+      cls(prcLamp, 'vm-dot--warn', false);
+      cls(prcLamp, 'vm-dot--ok', true);
+      setAttr(prcLamp, 'title', wrap.title);
       add(prcBody, wrap);
       return;
     }
+    const blocking = fails.some((f) => !f.acknowledgeable);
+    cls(prcLamp, 'vm-dot--err', blocking);
+    cls(prcLamp, 'vm-dot--warn', !blocking);
+    cls(prcLamp, 'vm-dot--ok', false);
+    setAttr(prcLamp, 'title', fails.length + ' pre-run check failure(s)'
+      + (blocking ? ', at least one blocking.' : ', all acknowledgeable.'));
     for (const fl of fails) {
       const row = mk(doc, 'div', 'vm-issue');
       row.setAttribute('role', 'listitem');
       const mkr = mk(doc, 'span', 'vm-issue__mk');
-      mkr.style.background = S.tok(fl.acknowledgeable ? '--warn' : '--alarm',
-        fl.acknowledgeable ? '#E8A33D' : '#F2544B');
+      setAttr(mkr, 'data-s', fl.acknowledgeable ? 'warn' : 'alarm');
       const tx = mk(doc, 'span', 'vm-issue__tx');
       const hd = mk(doc, 'span', 'vm-issue__hd');
       add(hd, mk(doc, 'span', 'vm-issue__code', fl.code),
         mk(doc, 'span', 'vm-pill ' + (fl.acknowledgeable ? 'vm-pill--warn' : 'vm-pill--err'),
-          fl.acknowledgeable ? 'acknowledgeable' : 'blocking'));
-      add(tx, hd, mk(doc, 'span', 'vm-issue__msg', fl.message));
+          fl.acknowledgeable ? 'ACK' : 'BLOCK'));
+      add(tx, hd, mk(doc, 'span', 'vm-issue__msg', shortClause(fl.message, 36)));
       add(row, mkr, tx, mk(doc, 'span'));
-      setAttr(row, 'title', fl.acknowledgeable
-        ? 'Acknowledgeable: the run may still be armed with this outstanding.'
-        : 'Blocking: the run cannot be armed until this is resolved.');
+      setAttr(row, 'title', (fl.acknowledgeable
+        ? 'Acknowledgeable: the run may still be armed with this outstanding. '
+        : 'Blocking: the run cannot be armed until this is resolved. ') + fl.message);
       add(prcBody, row);
     }
   }
@@ -3198,7 +3455,7 @@ export function createMethodView(rootEl, ctx) {
     const poly = doc.createElementNS(NS, 'polyline');
     poly.setAttribute('points', pts);
     poly.setAttribute('fill', 'none');
-    poly.setAttribute('stroke', S.tok('--ch-pctb', '#E5E9EF'));
+    poly.setAttribute('stroke', S.tok('--pen-pctb', '#FF6EC7'));
     poly.setAttribute('stroke-width', '1.5');
     svg.appendChild(poly);
     return svg;
@@ -3230,7 +3487,7 @@ export function createMethodView(rootEl, ctx) {
           if (Number.isFinite(v)) cv += v / ctx.config.column.V_mL;
         }
       } catch (e) { /* a template that will not build reports zeros rather than breaking the rail */ }
-      setText(sub, blocks + ' blocks · ' + nf(cv, 1) + ' CV');
+      setText(sub, blocks + ' BLK · ' + nf(cv, 1) + ' CV');
       setAttr(card, 'title', 'Load “' + t.name + '” into the editor (read-only template — the copy is yours)');
       card.addEventListener('click', () => loadTemplate(t, blocks, cv));
       add(tplBody, card);
@@ -3417,17 +3674,13 @@ export function createMethodView(rootEl, ctx) {
 
   fileInput.addEventListener('change', () => readFile(fileInput.files && fileInput.files[0]));
 
-  const btnExport = mk(doc, 'button', 'vm-btn vm-btn--sm', 'Export .json');
-  btnExport.type = 'button';
-  btnExport.title = 'Download this method as JSON (Ctrl+S)';
-  btnExport.addEventListener('click', exportMethod);
-  const btnImport = mk(doc, 'button', 'vm-btn vm-btn--sm', 'Import .json');
-  btnImport.type = 'button';
-  btnImport.title = 'Load a method from a JSON file, or drop one anywhere on this tab (Ctrl+O)';
-  btnImport.addEventListener('click', importMethod);
+  const btnExport = iconBtn(doc, 'export',
+    'Download this method as JSON (Ctrl+S). Unknown fields survive the round trip: the raw '
+    + 'object travels with the method.', exportMethod, 'vm-btn--sm');
+  const btnImport = iconBtn(doc, 'import',
+    'Load a method from a JSON file, or drop one anywhere on this tab (Ctrl+O)',
+    importMethod, 'vm-btn--sm');
   add(ioFt, btnExport, btnImport);
-  add(ioFt, mk(doc, 'div', 'vm-field__hint',
-    'Unknown fields survive the round trip: the raw object travels with the method.'));
 
   let dropDepth = 0;
   /** @param {DragEvent} ev the dragenter @returns {void} */
@@ -3464,13 +3717,33 @@ export function createMethodView(rootEl, ctx) {
   function renderBar() {
     const errs = S.validation.errors;
     const first = errs[0];
-    let msg;
-    if (S.readOnly) msg = readOnlyReason();
-    else if (first) msg = 'Blocked — ' + first.code + ': ' + first.message;
-    else if (S.dirty) msg = 'Draft has unapplied changes.';
-    else msg = 'Draft matches the installed method.';
-    setText(barMsg, msg);
-    barMsg.style.color = (!S.readOnly && first) ? S.tok('--alarm', '#F2544B') : '';
+    let code;
+    let full;
+    let kind;
+    if (S.readOnly) {
+      code = 'LOCKED ' + ctx.run.state;
+      full = readOnlyReason();
+      kind = 'warn';
+    } else if (first) {
+      code = first.code;
+      full = first.code + ': ' + first.message;
+      kind = 'alarm';
+    } else if (S.dirty) {
+      code = 'DRAFT DIRTY';
+      full = 'The draft has changes that are not installed. Apply installs them.';
+      kind = 'warn';
+    } else {
+      code = 'IN SYNC';
+      full = 'The draft matches the installed method.';
+      kind = 'ok';
+    }
+    setText(barMsg, code);
+    setAttr(barMsg, 'title', full);
+    setAttr(barMsg, 'data-kind', kind);
+    cls(barLamp, 'vm-dot--err', kind === 'alarm');
+    cls(barLamp, 'vm-dot--warn', kind === 'warn');
+    cls(barLamp, 'vm-dot--ok', kind === 'ok');
+    setAttr(barLamp, 'title', full);
     btnApply.disabled = S.readOnly || errs.length > 0 || !S.dirty;
     btnApply.title = S.readOnly ? readOnlyReason()
       : (first ? 'Disabled: ' + first.code + ' — ' + first.message
@@ -3488,7 +3761,10 @@ export function createMethodView(rootEl, ctx) {
     S.readOnly = !(st === 'IDLE' || st === 'READY' || st === 'ENDED');
     S.lastState = st;
     note.style.display = S.readOnly ? '' : 'none';
-    if (S.readOnly) setText(note, readOnlyReason());
+    if (S.readOnly) {
+      setText(note, 'EDIT LOCKED · ' + st);
+      setAttr(note, 'title', readOnlyReason());
+    }
     renderList();
     renderEditor();
     renderStats();
@@ -3620,7 +3896,10 @@ export function createMethodView(rootEl, ctx) {
         const ro2 = !(ctx.run.state === 'IDLE' || ctx.run.state === 'READY' || ctx.run.state === 'ENDED');
         S.readOnly = ro2;
         note.style.display = ro2 ? '' : 'none';
-        if (ro2) setText(note, readOnlyReason());
+        if (ro2) {
+          setText(note, 'EDIT LOCKED · ' + ctx.run.state);
+          setAttr(note, 'title', readOnlyReason());
+        }
         renderList();
         refreshFields();
         renderBar();
