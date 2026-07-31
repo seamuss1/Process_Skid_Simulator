@@ -1,0 +1,24 @@
+{
+  "name": "process-skid-simulator",
+  "version": "1.0.0",
+  "description": "Web-based dynamic simulator for a preparative chromatography column skid: column physics, skid hydraulics, sensors, method/phase engine and an industrial HMI.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node tools/serve.js",
+    "dev": "node tools/serve.js",
+    "test": "node --test tests/"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "chromatography",
+    "bioprocess",
+    "downstream-processing",
+    "simulation",
+    "skid",
+    "hmi"
+  ],
+  "license": "MIT"
+}
