@@ -1709,7 +1709,7 @@ function wireFaceplateDrag(handle, grip, keyEl) {
  *
  * @param {OverlayHost} host
  * @param {FaceplateSpec} spec
- * @returns {OverlayHandle} The handle, extended with `tag`, `update(run)` and `raise()`.
+ * @returns {OverlayHandle} The handle, extended with `tag`, `update(config, run)` and `raise()`.
  */
 export function showFaceplate(host, spec) {
   const s = spec || {};
@@ -1873,14 +1873,19 @@ export function showFaceplate(host, spec) {
   handle.raise = function raise() { raiseFaceplate(handle); };
 
   /* ---- the one render path ------------------------------------------------------------------ */
-  handle.update = function update(runArg) {
+  // Signature is (config, run). It also accepts the older (run) form: a lone argument that is not a
+  // frozen config is taken as the run, so a caller that predates the two-argument contract still
+  // works instead of silently binding `run` to `config` and reading a stale tag forever.
+  handle.update = function update(a, b) {
     if (handle.dismissed) return;
-    const run = runArg || (s.ctx && s.ctx.run) || null;
+    const twoArg = b !== undefined;
+    const config = twoArg ? a : (s.ctx && s.ctx.config) || null;
+    const run = twoArg ? b : (a || (s.ctx && s.ctx.run) || null);
     if (!run || typeof s.read !== 'function') return;
 
     let r;
     try {
-      r = s.read(run);
+      r = s.read(config, run);
     } catch (err) {
       // A faceplate is never allowed to take the frame loop down with it.
       setText(pv.valueEl, NO_VALUE);
@@ -1948,13 +1953,19 @@ export function showFaceplate(host, spec) {
  *        is what keeps them correct across a `config-replaced` rebuild.
  * @returns {number} How many faceplates were repainted.
  */
-export function updateFaceplates(host, run) {
+export function updateFaceplates(host, config, run) {
   if (!host) return 0;
+  // Tolerates the older two-argument call, updateFaceplates(host, run), so the frame loop and this
+  // function cannot disagree about which object is which — the failure mode is a faceplate frozen
+  // on a stale reading, which looks like live data and is therefore worse than a visible error.
+  const cfg = run === undefined ? null : config;
+  const r = run === undefined ? config : run;
   let n = 0;
   for (let i = 0; i < host.stack.length; i += 1) {
     const handle = host.stack[i];
     if (handle.kind !== 'faceplate' || typeof handle.update !== 'function') continue;
-    handle.update(run);
+    if (cfg) handle.update(cfg, r);
+    else handle.update(r);
     n += 1;
   }
   return n;

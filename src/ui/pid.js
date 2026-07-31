@@ -31,7 +31,10 @@
 
 import { bedAxialSnapshot } from '../physics/bed.js';
 import { clamp, createRng, nextFloat, RNG_STREAMS } from '../core/util.js';
+import { QF } from '../core/log.js';
+import { sensorQuality } from '../skid/sensors.js';
 import { glossaryFor } from '../data/glossary.js';
+import { toDisplay, unitLabel } from './format.js';
 import * as overlay from './overlay.js';
 
 /* ===============================================================================================
@@ -1657,6 +1660,70 @@ const CV_POS_TEXT = {
 };
 
 /**
+ * Column-valve positions in the order the operator cycles them.  Mirrors
+ * `skid/fluidics.js::COLUMN_POSITIONS`; kept local so this presentation module does not import a
+ * simulation module for a list of strings it also has to draw.
+ * @type {string[]}
+ */
+const CV_POSITION_ORDER = ['BYPASS', 'DOWN', 'UP', 'ISOLATED', 'CIP_DETECTOR_BYPASS'];
+
+/** Injection-valve positions in cycle order; `run.valves.sampleMode` maps onto them. */
+const IV_POSITION_ORDER = ['LOAD', 'DIRECT', 'INJECT'];
+
+/**
+ * The ISA tag behind a `data-component` id, where the drawing's id is not itself the tag.  The tag
+ * is what titles the faceplate and what makes it unique, so the tank body and its level-transmitter
+ * bubble deliberately resolve to the SAME tag and raise one window between them.
+ * @type {Object<string,string>}
+ */
+const COMPONENT_TAG = {
+  PCTB: 'AIC-101',
+  'TK-A': 'LT-101', 'TK-A-LT': 'LT-101',
+  'TK-B': 'LT-102', 'TK-B-LT': 'LT-102',
+  'TK-S': 'LT-103', 'TK-S-LT': 'LT-103',
+  'TK-CIP': 'LT-104', 'TK-CIP-LT': 'LT-104',
+};
+
+/**
+ * Display slot (a {@link resolveTankSlots} key) behind each tank component id.
+ * @type {Object<string,string>}
+ */
+const COMPONENT_TANK_SLOT = {
+  'TK-A': 'a', 'TK-A-LT': 'a',
+  'TK-B': 'b', 'TK-B-LT': 'b',
+  'TK-S': 's', 'TK-S-LT': 's',
+  'TK-CIP': 'cip', 'TK-CIP-LT': 'cip',
+};
+
+/**
+ * Inlet-valve components, mapped to the `run` branch flow each one admits.
+ * @type {Object<string,string>}
+ */
+const INLET_VALVE_BRANCH = { V1: 'QA_mLs', V2: 'QB_mLs', V3: 'QS_mLs', V4: 'QA_mLs' };
+
+/** Conductivity faceplate full scale, mS/cm — the cell's practical process span. */
+const COND_FS_mScm = 100;
+
+/** Temperature faceplate full scale, °C. */
+const TEMP_FS_C = 50;
+
+/** Engineering unit for temperature.  There is no display preference for it, so it is constant. */
+const EU_TEMP_C = '°C';
+
+/** Inline-filter differential-pressure faceplate full scale, bar. */
+const FILTER_FS_bar = 1;
+
+/** Headroom applied to the highest alarm threshold when it, not a transmitter, sets the scale. */
+const SCALE_HEADROOM = 1.5;
+
+/** Faceplate quality verdicts, per the FaceplateSpec contract. */
+const Q_OK = 'OK';
+/** @see Q_OK */
+const Q_SUSPECT = 'SUSPECT';
+/** @see Q_OK */
+const Q_INVALID = 'INVALID';
+
+/**
  * Create the P&ID panel.
  *
  * @param {Element} rootEl the container the panel mounts into
@@ -2624,10 +2691,1004 @@ export function createPID(rootEl, ctx) {
     return '';
   }
 
+  /* ------------------------------------------------------------------------------------------ */
+  /* faceplates                                                                                  */
+  /* ------------------------------------------------------------------------------------------ */
+
+  /**
+   * Resolve the `(config, run)` pair a faceplate `read()` was handed.
+   *
+   * The FaceplateSpec contract is `read(config, run)`, but `ui/overlay.js` is entitled to call
+   * `read(run)` and to call it with nothing at all (it falls back to `spec.ctx.run`).  All three
+   * are accepted here by SHAPE, not by position, and anything missing falls back to the panel's own
+   * live bindings — which is also what keeps an open faceplate correct across a `config-replaced`
+   * rebuild, because `pid._config` / `pid._run` are rebound by {@link rebind}.
+   *
+   * @param {object} [a] the first argument the overlay passed
+   * @param {object} [b] the second argument the overlay passed
+   * @returns {{config:object, run:object}} the pair to read this frame
+   */
+  function readPair(a, b) {
+    const isRun = (o) => !!o && typeof o === 'object' && !!o.valves && !!o.press;
+    const isConfig = (o) => !!o && typeof o === 'object' && !!o.column && !!o.skid;
+    return {
+      config: isConfig(a) ? a : (isConfig(b) ? b : pid._config),
+      run: isRun(b) ? b : (isRun(a) ? a : pid._run),
+    };
+  }
+
+  /**
+   * The per-sensor quality verdict of §5.3, narrowed to the three values the FaceplateSpec
+   * contract allows.  `BYPASSED` — the detectors are on the CIP shunt — reads as SUSPECT: the
+   * number is real, but it is not the column effluent.
+   * @param {object} run the run state
+   * @param {'UV'|'COND'|'PH'|'PRESS'} sensor which transducer
+   * @returns {string} `'OK'`, `'SUSPECT'` or `'INVALID'`
+   */
+  function sensorVerdict(run, sensor) {
+    const q = sensorQuality(run, sensor);
+    if (q === Q_INVALID) return Q_INVALID;
+    return (q === Q_OK) ? Q_OK : Q_SUSPECT;
+  }
+
+  /**
+   * Quality for a tag with no transducer of its own — flow, inventory, valve position.  It is
+   * still read from `run.qualityFlags`, never assumed good.
+   * @param {object} run the run state
+   * @returns {string} `'OK'` or `'SUSPECT'`
+   */
+  function pathVerdict(run) {
+    const f = run.qualityFlags | 0;
+    return (f & (QF.AIR_IN_PATH | QF.FLOW_REDUCED | QF.SOLVER_FROZEN)) ? Q_SUSPECT : Q_OK;
+  }
+
+  /** @param {object} run the run state @returns {string} the UV verdict */
+  function uvVerdict(run) {
+    if (run.uv && run.uv.lampFault) return Q_INVALID;
+    const q = sensorVerdict(run, 'UV');
+    if (q !== Q_OK) return q;
+    return (run.uv && (run.uv.overrange || run.uv.saturated)) ? Q_SUSPECT : Q_OK;
+  }
+
+  /** @param {object} run the run state @returns {string} the conductivity verdict */
+  function condVerdict(run) {
+    if (run.cond && run.cond.dry) return Q_INVALID;
+    return sensorVerdict(run, 'COND');
+  }
+
+  /** @param {object} run the run state @returns {string} the pH verdict */
+  function phVerdict(run) {
+    if (run.ph && run.ph.frozen) return Q_INVALID;
+    return sensorVerdict(run, 'PH');
+  }
+
+  /**
+   * Does this component carry an active or latched alarm right now?
+   * @param {string} componentId the component id
+   * @returns {boolean} true at ALARM severity or above
+   */
+  function alarmOn(componentId) {
+    return componentSeverity(componentId) >= 2;
+  }
+
+  /**
+   * The AUTO / MAN lamp state of a controllable tag, read live so the lamps follow the operator
+   * taking and dropping manual control while the window stays open.
+   * @param {object} [a] the first argument the overlay passed
+   * @param {object} [b] the second argument the overlay passed
+   * @returns {string} `'MAN'` while manual control is engaged, else `'AUTO'`
+   */
+  function manualMode(a, b) {
+    return readPair(a, b).run.manualOverride ? 'MAN' : 'AUTO';
+  }
+
+  /**
+   * The short uppercase descriptor strip for a tag, taken from `data/glossary.js` so the drawing
+   * and the faceplate cannot disagree about what a tag is.
+   * @param {string} componentId the component id
+   * @param {string} [glossaryId] an explicit glossary id, where the tooltip's entry is not the one
+   *        the faceplate wants — AIC-101's hover explains gradient MODE, its faceplate reads %B
+   * @returns {string} the descriptor, or an empty string when the glossary has no entry
+   */
+  function descFor(componentId, glossaryId) {
+    const entry = glossaryFor(glossaryId || glossaryIdFor(componentId));
+    if (!entry || typeof entry.term !== 'string') return '';
+    const dash = entry.term.indexOf('—');
+    const t = (dash >= 0 ? entry.term.slice(dash + 1) : entry.term).trim();
+    return t.toUpperCase().slice(0, 34);
+  }
+
+  /**
+   * The `config.tanks` index a tank faceplate reads.
+   *
+   * {@link resolveTankSlots} resolves a slot from the inlet valve that is OPEN, which is what the
+   * drawing wants — a cell with no live inlet reads blank.  A level transmitter does not work
+   * that way: LT-103 measures the sample vessel whether or not V3 is open.  So when the slot has
+   * no live valve this falls back to the first tank assigned to that side's inlet ports.
+   *
+   * @param {object} config the config to resolve against
+   * @param {string} slotKey one of `'a'`, `'b'`, `'s'`, `'cip'`
+   * @returns {number} a `config.tanks` index, or -1 when the side has no tank at all
+   */
+  function tankIndexForSlot(config, slotKey) {
+    const k = slots[slotKey];
+    if (k >= 0 && k < config.tanks.length) return k;
+    if (slotKey === 'cip') return -1;
+    const side = (slotKey === 'b') ? 'B' : (slotKey === 's') ? 'S' : 'A';
+    const assign = config.inletAssignments || {};
+    const ports = Object.keys(assign).filter((p) => p.charAt(0) === side && assign[p]).sort();
+    for (let i = 0; i < ports.length; i++) {
+      for (let j = 0; j < config.tanks.length; j++) {
+        if (config.tanks[j].id === assign[ports[i]]) return j;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * The finite numeric thresholds of a set of alarm rows, in the rows' own units.
+   * @param {string[]} ids alarm ids
+   * @returns {number[]} the thresholds present in `config.alarms`
+   */
+  function alarmThresholds(ids) {
+    const defs = pid._config.alarms || [];
+    const out = [];
+    for (let i = 0; i < ids.length; i++) {
+      const k = alarmIndex.get(ids[i]);
+      if (k === undefined) continue;
+      const t = defs[k] ? defs[k].threshold : null;
+      if (typeof t === 'number' && Number.isFinite(t)) out.push(t);
+    }
+    return out;
+  }
+
+  /**
+   * Turn the alarm rows attached to a tag into faceplate scale markers.
+   * @param {string[]} ids alarm ids
+   * @param {function(number):number} [toScale] maps a threshold onto the faceplate's display scale
+   * @returns {Array<{value:number, label:string, kind:string}>} the markers
+   */
+  function limitsFromAlarms(ids, toScale) {
+    const defs = pid._config.alarms || [];
+    const out = [];
+    for (let i = 0; i < ids.length; i++) {
+      const k = alarmIndex.get(ids[i]);
+      if (k === undefined) continue;
+      const row = defs[k];
+      const t = row ? row.threshold : null;
+      if (typeof t !== 'number' || !Number.isFinite(t)) continue;
+      const v = toScale ? toScale(t) : t;
+      if (!Number.isFinite(v)) continue;
+      out.push({
+        value: v, label: row.id + ' — ' + row.name, kind: (row.op === '<') ? 'lo' : 'hi',
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Choose a pressure scale: the alarm envelope when the tag has one, otherwise the transmitter's
+   * full scale — converted into whichever pressure unit the operator has selected.
+   * @param {string[]} ids alarm ids that bound the tag
+   * @param {number} fs_bar the transmitter or hardware full scale, bar
+   * @returns {{lo:number, hi:number, decimals:number}} the scale, in display units
+   */
+  function pressureScale(ids, fs_bar) {
+    const t = alarmThresholds(ids);
+    const hiBar = t.length ? Math.min(fs_bar, Math.max(...t) * SCALE_HEADROOM) : fs_bar;
+    const loBar = t.length ? Math.min(0, Math.min(...t) * SCALE_HEADROOM) : 0;
+    const hi = toDisplay('pressure', hiBar);
+    const lo = toDisplay('pressure', loBar);
+    return { lo: lo.value, hi: hi.value, decimals: hi.decimals };
+  }
+
+  /**
+   * Call one `ctx.sim` entry point and normalise its result into the `{ok, reason}` a faceplate
+   * action must return.  This is the ONLY way a faceplate reaches the simulation.
+   * @param {object} c the action context — `spec.ctx`, i.e. the application context
+   * @param {string} name the `ctx.sim` method name
+   * @param {...*} args the call arguments, after `ctx`
+   * @returns {{ok:boolean, reason?:string}} the outcome
+   */
+  function callSim(c, name, ...args) {
+    const appCtx = c || pid._ctx;
+    const sim = appCtx.sim || {};
+    if (typeof sim[name] !== 'function') {
+      return { ok: false, reason: 'CONTROL NOT AVAILABLE: sim.' + name };
+    }
+    const r = sim[name](appCtx, ...args);
+    if (r && typeof r === 'object' && 'ok' in r) {
+      return r.ok ? { ok: true } : { ok: false, reason: String(r.reason || 'COMMAND REFUSED') };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * The next position command for a directly-manipulable valve.  Shared by the double-click path
+   * and the faceplate button so the two can never drift apart.
+   * @param {string} componentId one of `V1`..`V4`, `CV-101`, `DV-101`
+   * @returns {{cmd:object}|{ok:false, reason:string}} a `sim.manualSet` patch, or a refusal
+   */
+  function valveCycleCommand(componentId) {
+    const run = pid._run;
+    const config = pid._config;
+    if (componentId === 'V1' || componentId === 'V2' || componentId === 'V4') {
+      const side = (componentId === 'V2') ? 'B' : 'A';
+      const key = (side === 'B') ? 'inletB' : 'inletA';
+      const avail = Object.keys(config.inletAssignments || {})
+        .filter((p) => p.charAt(0) === side && config.inletAssignments[p]);
+      if (!avail.length) return { ok: false, reason: 'NO TANK ON INLET ' + side };
+      const cmd = {};
+      if (componentId === 'V4') {
+        const cipTank = config.tanks[slots.cip];
+        const port = cipTank ? avail.find((p) => config.inletAssignments[p] === cipTank.id) : null;
+        cmd[key] = port || avail[avail.length - 1];
+      } else {
+        const cur = avail.indexOf(run.valves[key]);
+        cmd[key] = avail[(cur + 1) % avail.length];
+      }
+      return { cmd };
+    }
+    if (componentId === 'V3') {
+      const avail = Object.keys(config.inletAssignments || {})
+        .filter((p) => p.charAt(0) === 'S' && config.inletAssignments[p]);
+      if (!run.valves.inletS && !avail.length) {
+        return { ok: false, reason: 'NO SAMPLE TANK ON S PORT' };
+      }
+      return { cmd: { inletS: run.valves.inletS ? null : (avail[0] || null) } };
+    }
+    if (componentId === 'CV-101') {
+      const cur = CV_POSITION_ORDER.indexOf(run.valves.cmdColumnValve);
+      return { cmd: { columnValve: CV_POSITION_ORDER[(cur + 1) % CV_POSITION_ORDER.length] } };
+    }
+    if (componentId === 'DV-101') {
+      const ports = config.skid.fracValve.ports;
+      return {
+        cmd: (run.valves.outletValve === 'WASTE')
+          ? { outletValve: ports[clamp(run.frac.nextPortIdx, 0, ports.length - 1)] || 'WASTE' }
+          : { outletValve: 'WASTE' },
+      };
+    }
+    return { ok: false, reason: componentId + ' HAS NO DIRECT POSITION COMMAND' };
+  }
+
+  /**
+   * Drive a valve to its next position through `ctx.sim`, returning the outcome rather than
+   * showing it: the faceplate surfaces refusals itself, the schematic toasts them.
+   * @param {object} c the action context
+   * @param {string} componentId the valve component id
+   * @returns {{ok:boolean, reason?:string}} the outcome
+   */
+  function valveCycleAction(c, componentId) {
+    if (!pid._run.manualOverride) {
+      return { ok: false, reason: 'MANUAL OFF — ' + componentId + ' LOCKED' };
+    }
+    const next = valveCycleCommand(componentId);
+    if (next.ok === false) return next;
+    return callSim(c, 'manualSet', next.cmd);
+  }
+
+  /**
+   * The MANUAL / AUTO button pair carried by every tag the operator can drive by hand.
+   * @returns {Array<object>} two faceplate actions
+   */
+  function modeActions() {
+    return [
+      {
+        icon: 'manual',
+        title: 'Take MANUAL control of the skid — legal in IDLE, READY, HELD and PAUSED only',
+        run: (c) => callSim(c, 'setManualOverride', true),
+      },
+      {
+        icon: 'auto',
+        title: 'Drop MANUAL control and return the skid to AUTO',
+        run: (c) => callSim(c, 'setManualOverride', false),
+      },
+    ];
+  }
+
+  /**
+   * Cycle-this-valve button, for a tag whose position the operator sets by hand.
+   * @param {string} componentId the valve component id
+   * @param {string} what what the button steps through, for the tooltip
+   * @returns {object} a faceplate action
+   */
+  function cycleAction(componentId, what) {
+    return {
+      icon: 'next',
+      title: 'Step ' + componentId + ' to the next ' + what + ' (MANUAL only)',
+      run: (c) => valveCycleAction(c, componentId),
+    };
+  }
+
+  /**
+   * Acknowledge-alarms button, for a tag that carries alarm rows.
+   * @param {string} componentId the component id
+   * @returns {object} a faceplate action
+   */
+  function ackAction(componentId) {
+    return {
+      icon: 'ack',
+      title: 'Acknowledge the latched alarms on ' + componentId,
+      run: (c) => {
+        const ids = COMPONENT_ALARMS[componentId] || [];
+        const run = pid._run;
+        let acked = 0;
+        let refusal = '';
+        for (let i = 0; i < ids.length; i++) {
+          const k = alarmIndex.get(ids[i]);
+          if (k === undefined) continue;
+          const live = (run.alarmActive && run.alarmActive[k])
+            || (run.alarmLatched && run.alarmLatched[k]);
+          if (!live) continue;
+          const r = callSim(c, 'acknowledgeAlarm', ids[i]);
+          if (r.ok) acked += 1;
+          else refusal = r.reason || refusal;
+        }
+        if (acked) return { ok: true };
+        return { ok: false, reason: refusal || 'NO LATCHED ALARM ON ' + componentId };
+      },
+    };
+  }
+
+  /**
+   * Show-me-on-the-trend button.  Navigation, not a setpoint: it publishes the agreed
+   * `request-pane` hint and mutates nothing.
+   * @param {string} tag the ISA tag being shown
+   * @returns {object} a faceplate action
+   */
+  function trendAction(tag) {
+    return {
+      icon: 'trend',
+      title: 'Show ' + tag + ' on the trend',
+      run: (c) => {
+        const bus = (c || pid._ctx).bus;
+        if (!bus || typeof bus.emit !== 'function') return { ok: false, reason: 'NO EVENT BUS' };
+        bus.emit('request-pane', { pane: 'trend', tag });
+        return { ok: true };
+      },
+    };
+  }
+
+  /**
+   * The manual flow-setpoint buttons.  Every one of them is refused, with the skid's own wording,
+   * unless MANUAL is engaged and the demand is inside the pump's envelope.
+   * @param {boolean} withNudge include the raise / lower pair
+   * @returns {Array<object>} faceplate actions
+   */
+  function flowActions(withNudge) {
+    if (!withNudge) {
+      return [{
+        icon: '0',
+        title: 'Stop the pump — drive the flow setpoint to zero (MANUAL only)',
+        run: (c) => callSim(c, 'manualSet', { flow_mLs: 0 }),
+      }];
+    }
+    const nudge = (sign) => (c) => {
+      const cfg = pid._config;
+      const step = 0.1 * cfg.skid.Qmax_mLs;
+      let q = clamp(pid._run.Q_set_mLs + sign * step, 0, cfg.skid.Qmax_mLs);
+      if (q > 0 && q < cfg.skid.QminAbs_mLs) q = (sign > 0) ? cfg.skid.QminAbs_mLs : 0;
+      return callSim(c, 'manualSet', { flow_mLs: q });
+    };
+    return [
+      {
+        icon: '+',
+        title: 'Raise the flow setpoint by 10 % of the pump ceiling (MANUAL only)',
+        run: nudge(1),
+      },
+      {
+        icon: '−',
+        title: 'Lower the flow setpoint by 10 % of the pump ceiling (MANUAL only)',
+        run: nudge(-1),
+      },
+    ];
+  }
+
+  /**
+   * Decimal places for a volume scale: a 60 L tank does not want a tenth-of-a-millilitre tick.
+   * @param {{value:number, decimals:number}} d a `format.toDisplay('volume', ...)` result
+   * @returns {number} the decimal places to show
+   */
+  function volumeDecimals(d) {
+    return (Math.abs(d.value) >= 1000) ? 0 : d.decimals;
+  }
+
+  /**
+   * Compose a FaceplateSpec from the fields every tag shares plus that tag's own overrides.
+   * `componentId`, `entry` and `live` ride along for the `pid-activate` subscribers.
+   * @param {string} componentId the component id
+   * @param {Element|null} anchorEl the element the window opens beside
+   * @param {object} over the tag-specific fields, which must include `read`
+   * @returns {object} a FaceplateSpec
+   */
+  function faceplate(componentId, anchorEl, over) {
+    return Object.assign({
+      componentId,
+      tag: COMPONENT_TAG[componentId] || componentId,
+      desc: descFor(componentId),
+      entry: glossaryFor(glossaryIdFor(componentId)),
+      live: liveLineFor(componentId),
+      ctx: pid._ctx,
+      anchorEl,
+      range: [0, 100],
+      limits: [],
+      mode: null,
+      actions: [],
+    }, over);
+  }
+
+  /**
+   * Build the FaceplateSpec for one schematic component: a real per-tag PV reader, the scale it
+   * belongs on, its alarm markers, its AUTO/MAN state and the controls that drive it.
+   *
+   * Every `read()` closes over nothing but the panel, so it survives a `config-replaced` rebuild,
+   * and every action goes through `ctx.sim` and returns that call's `{ok, reason}` verbatim.
+   *
+   * @param {string} componentId a `data-component` id
+   * @param {Element|null} anchorEl the element the faceplate should point at
+   * @returns {object|null} the spec, or null for a component that has no faceplate
+   */
+  function faceplateSpecFor(componentId, anchorEl) {
+    const config = pid._config;
+
+    /* ---- flow ------------------------------------------------------------------------------- */
+    if (componentId === 'FT-101' || componentId === 'P-101') {
+      const isPump = componentId === 'P-101';
+      const qmax = toDisplay('flow', config.skid.Qmax_mLs, config);
+      const qmin = toDisplay('flow', config.skid.QminAbs_mLs, config);
+      return faceplate(componentId, anchorEl, {
+        range: [0, qmax.value],
+        decimals: qmax.decimals,
+        limits: [
+          { value: qmin.value, label: 'Minimum controllable flow', kind: 'lo' },
+          { value: qmax.value, label: 'Pump ceiling', kind: 'hi' },
+        ],
+        mode: manualMode,
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const pv = toDisplay('flow', p.run.Q_actual_mLs, p.config);
+          const sp = toDisplay('flow', p.run.Q_set_mLs, p.config);
+          return {
+            pv: pv.value, sp: sp.value, eu: pv.unit,
+            quality: pathVerdict(p.run), alarm: alarmOn('P-101'),
+            manual: !!p.run.manualOverride,
+          };
+        },
+        actions: (isPump
+          ? flowActions(false).concat([{
+            icon: 'purge',
+            title: 'Purge to waste with the column bypassed — not while the method is running',
+            run: (c) => callSim(c, 'purge'),
+          }])
+          : flowActions(true)).concat(modeActions()),
+      });
+    }
+
+    /* ---- gradient --------------------------------------------------------------------------- */
+    if (componentId === 'PCTB' || componentId === 'M-101') {
+      const isMixer = componentId === 'M-101';
+      const nudge = (sign) => (c) => callSim(c, 'manualSet', {
+        pctB: clamp(pid._run.pctB_set + sign * 10, 0, 100),
+      });
+      return faceplate(componentId, anchorEl, {
+        desc: descFor(componentId, isMixer ? undefined : 'PCTB'),
+        range: [0, 100],
+        decimals: 1,
+        mode: manualMode,
+        read: (a, b) => {
+          const p = readPair(a, b);
+          return {
+            pv: isMixer ? p.run.pctB_colInlet : p.run.pctB_actual,
+            sp: p.run.pctB_set,
+            eu: unitLabel('pct'),
+            quality: pathVerdict(p.run),
+            alarm: false,
+            manual: !!p.run.manualOverride,
+          };
+        },
+        actions: [
+          {
+            icon: '+',
+            title: 'Raise the %B setpoint by 10 percentage points (MANUAL only)',
+            run: nudge(1),
+          },
+          {
+            icon: '−',
+            title: 'Lower the %B setpoint by 10 percentage points (MANUAL only)',
+            run: nudge(-1),
+          },
+        ].concat(modeActions()),
+      });
+    }
+
+    /* ---- pressure --------------------------------------------------------------------------- */
+    if (componentId === 'PT-101' || componentId === 'PT-102') {
+      const isP1 = componentId === 'PT-101';
+      const ids = isP1 ? ['ALM-P1-01', 'ALM-P1-02'] : [];
+      const fs = isP1
+        ? config.skid.press.P1FS_bar
+        : Math.min(config.skid.press.P2FS_bar, config.column.hardwarePressureLimit_bar);
+      const sc = pressureScale(ids, fs);
+      return faceplate(componentId, anchorEl, {
+        range: [sc.lo, sc.hi],
+        decimals: sc.decimals,
+        limits: limitsFromAlarms(ids, (bar) => toDisplay('pressure', bar).value),
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const d = toDisplay('pressure',
+            isP1 ? p.run.press.P1disp_bar : p.run.press.P2disp_bar);
+          return {
+            pv: d.value, sp: null, eu: d.unit,
+            quality: sensorVerdict(p.run, 'PRESS'), alarm: alarmOn(componentId),
+          };
+        },
+        actions: [trendAction(componentId), ackAction(componentId)],
+      });
+    }
+
+    if (componentId === 'PDT-101') {
+      const ids = COMPONENT_ALARMS['PDT-101'];
+      const sc = pressureScale(ids, config.column.hardwarePressureLimit_bar);
+      return faceplate(componentId, anchorEl, {
+        range: [sc.lo, sc.hi],
+        decimals: sc.decimals,
+        limits: limitsFromAlarms(ids, (bar) => toDisplay('pressure', bar).value),
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const d = toDisplay('pressure', p.run.dP_bar);
+          return {
+            pv: d.value, sp: null, eu: d.unit,
+            quality: sensorVerdict(p.run, 'PRESS'), alarm: alarmOn('PDT-101'),
+          };
+        },
+        actions: [trendAction('PDT-101'), ackAction('PDT-101')],
+      });
+    }
+
+    /* ---- detector train --------------------------------------------------------------------- */
+    if (componentId === 'UV-101') {
+      const uv = config.skid.uv;
+      const sat = toDisplay('abs', uv.saturated_AU);
+      const over = toDisplay('abs', uv.overrange_AU);
+      const chans = uv.channels_nm || [280, 260, 300];
+      const az = (channel, label) => ({
+        icon: String(channel),
+        title: 'Autozero the ' + label + ' channel on the current baseline',
+        run: (c) => callSim(c, 'autozero', channel),
+      });
+      return faceplate(componentId, anchorEl, {
+        range: [0, sat.value],
+        decimals: sat.decimals,
+        limits: [
+          { value: over.value, label: 'UV over-range', kind: 'hi' },
+          { value: sat.value, label: 'Detector saturated', kind: 'hi' },
+        ],
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const d = toDisplay('abs', p.run.uv.Afilt[0]);
+          return {
+            pv: d.value, sp: null, eu: d.unit,
+            quality: uvVerdict(p.run), alarm: alarmOn('UV-101'),
+          };
+        },
+        actions: [
+          {
+            icon: 'autozero',
+            title: 'Autozero all three UV channels on the current baseline',
+            run: (c) => callSim(c, 'autozero', 'all'),
+          },
+          az(chans[0], String(chans[0]) + ' nm'),
+          az(chans[1], String(chans[1]) + ' nm'),
+          az(chans[2], String(chans[2]) + ' nm'),
+        ],
+      });
+    }
+
+    if (componentId === 'CE-101') {
+      return faceplate(componentId, anchorEl, {
+        range: [0, COND_FS_mScm],
+        decimals: 2,
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const d = toDisplay('cond', p.run.cond.kappaDisp_mScm);
+          return {
+            pv: d.value, sp: null, eu: d.unit,
+            quality: condVerdict(p.run), alarm: alarmOn('CE-101'),
+          };
+        },
+        actions: [trendAction('CE-101'), ackAction('CE-101')],
+      });
+    }
+
+    if (componentId === 'AE-101') {
+      return faceplate(componentId, anchorEl, {
+        range: [0, 14],
+        decimals: 2,
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const d = toDisplay('ph', p.run.ph.pHfilt);
+          return {
+            pv: d.value, sp: null, eu: 'pH',
+            quality: phVerdict(p.run), alarm: alarmOn('AE-101'),
+          };
+        },
+        actions: [trendAction('AE-101'), ackAction('AE-101')],
+      });
+    }
+
+    if (componentId === 'TT-101') {
+      return faceplate(componentId, anchorEl, {
+        range: [0, TEMP_FS_C],
+        decimals: 1,
+        limits: limitsFromAlarms(COMPONENT_ALARMS['TT-101']),
+        read: (a, b) => {
+          const p = readPair(a, b);
+          return {
+            pv: p.run.T_fluid_C, sp: null, eu: EU_TEMP_C,
+            quality: pathVerdict(p.run), alarm: alarmOn('TT-101'),
+          };
+        },
+        actions: [trendAction('TT-101'), ackAction('TT-101')],
+      });
+    }
+
+    /* ---- inventory -------------------------------------------------------------------------- */
+    const slotKey = COMPONENT_TANK_SLOT[componentId];
+    if (slotKey) {
+      const k = tankIndexForSlot(config, slotKey);
+      const t = (k >= 0) ? config.tanks[k] : null;
+      const nominal = t ? (t.nominalVolume_mL || 0) : 0;
+      const cap = toDisplay('volume', nominal, config);
+      const low = toDisplay('volume', nominal * ((t ? t.lowLevelPct : 0) || 0) / 100, config);
+      const empty = toDisplay('volume', (t ? t.emptyLevel_mL : 0) || 0, config);
+      /**
+       * @returns {{k:number, tank:object|null}} the tank currently behind this display slot
+       */
+      const bound = () => {
+        const cfg = pid._config;
+        const kk = tankIndexForSlot(cfg, slotKey);
+        return { k: kk, tank: (kk >= 0) ? cfg.tanks[kk] : null };
+      };
+      /**
+       * @param {number} volume_mL a fixed top-up, mL; ignored when `toNominal` is true
+       * @param {boolean} toNominal fill the tank back to its nominal volume instead
+       * @returns {function(object):{ok:boolean, reason?:string}} the action body
+       */
+      const add = (volume_mL, toNominal) => (c) => {
+        const b = bound();
+        if (!b.tank) return { ok: false, reason: 'NO TANK ASSIGNED TO THIS INLET' };
+        const want = toNominal
+          ? (b.tank.nominalVolume_mL || 0) - pid._run.tankVolume_mL[b.k]
+          : volume_mL;
+        return callSim(c, 'refillTank', b.tank.id, want);
+      };
+      return faceplate(componentId, anchorEl, {
+        desc: t ? String(t.label || t.id).toUpperCase().slice(0, 34) : descFor(componentId),
+        range: [0, cap.value > 0 ? cap.value : 1],
+        decimals: volumeDecimals(cap),
+        limits: [
+          { value: low.value, label: 'Low-level warning', kind: 'lo' },
+          { value: empty.value, label: 'Empty — pump protection', kind: 'lo' },
+        ],
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const kk = tankIndexForSlot(p.config, slotKey);
+          const tank = (kk >= 0) ? p.config.tanks[kk] : null;
+          if (!tank) {
+            return {
+              pv: NaN, sp: null, eu: unitLabel('volume'), quality: Q_INVALID, alarm: false,
+            };
+          }
+          const v_mL = p.run.tankVolume_mL[kk];
+          const d = toDisplay('volume', v_mL, p.config);
+          return {
+            pv: d.value, sp: null, eu: d.unit, quality: Q_OK,
+            alarm: v_mL <= (tank.emptyLevel_mL || 0),
+          };
+        },
+        actions: [
+          {
+            icon: 'refill',
+            title: 'Refill this tank to its nominal volume',
+            run: add(0, true),
+          },
+          {
+            icon: '1L',
+            title: 'Add one litre to this tank',
+            run: add(1000, false),
+          },
+        ],
+      });
+    }
+
+    if (componentId === 'WASTE') {
+      const capacity_mL = config.skid.wasteCapacity_mL || 1;
+      const cap = toDisplay('volume', capacity_mL, config);
+      return faceplate(componentId, anchorEl, {
+        range: [0, cap.value],
+        decimals: volumeDecimals(cap),
+        limits: limitsFromAlarms(COMPONENT_ALARMS.WASTE,
+          (frac) => toDisplay('volume', frac * capacity_mL, config).value),
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const d = toDisplay('volume', p.run.wasteVolume_mL, p.config);
+          return {
+            pv: d.value, sp: null, eu: d.unit, quality: Q_OK, alarm: alarmOn('WASTE'),
+          };
+        },
+        actions: [trendAction('WASTE'), ackAction('WASTE')],
+      });
+    }
+
+    /* ---- valves ----------------------------------------------------------------------------- */
+    if (componentId === 'CV-101') {
+      const order = CV_POSITION_ORDER;
+      return faceplate(componentId, anchorEl, {
+        range: [0, order.length - 1],
+        decimals: 0,
+        limits: order.map((name, i) => ({
+          value: i, label: 'Position ' + (CV_POS_TEXT[name] || name), kind: 'sp',
+        })),
+        mode: manualMode,
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const v = p.run.valves;
+          const moving = v.moveRemaining_s > 0;
+          const mismatch = !moving && v.columnValve !== v.cmdColumnValve && v.mismatch_s > 0.5;
+          return {
+            pv: order.indexOf(v.columnValve),
+            sp: order.indexOf(v.cmdColumnValve),
+            // The EU slot names the position, because a bare ordinal means nothing to an operator.
+            // It stays the CURRENT position even mid-move: `ui/overlay.js` labels the SP box with
+            // the same string, and a travelling valve is already reported through `quality`.
+            eu: CV_POS_TEXT[v.columnValve] || String(v.columnValve),
+            quality: mismatch ? Q_INVALID : (moving ? Q_SUSPECT : Q_OK),
+            alarm: alarmOn('CV-101'),
+            manual: !!p.run.manualOverride,
+          };
+        },
+        actions: [cycleAction('CV-101', 'position'), ackAction('CV-101')].concat(modeActions()),
+      });
+    }
+
+    if (componentId === 'IV-101') {
+      const order = IV_POSITION_ORDER;
+      return faceplate(componentId, anchorEl, {
+        range: [0, order.length - 1],
+        decimals: 0,
+        mode: manualMode,
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const m = p.run.valves.sampleMode;
+          const name = (m === 'LOOP_INJECT') ? 'INJECT' : (m === 'DIRECT') ? 'DIRECT' : 'LOAD';
+          return {
+            pv: order.indexOf(name), sp: null, eu: name,
+            quality: pathVerdict(p.run), alarm: false, manual: !!p.run.manualOverride,
+          };
+        },
+        actions: [cycleAction('V3', 'sample-inlet state')].concat(modeActions()),
+      });
+    }
+
+    if (componentId === 'DV-101') {
+      const ports = config.skid.fracValve.ports || [];
+      return faceplate(componentId, anchorEl, {
+        range: [0, Math.max(1, ports.length)],
+        decimals: 0,
+        mode: manualMode,
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const outlet = p.run.valves.outletValve;
+          const idx = ports.indexOf(outlet);
+          return {
+            pv: (idx >= 0) ? idx + 1 : 0,
+            sp: null,
+            eu: (outlet === 'WASTE') ? 'WASTE' : String(outlet),
+            quality: p.run.frac.moving ? Q_SUSPECT : pathVerdict(p.run),
+            alarm: alarmOn('FC-101'),
+            manual: !!p.run.manualOverride,
+          };
+        },
+        actions: [cycleAction('DV-101', 'outlet port')].concat(modeActions()),
+      });
+    }
+
+    if (INLET_VALVE_BRANCH[componentId]) {
+      const branch = INLET_VALVE_BRANCH[componentId];
+      const qmax = toDisplay('flow', config.skid.Qmax_mLs, config);
+      return faceplate(componentId, anchorEl, {
+        range: [0, qmax.value],
+        decimals: qmax.decimals,
+        mode: manualMode,
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const d = toDisplay('flow', p.run[branch] || 0, p.config);
+          return {
+            pv: d.value, sp: null, eu: d.unit,
+            quality: pathVerdict(p.run), alarm: false, manual: !!p.run.manualOverride,
+          };
+        },
+        actions: [cycleAction(componentId, 'inlet port')].concat(modeActions()),
+      });
+    }
+
+    /* ---- column and downstream equipment ---------------------------------------------------- */
+    if (componentId === 'C-101') {
+      const ids = ['ALM-DP-01', 'ALM-DP-02', 'ALM-DP-03'];
+      const sc = pressureScale(ids, config.column.hardwarePressureLimit_bar);
+      return faceplate(componentId, anchorEl, {
+        range: [0, sc.hi],
+        decimals: sc.decimals,
+        limits: limitsFromAlarms(ids, (bar) => toDisplay('pressure', bar).value),
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const d = toDisplay('pressure', p.run.dPbed_bar);
+          const f = p.run.qualityFlags | 0;
+          return {
+            pv: d.value, sp: null, eu: d.unit,
+            quality: (f & QF.BED_COLLAPSED) ? Q_INVALID
+              : ((f & QF.SOLVER_FROZEN) ? Q_SUSPECT : Q_OK),
+            alarm: alarmOn('PDT-101'),
+          };
+        },
+        actions: [trendAction('C-101'), ackAction('PDT-101')],
+      });
+    }
+
+    if (componentId === 'F-101') {
+      const fs = toDisplay('pressure', FILTER_FS_bar);
+      return faceplate(componentId, anchorEl, {
+        range: [0, fs.value],
+        decimals: fs.decimals,
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const d = toDisplay('pressure', p.run.dPfilter_bar);
+          return {
+            pv: d.value, sp: null, eu: d.unit, quality: pathVerdict(p.run), alarm: false,
+          };
+        },
+        actions: [trendAction('F-101')],
+      });
+    }
+
+    if (componentId === 'AT-101') {
+      const trapSeg = (config.skid.segments || []).find((s) => s.id === 'G5');
+      const trapV_mL = trapSeg ? trapSeg.V_mL : 0;
+      return faceplate(componentId, anchorEl, {
+        range: [0, 100],
+        decimals: 1,
+        limits: limitsFromAlarms(['WRN-AIR-03'], (frac) => frac * 100),
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const pct = (trapV_mL > 0)
+            ? clamp(100 * (p.run.trapHeadspace_mL || 0) / trapV_mL, 0, 100) : NaN;
+          return {
+            pv: pct, sp: null, eu: unitLabel('pct'),
+            quality: ((p.run.qualityFlags | 0) & QF.AIR_IN_PATH) ? Q_SUSPECT : Q_OK,
+            alarm: alarmOn('AT-101'),
+          };
+        },
+        actions: [
+          {
+            icon: 'purge',
+            title: 'Purge to waste with the column bypassed, to sweep the trap',
+            run: (c) => callSim(c, 'purge'),
+          },
+          ackAction('AT-101'),
+        ],
+      });
+    }
+
+    if (componentId === 'FC-101') {
+      const ports = config.skid.fracValve.ports || [];
+      const capacity_mL = config.skid.fracValve.portCapacity_mL || 1;
+      const cap = toDisplay('volume', capacity_mL, config);
+      return faceplate(componentId, anchorEl, {
+        range: [0, cap.value],
+        decimals: volumeDecimals(cap),
+        limits: [{ value: cap.value, label: 'Port capacity', kind: 'hi' }],
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const outlet = p.run.valves.outletValve;
+          const idx = ports.indexOf(outlet);
+          const v_mL = (idx >= 0) ? (p.run.portVolume_mL[idx] || 0) : 0;
+          const d = toDisplay('volume', v_mL, p.config);
+          return {
+            pv: d.value, sp: null, eu: d.unit,
+            quality: p.run.frac.moving ? Q_SUSPECT : Q_OK,
+            alarm: alarmOn('FC-101'),
+          };
+        },
+        actions: [
+          {
+            icon: 'M',
+            title: 'Mark a fraction — close the open one and step to the next port',
+            run: (c) => callSim(c, 'markFraction'),
+          },
+          {
+            icon: 'W',
+            title: 'Divert the outlet to waste (MANUAL only)',
+            run: (c) => callSim(c, 'manualSet', { outletValve: 'WASTE' }),
+          },
+          ackAction('FC-101'),
+        ],
+      });
+    }
+
+    if (componentId === 'P-102') {
+      const qmax = toDisplay('flow', config.skid.Qmax_mLs, config);
+      return faceplate(componentId, anchorEl, {
+        range: [0, qmax.value],
+        decimals: qmax.decimals,
+        mode: manualMode,
+        read: (a, b) => {
+          const p = readPair(a, b);
+          const d = toDisplay('flow', p.run.QS_mLs, p.config);
+          return {
+            pv: d.value, sp: null, eu: d.unit,
+            quality: pathVerdict(p.run), alarm: false, manual: !!p.run.manualOverride,
+          };
+        },
+        actions: [cycleAction('V3', 'sample-inlet state')].concat(modeActions()),
+      });
+    }
+
+    return null;
+  }
+
+  /**
+   * Rebuild every open faceplate this panel owns after the operator changes a display unit.
+   *
+   * `ui/overlay.js` fixes a faceplate's scale, its tick labels and its limit markers when the
+   * window is built, because it renders them once and never again.  A tag opened in bar and then
+   * switched to psi would therefore keep a bar scale under psi digits — a wrong scale, silently.
+   * Rebuilding from a fresh spec and putting the window back where it was is the honest fix, and
+   * it is cheap: a unit change is an operator action, not a frame event.
+   *
+   * Only windows carrying a `componentId` are touched, so a faceplate opened by another panel is
+   * left alone.
+   *
+   * @returns {void}
+   */
+  function rebuildFaceplates() {
+    const host = pid._ctx.overlayHost;
+    if (!host || !Array.isArray(host.stack)) return;
+    if (typeof overlay.dismiss !== 'function') return;
+    if (typeof overlay.showFaceplate !== 'function') return;
+    const mine = [];
+    for (let i = 0; i < host.stack.length; i++) {
+      const h = host.stack[i];
+      if (h.kind !== 'faceplate' || h.dismissed || !h.spec || !h.spec.componentId) continue;
+      mine.push({ componentId: h.spec.componentId, x: h.x, y: h.y, handle: h });
+    }
+    if (!mine.length) return;
+    // The unit selector lives on another screen, and `overlay.dismiss` hands focus back to whatever
+    // opened the faceplate — a hit rect that may currently be display:none.  Put focus back where
+    // the operator actually left it.
+    const focused = doc.activeElement;
+    for (let i = 0; i < mine.length; i++) {
+      const m = mine[i];
+      let next = null;
+      try {
+        next = faceplateSpecFor(m.componentId, null);
+      } catch (e) { /* a tag that cannot be rebuilt is closed, not left showing a stale scale */ }
+      overlay.dismiss(m.handle);
+      if (!next) continue;
+      next.autoFocus = false;
+      const h = overlay.showFaceplate(host, next);
+      if (!h) continue;
+      h.x = m.x;
+      h.y = m.y;
+      if (typeof h.reposition === 'function') h.reposition();
+    }
+    if (focused && focused.isConnected && typeof focused.focus === 'function') focused.focus();
+  }
+
   /**
    * Open the faceplate for a component.  `ui/overlay.js::showFaceplate` is the primary path; when
-   * the host has not provided one the panel publishes the request on the bus and falls back to the
-   * glossary card so a click is never inert.
+   * the host has not provided one, or the component has no faceplate, the panel publishes the
+   * request on the bus and falls back to the glossary card so a click is never inert.
    * @param {string} componentId the component id
    * @param {Element|null} anchorEl the element the faceplate should point at
    * @returns {void}
@@ -2636,13 +3697,18 @@ export function createPID(rootEl, ctx) {
     const c = pid._ctx;
     const host = c.overlayHost || null;
     const entry = glossaryFor(glossaryIdFor(componentId));
-    const payload = {
-      componentId, tag: componentId, ctx: c, anchorEl, entry, live: liveLineFor(componentId),
+    let spec = null;
+    try {
+      spec = faceplateSpecFor(componentId, anchorEl);
+    } catch (e) { /* a malformed tag must not swallow the click; fall through to the glossary */ }
+    const payload = spec || {
+      componentId, tag: COMPONENT_TAG[componentId] || componentId, ctx: c, anchorEl, entry,
+      live: liveLineFor(componentId),
     };
     if (c.bus && typeof c.bus.emit === 'function') c.bus.emit('pid-activate', payload);
-    if (host && typeof overlay.showFaceplate === 'function') {
+    if (spec && host && typeof overlay.showFaceplate === 'function') {
       try {
-        overlay.showFaceplate(host, payload);
+        overlay.showFaceplate(host, spec);
         return;
       } catch (e) { /* fall through to the bus / glossary path */ }
     }
@@ -2659,49 +3725,9 @@ export function createPID(rootEl, ctx) {
    * @returns {void}
    */
   function cycleValve(componentId) {
-    const sim = pid._ctx.sim || {};
-    const run = pid._run;
-    const config = pid._config;
     if (!/^(V[1-4]|CV-101|DV-101)$/.test(componentId)) return;
-    if (!run.manualOverride) {
-      showToast('MANUAL OFF — ' + componentId + ' LOCKED', true);
-      return;
-    }
-    if (typeof sim.manualSet !== 'function') return;
-
-    let cmd = null;
-    if (componentId === 'V1' || componentId === 'V2' || componentId === 'V4') {
-      const side = (componentId === 'V2') ? 'B' : 'A';
-      const key = (side === 'B') ? 'inletB' : 'inletA';
-      const avail = Object.keys(config.inletAssignments || {})
-        .filter((p) => p.charAt(0) === side && config.inletAssignments[p]);
-      if (!avail.length) { showToast('NO TANK ON INLET ' + side, true); return; }
-      if (componentId === 'V4') {
-        const cipTank = config.tanks[slots.cip];
-        const port = cipTank ? avail.find((p) => config.inletAssignments[p] === cipTank.id) : null;
-        cmd = {}; cmd[key] = port || avail[avail.length - 1];
-      } else {
-        const cur = avail.indexOf(run.valves[key]);
-        cmd = {}; cmd[key] = avail[(cur + 1) % avail.length];
-      }
-    } else if (componentId === 'V3') {
-      const avail = Object.keys(config.inletAssignments || {})
-        .filter((p) => p.charAt(0) === 'S' && config.inletAssignments[p]);
-      if (!run.valves.inletS && !avail.length) { showToast('NO SAMPLE TANK ON S PORT', true); return; }
-      cmd = { inletS: run.valves.inletS ? null : (avail[0] || null) };
-    } else if (componentId === 'CV-101') {
-      const order = ['BYPASS', 'DOWN', 'UP', 'ISOLATED', 'CIP_DETECTOR_BYPASS'];
-      const cur = order.indexOf(run.valves.cmdColumnValve);
-      cmd = { columnValve: order[(cur + 1) % order.length] };
-    } else if (componentId === 'DV-101') {
-      const ports = config.skid.fracValve.ports;
-      cmd = (run.valves.outletValve === 'WASTE')
-        ? { outletValve: ports[clamp(run.frac.nextPortIdx, 0, ports.length - 1)] || 'WASTE' }
-        : { outletValve: 'WASTE' };
-    }
-    if (!cmd) return;
-    const r = sim.manualSet(pid._ctx, cmd);
-    if (r && r.ok === false) showToast(String(r.reason || 'COMMAND REFUSED'), true);
+    const r = valveCycleAction(pid._ctx, componentId);
+    if (r.ok === false) showToast(String(r.reason || 'COMMAND REFUSED'), true);
   }
 
   /**
@@ -2866,6 +3892,7 @@ export function createPID(rootEl, ctx) {
     if (bus && typeof bus.on === 'function') {
       bus.on('config-replaced', onConfigReplaced);
       bus.on('preset-loaded', onConfigReplaced);
+      bus.on('display-units-changed', rebuildFaceplates);
     }
 
     if (pid._run.bed && pid._run.col && snapshot) {
@@ -2941,6 +3968,7 @@ export function createPID(rootEl, ctx) {
     if (bus && typeof bus.off === 'function') {
       bus.off('config-replaced', onConfigReplaced);
       bus.off('preset-loaded', onConfigReplaced);
+      bus.off('display-units-changed', rebuildFaceplates);
     }
     TEXTURE_CACHE.delete(canvas);
     if (el.parentNode) el.parentNode.removeChild(el);

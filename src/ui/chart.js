@@ -11,6 +11,10 @@
  * a dashed line in their own hue, captioned `LIM`, never `SP`. UV-101, CE-101, AE-101 and
  * TT-101 are bare measurements and show a PV box only. The rail never invents a setpoint.
  *
+ * A setpoint is a HELD value, so it is stroked as a STAIRCASE — horizontal run, vertical
+ * jump — in every mode and at every zoom level. A measurement is interpolated between
+ * samples; a command is not, and zoom must never turn an instantaneous step into a ramp.
+ *
  * LAYERS (each `cssW*dpr x cssH*dpr`, context scaled by `dpr`)
  *   1. static  — black well, dark-green graticule, phase bands, fraction ticks, pooled
  *                region, peak flags, axis furniture.
@@ -86,6 +90,19 @@ const CROSS_DASH = [2, 3];
 const MARKER_DASH = [3, 3];
 /** SVG namespace, for the icon builder. */
 const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/**
+ * Log channels that carry a COMMANDED value: the controller is told a number and holds it
+ * until it is told another one. Nothing happens between two consecutive samples of such a
+ * channel, so it is drawn as a staircase at EVERY zoom level — a step that becomes a ramp
+ * when the operator zooms in is a lie about what the controller did. Every SP trace is
+ * held by construction; this set catches the same channels when a caller points a PV pen
+ * straight at one.
+ */
+const HELD_CHANNELS = new Set(['flow_setpoint_mL_min', 'pctB_setpoint']);
+
+/** Focusable controls inside the legend rail, in DOM order. */
+const RAIL_FOCUSABLE = 'input,button,select,textarea,a[href],[tabindex]';
 
 /** Default x-channel names per x-mode. */
 const XCH_DEFAULT = Object.freeze({ volume: 'V_mL', time: 't_s', cv: 'V_CV' });
@@ -1299,7 +1316,7 @@ function strokeEnvelope(ctx, t, g, bStart, bEnd) {
 }
 
 /**
- * Stroke one SP trace as a STAIRCASE — horizontal run, then vertical jump — because a
+ * Stroke one HELD trace as a STAIRCASE — horizontal run, then vertical jump — because a
  * setpoint is a held value, not a signal. Drawing it as steps also keeps the 5-4 dash
  * phase proportional to x, which is what lets the append-only blit path re-enter the same
  * pattern at the live edge instead of jittering the dashes.
@@ -1390,7 +1407,8 @@ function fillEnvelope(ctx, t, g, bStart, bEnd) {
 }
 
 /**
- * Draw one trace as raw points, used when `samplesPerPixel < 1.5`.
+ * Draw one INTERPOLATED trace as raw points, used when `samplesPerPixel < 1.5`. A held
+ * trace goes to {@link strokeRawStep} instead.
  * @param {CanvasRenderingContext2D} ctx Target context.
  * @param {object} chart The chart.
  * @param {object} t Trace.
@@ -1437,6 +1455,71 @@ function strokeRaw(ctx, chart, t, g, xa, xb) {
     }
   }
   ctx.stroke();
+}
+
+/**
+ * Draw one HELD trace as raw points, used when `samplesPerPixel < 1.5`. Identical walk to
+ * {@link strokeRaw} except that consecutive samples are joined by a horizontal run and a
+ * vertical jump instead of a slope, exactly as {@link strokeStep} joins them in decimated
+ * mode. This is what keeps a setpoint step reading as a step at every zoom level: the raw
+ * painter is reached early in a run and whenever the operator zooms into a block boundary,
+ * which is precisely where a ramp would be most convincing and most wrong.
+ *
+ * The dash phase is locked to the drawn range's own left edge, the same way and for the
+ * same reason as in {@link strokeStep}: the append-only blit path re-enters the pattern at
+ * the live edge rather than restarting it.
+ * @param {CanvasRenderingContext2D} ctx Target context.
+ * @param {object} chart The chart.
+ * @param {object} t Trace.
+ * @param {object} g Geometry in use.
+ * @param {number} xa Window start of the drawn range, x-channel unit.
+ * @param {number} xb Window end of the drawn range, x-channel unit.
+ * @returns {void}
+ */
+function strokeRawStep(ctx, chart, t, g, xa, xb) {
+  const xcol = column(chart.store, xChannel(chart));
+  const y = column(chart.store, t.channel);
+  let n = xcol.length;
+  if (y.length < n) n = y.length;
+  if (n === 0) return;
+  const kx = g.plotW / (chart.x1 - chart.x0);
+  const bx = g.px0 - chart.x0 * kx;
+  const kPix = t.kPix;
+  const bPix = t.bPix;
+  const yTop = g.py0 - 2;
+  const yBot = g.py1 + 2;
+  const period = SP_DASH[0] + SP_DASH[1];
+  ctx.lineDashOffset = (bx + xa * kx) % period;
+  let i = lowerBoundF32(xcol, n, xa);
+  if (i > 0) i--; // one sample of lead-in so the run entering the range is drawn
+  let pen = false;
+  let lastY = 0;
+  ctx.beginPath();
+  for (; i < n; i++) {
+    const xv = xcol[i];
+    if (xv > xb) {
+      // Hold the last value out to the sample past the range; the clip does the trimming.
+      if (pen) ctx.lineTo(bx + xv * kx, lastY);
+      break;
+    }
+    const v = y[i];
+    if (v !== v) {
+      pen = false;
+      continue;
+    }
+    const px = bx + xv * kx;
+    const py = clamp(bPix - v * kPix, yTop, yBot);
+    if (!pen) {
+      ctx.moveTo(px, py);
+      pen = true;
+    } else {
+      ctx.lineTo(px, lastY);
+      ctx.lineTo(px, py);
+    }
+    lastY = py;
+  }
+  ctx.stroke();
+  ctx.lineDashOffset = 0;
 }
 
 /**
@@ -1516,7 +1599,11 @@ function paintTraceBins(chart, ctx, g, colors, bStart, bEnd, starts, off) {
 
   for (let i = 0; i < chart.traces.length; i++) {
     const t = chart.traces[i];
-    const fill = t.isSp ? 0 : t.pen.fill;
+    // A HELD trace is never filled — the %B band says what solvent the column actually
+    // saw, and an area under a commanded number says nothing. This is the existing rule
+    // for SP traces, stated over the semantics instead of over the trace's role, so the
+    // filled edge can never disagree with the staircase stroked on top of it.
+    const fill = t.held ? 0 : t.pen.fill;
     if (!t.pen.visible || !(fill > 0)) continue;
     if (column(chart.store, t.channel).length === 0) continue;
     ctx.globalAlpha = t.pen.dim ? fill * 0.25 : fill;
@@ -1536,9 +1623,16 @@ function paintTraceBins(chart, ctx, g, colors, bStart, bEnd, starts, off) {
       ctx.lineWidth = t.isSp ? SP_WIDTH : chart.contrastMore ? 2 : PV_WIDTH;
       ctx.globalAlpha = t.pen.dim ? 0.22 : 1;
       ctx.setLineDash(t.isSp ? SP_DASH : EMPTY_DASH);
-      if (raw) strokeRaw(ctx, chart, t, g, xa, xb);
-      else if (t.isSp) strokeStep(ctx, t, g, bStart, bEnd);
-      else strokeEnvelope(ctx, t, g, bStart, bEnd);
+      // A held trace is a staircase in BOTH modes. Choosing the painter on `t.held` rather
+      // than on `raw` is the whole point: zoom changes the sampling, never the meaning.
+      if (t.held) {
+        if (raw) strokeRawStep(ctx, chart, t, g, xa, xb);
+        else strokeStep(ctx, t, g, bStart, bEnd);
+      } else if (raw) {
+        strokeRaw(ctx, chart, t, g, xa, xb);
+      } else {
+        strokeEnvelope(ctx, t, g, bStart, bEnd);
+      }
     }
   }
   ctx.globalAlpha = 1;
@@ -3357,6 +3451,11 @@ function makeAxis(src) {
 /**
  * Rebuild the flat trace list: one PV trace per pen, plus one SP trace for every pen that
  * has a setpoint channel. Painting and decimation iterate traces; the rail iterates pens.
+ *
+ * `held` is the trace's SEMANTICS, not its style: true when the value is commanded and
+ * holds between samples, which is every SP trace and any PV pen a caller has pointed at a
+ * {@link HELD_CHANNELS} channel. It selects the staircase painter in both raw and
+ * decimated mode; `isSp` still selects the dash, the width and the paint order.
  * @param {object} chart The chart.
  * @returns {void}
  */
@@ -3365,7 +3464,7 @@ function rebuildTraces(chart) {
   for (let i = 0; i < chart.pens.length; i++) {
     const pen = chart.pens[i];
     const pv = {
-      pen, isSp: false, channel: pen.channel,
+      pen, isSp: false, channel: pen.channel, held: HELD_CHANNELS.has(pen.channel),
       minBuf: null, maxBuf: null, kPix: 0, bPix: 0,
       hasData: false, dataMin: NaN, dataMax: NaN, cursorValue: NaN,
     };
@@ -3373,7 +3472,7 @@ function rebuildTraces(chart) {
     out.push(pv);
     if (pen.spChannel) {
       const sp = {
-        pen, isSp: true, channel: pen.spChannel,
+        pen, isSp: true, channel: pen.spChannel, held: true,
         minBuf: null, maxBuf: null, kPix: 0, bPix: 0,
         hasData: false, dataMin: NaN, dataMax: NaN, cursorValue: NaN,
       };
@@ -3474,7 +3573,8 @@ function buildToolbar(chart) {
  * @param {boolean} [opts.overview] Draw the history strip. Default true.
  * @param {Array<object>} [opts.alarms] `config.alarms` rows, so PT-101 and PDT-101 can
  *   draw their limit lines immediately.
- * @returns {object} The Chart handle, passed back into every other export.
+ * @returns {object} The Chart handle, passed back into every other export. It also carries
+ *   one method of its own, `focusPenRail()` — see {@link focusPenRail}.
  */
 export function createChart(rootEl, opts) {
   ensureStyles();
@@ -3707,6 +3807,10 @@ export function createChart(rootEl, opts) {
   window.addEventListener('resize', onWinResize);
   chart.listeners.push([window, 'resize', onWinResize]);
 
+  // The one export the run view reaches through the handle rather than through the module,
+  // because its `L` shortcut only ever holds the chart object. See {@link focusPenRail}.
+  chart.focusPenRail = () => focusPenRail(chart);
+
   bindInteractions(chart);
   layout(chart);
   resizeCanvases(chart);
@@ -3820,6 +3924,32 @@ export function setPenFocus(chart, penId) {
   }
   chart.railDue = 0;
   invalidate(chart, 'traces');
+}
+
+/**
+ * Move KEYBOARD focus into the legend rail, landing on the first control there — the
+ * leading pen's on/off checkbox. The run view binds `L` to this so an operator can reach
+ * the pen list without tabbing the whole toolbar, and so the rail is reachable at all when
+ * the trend well itself holds focus.
+ *
+ * Also published as a method on the handle {@link createChart} returns, which is how the
+ * run view calls it: `chart.focusPenRail()`.
+ * @param {object} chart The chart.
+ * @returns {boolean} True when focus moved into the rail; false when the rail carries no
+ *   focusable control, or when it cannot take focus because it is not displayed — a
+ *   caller that wants a fallback target needs to know the difference.
+ */
+export function focusPenRail(chart) {
+  if (!chart || chart.destroyed || !chart.railRows) return false;
+  const all = chart.railRows.querySelectorAll(RAIL_FOCUSABLE);
+  for (let i = 0; i < all.length; i++) {
+    const el = all[i];
+    if (el.disabled) continue;
+    el.focus();
+    // Verified, not assumed: focus() on a control inside a hidden pane is a no-op.
+    if (document.activeElement === el) return true;
+  }
+  return false;
 }
 
 /**

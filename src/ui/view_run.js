@@ -15,6 +15,11 @@
  *   6. Status strip    FIC-101, AIC-101, PT-101, PDT-101, UV-101, CE-101, AE-101, TOTAL CV and the
  *                      run-state pill — mounted only when the shell has not already built band 5.
  *
+ * BUS: this view listens, it does not drive. `key-action` carries the shortcuts `ui/app.js` does
+ * not handle itself; `request-pane` carries `{ pane: 'pid' | 'trend' }` from the two nav buttons
+ * that select this one screen, and is answered by biasing the splitter toward that pane and moving
+ * the keyboard into it — never by hiding the other pane.
+ *
  * TEXT BUDGET: no sentence appears on this screen. Every control is an icon with `title` and
  * `aria-label`; every number lives in a label box carrying its ISA tag and its engineering unit;
  * every explanation is a tooltip or a `data/glossary.js` popover.
@@ -115,6 +120,16 @@ const READOUT_MS = 100;
 
 /** Trend-height snap points, as a fraction of the screen height. */
 const SNAP_FRAC = Object.freeze([0.3, 0.45, 0.6]);
+
+/**
+ * Trend height as a fraction of the screen when the navigation publishes `request-pane`, by pane
+ * id: asking for the schematic leaves it 70 % of the screen, asking for the trend gives the trend
+ * 70 %. Neither pane is ever hidden — the screen only changes which one has the room.
+ */
+const PANE_FRAC = Object.freeze({ pid: 0.3, trend: 0.7 });
+
+/** Screen height assumed before the `ResizeObserver` has measured one, px. */
+const FALLBACK_H = 800;
 
 /** Fraction strip band height, px. Published as `--rv-frac-h`, which `styles/app.css` reads. */
 const FRAC_H = 34;
@@ -479,6 +494,18 @@ export function createRunView(rootEl, ctx) {
   let selFrom = -1;
   let selTo = -1;
 
+  /** Trend band height in px once something has set one; NaN while the CSS default stands. */
+  let trendPx = NaN;
+
+  /** The height the operator last chose themselves, restored when a pane bias is lifted. */
+  let manualTrendPx = NaN;
+
+  /** The pane the navigation currently favours, '' when the operator's own split stands. */
+  let panePref = '';
+
+  /** True when the pane bias was sized against {@link FALLBACK_H} and owes a restatement. */
+  let paneStale = false;
+
   /** Cached node references — no `innerHTML` and no query after mount. */
   const nodes = {
     railBlocks: [], railFills: [],
@@ -521,6 +548,9 @@ export function createRunView(rootEl, ctx) {
   pidTools.appendChild(almBox.el);
   pidHd.appendChild(pidTools);
   const pidHost = mk('div', 'rv-pid-host');
+  // Programmatically focusable, out of the tab order: `request-pane` needs somewhere to land when
+  // the schematic has not drawn its interactive symbols yet.
+  pidHost.setAttribute('tabindex', '-1');
   pidPanel.appendChild(pidHd);
   pidPanel.appendChild(pidHost);
   el.appendChild(pidPanel);
@@ -581,6 +611,7 @@ export function createRunView(rootEl, ctx) {
   /* -- 5. trend panel: a frame around ui/chart.js, which owns its own toolbar and pen rail -- */
   const trendPanel = mk('section', 'rv-panel rv-trend');
   trendPanel.setAttribute('aria-label', 'Chromatogram');
+  trendPanel.setAttribute('tabindex', '-1');
   const chartHost = mk('div', 'rv-chart-host');
   trendPanel.appendChild(chartHost);
   el.appendChild(trendPanel);
@@ -1157,6 +1188,25 @@ export function createRunView(rootEl, ctx) {
     chartlib.setXMode(chart, X_MODES[(k + 1) % X_MODES.length]);
   }
 
+  /**
+   * Hand the keyboard to the trend's pen rail. The rail's rows are built and owned by
+   * `ui/chart.js`, which exposes `focusPenRail()` on the handle `createChart` returns; this view
+   * only asks for it.
+   *
+   * @returns {boolean} True when the rail took the focus. False when there is no chart, no such
+   *   entry point or no row to land on, which leaves the shortcut to its caller's fallback.
+   */
+  function focusPenRail() {
+    if (!chart || typeof chart.focusPenRail !== 'function') return false;
+    const res = chart.focusPenRail();
+    if (res === false) return false;
+    if (res === true) return true;
+    // An implementation that answers with nothing has still either moved the focus or not; the
+    // document is the authority on which.
+    const active = document.activeElement;
+    return !!(chart.el && active && active !== document.body && chart.el.contains(active));
+  }
+
   /* ========================================================================================== */
   /* 4.4 misc UI plumbing                                                                       */
   /* ========================================================================================== */
@@ -1232,7 +1282,9 @@ export function createRunView(rootEl, ctx) {
       case 'pan-left-fast': panBy(-0.25); return;
       case 'pan-right-fast': panBy(0.25); return;
       case 'legend-focus':
-        if (nodes.vials.length > 1) nodes.vials[1].focus();
+        // The rail belongs to the trend. Only when it cannot take the focus does the key fall back
+        // to the fraction strip, which is this screen's own list of pickable things.
+        if (!focusPenRail() && nodes.vials.length > 1) nodes.vials[1].focus();
         return;
       case 'pool-selection': {
         if (selFrom < 0) {
@@ -1255,36 +1307,118 @@ export function createRunView(rootEl, ctx) {
   /* ---- splitter ---------------------------------------------------------------------------- */
 
   /**
+   * The screen height the sizing maths works from: the observed one, or a sane default before the
+   * `ResizeObserver` has reported anything.
+   * @returns {number} Height in px.
+   */
+  function screenH() {
+    return cachedH > 0 ? cachedH : FALLBACK_H;
+  }
+
+  /**
+   * The legal range for the trend band: the trend never collapses below 120 px and the schematic
+   * always keeps 200 px.
+   * @returns {{lo:number, hi:number}} Inclusive bounds, px.
+   */
+  function trendBounds() {
+    return { lo: 120, hi: Math.max(160, screenH() - 200) };
+  }
+
+  /**
+   * The trend band height: the one this view set, or the last one the observer measured.
+   * @returns {number} Height in px.
+   */
+  function trendHeight() {
+    return Number.isFinite(trendPx) ? trendPx : cachedTrendH;
+  }
+
+  /**
+   * Size the trend band and keep the separator's ARIA values in step. Every size comes from the
+   * `ResizeObserver` cache, so this never reads layout.
+   *
+   * @param {number} px The requested trend height, px; clamped to {@link trendBounds}.
+   * @param {boolean} manual True when the operator moved the splitter themselves, which lifts any
+   *   navigation bias and makes this the position a later `request-pane` toggle returns to.
+   * @returns {void}
+   */
+  function setTrendHeight(px, manual) {
+    const b = trendBounds();
+    trendPx = clamp(px, b.lo, b.hi);
+    el.style.setProperty('--rv-trend-h', Math.round(trendPx) + 'px');
+    splitter.setAttribute('aria-valuemin', String(Math.round(b.lo)));
+    splitter.setAttribute('aria-valuemax', String(Math.round(b.hi)));
+    splitter.setAttribute('aria-valuenow', String(Math.round(trendPx)));
+    if (manual) {
+      manualTrendPx = trendPx;
+      panePref = '';
+    }
+    if (chart) chartlib.invalidate(chart, 'all');
+  }
+
+  /**
+   * Act on the navigation's `request-pane` hint. The P&ID and TREND buttons select the same screen,
+   * so the only thing they can honestly change is which pane has the room and where the keyboard
+   * is: the splitter is biased to {@link PANE_FRAC} and the focus moves into the pane. Neither pane
+   * is ever hidden. Asking again for the pane that is already favoured hands the split back to
+   * wherever the operator last put it themselves, so the bias is always reversible.
+   *
+   * @param {{pane:string}|string} payload The bus payload, `{ pane: 'pid' | 'trend' }`; a bare
+   *   pane id is accepted too, because that is what older emitters send.
+   * @returns {void}
+   */
+  function onRequestPane(payload) {
+    const pane = (payload && typeof payload === 'object') ? payload.pane : payload;
+    if (!mounted || (pane !== 'pid' && pane !== 'trend')) return;
+    // The nav publishes this in the same turn as it reveals the screen, so the observer may not
+    // have measured it yet; `update` restates the bias against the real height when it has.
+    paneStale = cachedH <= 0;
+    if (panePref === pane) {
+      setTrendHeight(Number.isFinite(manualTrendPx) ? manualTrendPx : SNAP_FRAC[1] * screenH(),
+        false);
+      panePref = '';
+    } else {
+      const now = trendHeight();
+      if (!panePref && Number.isFinite(now) && now > 0) manualTrendPx = now;
+      setTrendHeight(PANE_FRAC[pane] * screenH(), false);
+      panePref = pane;
+    }
+    focusPane(pane);
+  }
+
+  /**
+   * Move the keyboard into one pane: the trend's plot well, or the first interactive symbol on the
+   * schematic. Both hosts carry `tabindex="-1"`, so there is always somewhere to land.
+   * @param {string} pane `'pid'` or `'trend'`.
+   * @returns {void}
+   */
+  function focusPane(pane) {
+    let target = null;
+    if (pane === 'trend') {
+      target = (chart && chart.wellEl) || trendPanel;
+    } else {
+      target = pidHost.querySelector('[tabindex]:not([tabindex="-1"])') || pidHost;
+    }
+    if (target && typeof target.focus === 'function') target.focus({ preventScroll: true });
+  }
+
+  /**
    * Wire the schematic / trend splitter: pointer drag, arrow-key resizing (10 px, shift 40 px) and
    * three snap points at 30 / 45 / 60 % of the screen, exposing `role="separator"` with a live
    * `aria-valuenow` in px.
    *
-   * Every size it uses comes from the `ResizeObserver` cache, so the drag never reads layout.
-   *
    * @returns {function():void} A teardown function.
    */
   function wireSplitter() {
-    let sizePx = NaN;
     splitter.setAttribute('role', 'separator');
     splitter.setAttribute('aria-orientation', 'horizontal');
     splitter.setAttribute('aria-label', 'Resize the trend against the schematic');
     splitter.setAttribute('tabindex', '0');
     splitter.title = 'Drag to resize the trend; arrow keys move it in 10 px steps';
 
-    const current = () => (Number.isFinite(sizePx) ? sizePx : cachedTrendH);
-    const bounds = () => {
-      const h = cachedH > 0 ? cachedH : 800;
-      return { lo: 120, hi: Math.max(160, h - 200) };
-    };
-    const apply = (v) => {
-      const b = bounds();
-      sizePx = clamp(v, b.lo, b.hi);
-      el.style.setProperty('--rv-trend-h', Math.round(sizePx) + 'px');
-      splitter.setAttribute('aria-valuemin', String(Math.round(b.lo)));
-      splitter.setAttribute('aria-valuemax', String(Math.round(b.hi)));
-      splitter.setAttribute('aria-valuenow', String(Math.round(sizePx)));
-      if (chart) chartlib.invalidate(chart, 'all');
-    };
+    // Everything the splitter does is the operator's own choice, so every path is a manual move:
+    // it becomes the position the navigation bias hands back to.
+    const current = trendHeight;
+    const apply = (v) => setTrendHeight(v, true);
 
     let dragging = false;
     let startY = 0;
@@ -1611,6 +1745,7 @@ export function createRunView(rootEl, ctx) {
     on('estop', () => { pendingStructural = true; });
     on('display-units-changed', onUnitsChanged);
     on('key-action', onKeyAction);
+    on('request-pane', onRequestPane);
 
     ro.observe(el);
     ro.observe(trendPanel);
@@ -1656,6 +1791,14 @@ export function createRunView(rootEl, ctx) {
       chartlib.invalidate(chart, 'all');
     }
 
+    // A pane bias applied before the observer had measured this screen was sized against the
+    // fallback height; the real one is known here, so restate it once.
+    if (paneStale) {
+      paneStale = false;
+      if (panePref) setTrendHeight(PANE_FRAC[panePref] * cachedH, false);
+      else if (!Number.isFinite(manualTrendPx)) setTrendHeight(SNAP_FRAC[1] * cachedH, false);
+    }
+
     if (structural) {
       if (methodSig() !== railSig) buildRail();
       if (slotNames().join(',') !== vialSig) buildVials();
@@ -1663,13 +1806,20 @@ export function createRunView(rootEl, ctx) {
     }
 
     // The trend's own toolbar can change the x mode, and band coordinates are in x units.
-    if (chart && chart.xMode !== xMode) annotationsDirty = true;
+    const xModeChanged = !!chart && chart.xMode !== xMode;
+    if (xModeChanged) annotationsDirty = true;
 
     if (annotationsDirty || (run.events && run.events.length !== evCursor)) {
       rebuildAnnotations();
     } else {
       extendOpenBand(now);
     }
+
+    // `rebuildAnnotations` re-projects the bands and the markers, but the pool window belongs to
+    // the fraction selection: without this the shaded pool keeps its old units and millilitres are
+    // read as seconds. Only on the transition — the projection filters records and publishes on
+    // the bus, which is not per-frame work.
+    if (xModeChanged) applySelection();
 
     if (now - lastReadout >= READOUT_MS) {
       lastReadout = now;

@@ -570,8 +570,14 @@ export function boot(rootEl) {
       active: [], signals: new Set(), evals: new Set(),
       count: 0, crit: 0, alarms: 0, warns: 0, worst: '', ackable: null,
     },
+    // The id of the alarm the BANNER is showing — written by refreshAlarmBar, read by the two
+    // controls on the band. It is NOT `a.alarm.ackable`: that one ranks over silenced rows too,
+    // and acting on it from a band labelled for a different row acknowledges an alarm the
+    // operator cannot see.
+    bannerAlarmId: null,
     silenced: new Set(),          // alarm ids the operator muted for this session
     liveAlarmId: null,
+    faceplateFail: '',            // last faceplate failure reported, so a repeat is not re-reported
     shellError: null,             // { source, message, detail } — the failure surface of the band
     skipHold: { active: false, start_ms: 0 },
     estopArm_ms: 0,
@@ -1042,13 +1048,17 @@ function buildAlarmBar(a) {
   a.el.alarmCount.hidden = true;
   actions.appendChild(a.el.alarmCount);
 
+  // Both banner controls act on the row the banner is DISPLAYING, which is not always the row
+  // `ackTopAlarm` would pick: silencing the highest-ranked alarm advances the banner to the next
+  // one while `a.alarm.ackable` still points at the silenced row. The toolbar's ACK button is the
+  // global control and keeps `ackTopAlarm`; these two are bound to what the operator can see.
   a.el.alarmAckBtn = iconButton({
-    icon: 'ack', label: 'Acknowledge this alarm', sm: true, onClick: () => ackTopAlarm(a),
+    icon: 'ack', label: 'Acknowledge this alarm', sm: true, onClick: () => ackBannerAlarm(a),
   });
   a.el.alarmSilenceBtn = iconButton({
     icon: 'cross', label: 'Silence this banner', sm: true,
     title: 'Hide this banner for the session. The alarm stays active and stays logged.',
-    onClick: () => silenceTopAlarm(a),
+    onClick: () => silenceBannerAlarm(a),
   });
   a.el.alarmMoreBtn = iconButton({
     icon: 'warn', label: 'Open the alarm table', sm: true,
@@ -1301,25 +1311,66 @@ function toggleManual(a) {
 }
 
 /**
- * Acknowledge the highest-ranked alarm that is waiting for it.
+ * The alarm row the banner is DISPLAYING, resolved from the id `refreshAlarmBar` recorded when it
+ * last painted the band. One expression serves the banner's label, its title and its two controls,
+ * so what an operator reads and what a press acts on cannot drift apart.
+ *
+ * Resolving through the live `active` list also means a row that cleared, or was silenced, between
+ * the paint and the press is gone by the time the press lands: the press then does nothing rather
+ * than acting on a row that is no longer on the band.
+ *
  * @param {object} a the application instance
+ * @returns {object|null} the displayed `AlarmDef`, or null when the band shows an error or nothing
+ */
+function bannerAlarm(a) {
+  const id = a.bannerAlarmId;
+  if (!id) return null;
+  const rows = a.alarm.active;
+  for (let i = 0; i < rows.length; i++) if (rows[i].id === id) return rows[i];
+  return null;
+}
+
+/**
+ * Acknowledge one alarm row. The single path to `sim.acknowledgeAlarm`, so every caller gets the
+ * same refusal handling and the same banner invalidation.
+ * @param {object} a the application instance
+ * @param {object|null} def the `AlarmDef` to acknowledge
  * @returns {void}
  */
-function ackTopAlarm(a) {
-  const def = a.alarm.ackable;
+function ackAlarm(a, def) {
   if (!def) return;
   act(a, () => sim.acknowledgeAlarm(a.ctx, def.id));
   a.alarmSig = null;
 }
 
 /**
- * Hide the top banner for the session. The alarm stays active and stays logged — silencing changes
- * the screen, never the skid.
+ * Acknowledge the highest-ranked alarm that is waiting for it, silenced or not. This is the TOOLBAR
+ * button: it is labelled for the whole alarm set, not for one banner row.
  * @param {object} a the application instance
  * @returns {void}
  */
-function silenceTopAlarm(a) {
-  const def = a.alarm.active[0];
+function ackTopAlarm(a) {
+  ackAlarm(a, a.alarm.ackable);
+}
+
+/**
+ * Acknowledge the alarm the banner is showing — never the highest-ranked one, which may be a row
+ * the operator silenced and can no longer see.
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function ackBannerAlarm(a) {
+  ackAlarm(a, bannerAlarm(a));
+}
+
+/**
+ * Hide the banner's own alarm for the session. The alarm stays active and stays logged: silencing
+ * changes the screen, never the skid.
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function silenceBannerAlarm(a) {
+  const def = bannerAlarm(a);
   if (!def) return;
   a.silenced.add(def.id);
   a.alarmSig = null;
@@ -1845,6 +1896,10 @@ function wireResponsive(a) {
  * guarded — a throwing panel is reported and, after three consecutive failures, taken out of the
  * loop, but the loop itself never stops.
  *
+ * A visible frame repaints the shell, the ACTIVE screen and EVERY open faceplate. Faceplates are
+ * modeless windows that outlive a screen change, so they are driven from here rather than from the
+ * panel that opened them.
+ *
  * `document.hidden` pauses RENDERING only; the simulation keeps running, and the 0.25 s wall clamp
  * inside `advanceWall` stops a backgrounded tab from fast-forwarding.
  *
@@ -1903,6 +1958,22 @@ export function frame(now_ms) {
           toast(a, `The ${a.activeScreen} screen was disabled after ${PANEL_FAIL_LIMIT} errors. `
             + 'Switch screens and back to retry.', 'blocked');
         }
+      }
+    }
+    // Faceplates are MODELESS: one opened from the P&ID stays up while the operator changes
+    // screens, so it is repainted from the loop and never from the panel that opened it — gating
+    // this on `a.activeScreen` would freeze PV, SP, mode and quality the moment the operator
+    // navigated away. `overlay.updateFaceplates` already guards each faceplate's own `read()`;
+    // this catch takes a spec that breaks outside it, and reports one distinct failure at most so
+    // a faceplate that throws every frame cannot flood the band or the console.
+    try {
+      overlay.updateFaceplates(a.overlayHost, a.ctx.config, a.ctx.run);
+      a.faceplateFail = '';
+    } catch (err) {
+      const msg = errText(err);
+      if (msg !== a.faceplateFail) {
+        a.faceplateFail = msg;
+        reportError(a, 'faceplate', err);
       }
     }
     if (a.onboarding && typeof a.onboarding.update === 'function') {
@@ -2268,39 +2339,50 @@ function writeField(rec, kind, value, config) {
 /**
  * Repaint the alarm banner when the active set changes, and keep the two live regions honest.
  *
- * The band shows the highest-ranked alarm; when there is none it shows the last caught shell error;
- * when there is neither it disappears. Only the newest alarm's text is placed in a live region,
- * rebuilt rather than appended, so a screen reader announces once.
+ * The band shows the highest-ranked alarm the operator has not silenced; when there is none it
+ * shows the last caught shell error; when there is neither it disappears. Only the newest alarm's
+ * text is placed in a live region, rebuilt rather than appended, so a screen reader announces once.
+ *
+ * The displayed row is recorded in `a.bannerAlarmId` on every call, and the band's ACK and SILENCE
+ * controls resolve that id when they are pressed. The row the band is labelled for is therefore the
+ * row it acts on: an operator can never acknowledge an alarm the band is not showing.
  *
  * @param {object} a the application instance
  * @returns {void}
  */
 function refreshAlarmBar(a) {
   const el = a.el;
-  const top = a.alarm.active[0] || null;
+  const shown = a.alarm.active[0] || null;
   const err = a.shellError;
-  const sig = top
+  a.bannerAlarmId = shown ? shown.id : null;
+  const sig = shown
     ? `A:${a.alarm.active.map((d) => d.id).join('|')}#${a.alarm.count}`
     : (err ? `E:${err.source}:${err.message}` : '');
 
   if (sig !== a.alarmSig) {
     a.alarmSig = sig;
 
-    if (top) {
-      const sev = top.severity || 'WARN';
-      setLamp(el.alarmLamp, SEVERITY_LAMP[sev] || 'warn', `${sev}: ${top.name}`,
+    if (shown) {
+      const sev = shown.severity || 'WARN';
+      const named = `${shown.id} — ${shown.name}`;
+      setLamp(el.alarmLamp, SEVERITY_LAMP[sev] || 'warn', `${sev}: ${shown.name}`,
         (SEVERITY_RANK[sev] || 0) >= SEVERITY_RANK.ALARM);
       fmt.setText(el.alarmSev, SEVERITY_CODE[sev] || sev);
-      fmt.setText(el.alarmTag, alarmTag(top));
-      fmt.setText(el.alarmCode, `${top.id} · ${top.name}`);
-      fmt.setText(el.alarmCond, alarmCondition(top));
-      fmt.setAttr(el.alarmBar, 'title', `${top.id} — ${top.name}. Action ${top.action}.`);
+      fmt.setText(el.alarmTag, alarmTag(shown));
+      fmt.setText(el.alarmCode, `${shown.id} · ${shown.name}`);
+      fmt.setText(el.alarmCond, alarmCondition(shown));
+      fmt.setAttr(el.alarmBar, 'title', `${named}. Action ${shown.action}.`);
       fmt.setText(el.alarmCount, String(a.alarm.count));
       el.alarmCount.hidden = a.alarm.count < 2;
-      el.alarmAckBtn.hidden = !(top.ackRequired || top.latching);
-      fmt.setAttr(el.alarmAckBtn, 'aria-label', `Acknowledge ${top.name}`);
+      // Name the row in BOTH the accessible name and the tooltip: the press acts on this row, so
+      // the hover text and the screen-reader text must say which row that is.
+      el.alarmAckBtn.hidden = !(shown.ackRequired || shown.latching);
+      fmt.setAttr(el.alarmAckBtn, 'aria-label', `Acknowledge ${named}`);
+      fmt.setAttr(el.alarmAckBtn, 'title', `Acknowledge ${named}`);
       el.alarmSilenceBtn.hidden = false;
-      fmt.setAttr(el.alarmSilenceBtn, 'aria-label', `Silence the banner for ${top.name}`);
+      fmt.setAttr(el.alarmSilenceBtn, 'aria-label', `Silence the banner for ${named}`);
+      fmt.setAttr(el.alarmSilenceBtn, 'title', `Hide ${named} from the banner for the session. `
+        + 'It stays active and stays logged.');
       el.alarmMoreBtn.hidden = a.alarm.count < 2;
       el.errCopyBtn.hidden = true;
       el.errClearBtn.hidden = true;
@@ -2318,13 +2400,13 @@ function refreshAlarmBar(a) {
       el.errCopyBtn.hidden = false;
       el.errClearBtn.hidden = false;
     }
-    el.alarmBar.hidden = !(top || err);
+    el.alarmBar.hidden = !(shown || err);
 
-    const topId = top ? top.id : '';
-    if (topId !== a.liveAlarmId) {
-      a.liveAlarmId = topId;
-      const text = top ? `${top.severity}: ${top.name}` : '';
-      const rank = top ? (SEVERITY_RANK[top.severity] || 0) : 0;
+    const shownId = shown ? shown.id : '';
+    if (shownId !== a.liveAlarmId) {
+      a.liveAlarmId = shownId;
+      const text = shown ? `${shown.severity}: ${shown.name}` : '';
+      const rank = shown ? (SEVERITY_RANK[shown.severity] || 0) : 0;
       fmt.setText(el.alarmAssertive, rank >= SEVERITY_RANK.CRITICAL ? text : '');
       fmt.setText(el.alarmPolite, rank > 0 && rank < SEVERITY_RANK.CRITICAL ? text : '');
     }
