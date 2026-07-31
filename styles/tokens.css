@@ -1,201 +1,354 @@
 /* ============================================================================
-   Process Skid Simulator — DESIGN TOKENS
+   Process Skid Simulator — DESIGN TOKENS  ·  "FT-CLASSIC"
    ----------------------------------------------------------------------------
-   architecture-v2 §9.4.1 (tokens), §9.3.1 (channel palette), §9.2 (fluid
-   colours), §9.4.2 (typography / spacing / motion), §9.7 (contrast, motion).
+   The target look is a Rockwell FactoryTalk View SE / Wonderware InTouch
+   operator screen: beveled grey chrome, sunken near-black label boxes with
+   lime PV digits, ISA-5.1 instrument bubbles, a black graticuled trend, and
+   service-coloured pipes. Square corners everywhere except lamps and bubbles.
 
    THIS FILE IS THE ONLY PLACE A COLOUR LITERAL MAY APPEAR.
    styles/app.css and every src/ui/* module must reference var(--token).
-   JS reads these once per theme via format.readThemeTokens(theme) — never
-   per frame (reading custom properties in a frame is a layout-thrash trap).
+   JS reads these once per theme (format.readThemeTokens) — never per frame.
 
-   Cascade order matters; do not reorder these four blocks:
-     1  :root                                   -> dark values (the default)
-     2  @media (prefers-color-scheme: light)    -> light when no data-theme set
-     3  :root[data-theme="light"]               -> explicit light  (0,2,0, later)
-     4  :root[data-theme="dark"]                -> explicit dark   (0,2,0, last)
-   index.html stamps data-theme from prefers-color-scheme before first paint,
-   so block 2 is the no-JS fallback and blocks 3/4 are the user's toggle.
+   CASCADE ORDER — do not reorder these four blocks:
+     1  :root                                  -> LIGHT values (the default)
+     2  @media (prefers-color-scheme: dark)    -> dark, only while no data-theme
+        :root:not([data-theme])                   attribute is present (no-JS)
+     3  :root[data-theme="light"]              -> explicit light  (0,2,0)
+     4  :root[data-theme="dark"]               -> explicit dark   (0,2,0, last)
+   Blocks 3 and 4 tie on specificity, so source order settles them. Block 3 can
+   be terse: when data-theme="light" is on the element, block 2 cannot match at
+   all, so the :root light values in block 1 are already in force.
+
+   ONLY ELEVEN TOKENS ARE THEME-DEPENDENT — the chrome greys, the four bevel
+   steps and the three ink steps. Everything else (fields, lamps, pens, pipes,
+   type, spacing, geometry) is identical on both themes and is declared once in
+   §5 below, deriving from those eleven through var().
    ========================================================================== */
 
 /* ---------------------------------------------------------------------------
-   1. DARK — the default industrial HMI theme
+   1. LIGHT — classic grey. The default.
    ------------------------------------------------------------------------ */
 :root {
+  color-scheme: light;
+
+  --screen: #6E6E6E;   /* the desktop behind the panels */
+  --face: #C7C3BC;     /* raised panel face */
+  --face-2: #BFBBB4;   /* alternate/darker face: toolbars, table headers */
+  --face-3: #D2CEC7;   /* lighter face: input rows, wells */
+
+  --bev-hi: #FFFFFF;   /* outer highlight */
+  --bev-lt: #E6E2DA;   /* inner highlight */
+  --bev-sh: #85817B;   /* inner shadow */
+  --bev-dk: #4A4744;   /* outer shadow */
+
+  --ink: #101010;      /* primary text */
+  --ink-2: #3A3A3A;    /* secondary text */
+  --ink-off: #7A7A7A;  /* disabled text */
+}
+
+/* ---------------------------------------------------------------------------
+   2. DARK — automatic, only while the document carries no data-theme
+   ------------------------------------------------------------------------ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+
+    --screen: #2A2A2A;
+    --face: #4A4744;
+    --face-2: #3E3B38;
+    --face-3: #565250;
+
+    --bev-hi: #7A7672;
+    --bev-lt: #605C58;
+    --bev-sh: #2E2B29;
+    --bev-dk: #1A1817;
+
+    --ink: #E8E4DC;
+    --ink-2: #B8B4AC;
+    --ink-off: #8A867E;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   3. LIGHT — explicit, the operator's choice
+   ------------------------------------------------------------------------ */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --screen: #6E6E6E;
+  --face: #C7C3BC;
+  --face-2: #BFBBB4;
+  --face-3: #D2CEC7;
+
+  --bev-hi: #FFFFFF;
+  --bev-lt: #E6E2DA;
+  --bev-sh: #85817B;
+  --bev-dk: #4A4744;
+
+  --ink: #101010;
+  --ink-2: #3A3A3A;
+  --ink-off: #7A7A7A;
+}
+
+/* ---------------------------------------------------------------------------
+   4. DARK — explicit, must beat the prefers-color-scheme block above
+   ------------------------------------------------------------------------ */
+:root[data-theme="dark"] {
   color-scheme: dark;
 
-  /* -- background layers -------------------------------------------------- */
-  --bg-0: #0B0F14;
-  --bg-1: #121821;
-  --surface-1: #161E29;
-  --surface-2: #1C2733;
-  --surface-3: #243040;
-  --overlay: #2B3A4A;
+  --screen: #2A2A2A;
+  --face: #4A4744;
+  --face-2: #3E3B38;
+  --face-3: #565250;
 
-  /* -- borders ------------------------------------------------------------ */
-  --line: #2A3441;
-  --line-soft: #212A35;
-  --line-strong: #3A4757;
+  --bev-hi: #7A7672;
+  --bev-lt: #605C58;
+  --bev-sh: #2E2B29;
+  --bev-dk: #1A1817;
 
-  /* -- text --------------------------------------------------------------- */
-  --text-1: #E6EDF5;
-  --text-2: #A7B4C4;
-  --text-3: #71818F;
-  --text-inv: #0B0F14;
+  --ink: #E8E4DC;
+  --ink-2: #B8B4AC;
+  --ink-off: #8A867E;
+}
 
-  /* -- accent ------------------------------------------------------------- */
-  --accent: #5DA9FF;
-  --accent-hover: #7CBBFF;
-  --accent-press: #3E8FE6;
-  --accent-soft: rgba(93, 169, 255, 0.14);
+/* ===========================================================================
+   5. THEME-INDEPENDENT TOKENS
+   The bevel language, the field colours, the lamps, the pens and the pipes are
+   IDENTICAL on both themes — that is what keeps a dark control room and a lit
+   one reading as the same instrument. Anything grey in here derives from the
+   eleven tokens above through var(), so it follows the theme automatically.
+   ======================================================================== */
+:root {
 
-  /* -- status ------------------------------------------------------------- */
-  --ok: #3FBF7F;
-  --warn: #E8A33D;
-  --alarm: #F2544B;
-  --info: #5DA9FF;
-  --ok-soft: rgba(63, 191, 127, 0.14);
-  --warn-soft: rgba(232, 163, 61, 0.16);
-  --alarm-soft: rgba(242, 84, 75, 0.16);
-  --info-soft: rgba(93, 169, 255, 0.14);
-  --neutral-soft: rgba(167, 180, 196, 0.12);
+  /* -- BEVEL RECIPES -------------------------------------------------------
+     Never hand-roll a border. .raised / .sunken / .pressed in app.css apply
+     these; a pressed control swaps raised for sunken and shifts 1px down-right.
+     The *-1 variants are the single-step version for 1px-tight furniture. */
+  --bevel-raised:
+    inset 1px 1px 0 var(--bev-hi), inset -1px -1px 0 var(--bev-dk),
+    inset 2px 2px 0 var(--bev-lt), inset -2px -2px 0 var(--bev-sh);
+  --bevel-sunken:
+    inset 1px 1px 0 var(--bev-dk), inset -1px -1px 0 var(--bev-hi),
+    inset 2px 2px 0 var(--bev-sh), inset -2px -2px 0 var(--bev-lt);
+  --bevel-raised-1:
+    inset 1px 1px 0 var(--bev-hi), inset -1px -1px 0 var(--bev-dk);
+  --bevel-sunken-1:
+    inset 1px 1px 0 var(--bev-dk), inset -1px -1px 0 var(--bev-hi);
+  /* A groove: the 2px sunken rule used to separate toolbar button groups. */
+  --bevel-groove:
+    inset 1px 0 0 var(--bev-sh), inset -1px 0 0 var(--bev-hi);
+  --bevel-groove-h:
+    inset 0 1px 0 var(--bev-sh), inset 0 -1px 0 var(--bev-hi);
+  /* Hard-edged drop shadow for floating windows. No soft blur in this era. */
+  --shadow-window: 2px 2px 0 rgba(0, 0, 0, 0.38);
 
-  /* -- focus -------------------------------------------------------------- */
-  --focus: #8FD0FF;
+  /* -- LABEL BOX — the sunken numeric display, the workhorse ---------------- */
+  --fld-bg: #0A0F0A;      /* near-black field */
+  --fld-pv: #12FF4B;      /* PV digits (lime) */
+  --fld-sp: #FFD400;      /* SP digits (amber) */
+  --fld-out: #00E5FF;     /* output / manual digits (cyan) */
+  --fld-alarm: #FF3B30;   /* digits when the tag is in alarm */
+  --fld-stale: #7A8A7A;   /* digits when quality is SUSPECT/INVALID */
+  --fld-eu: #9FB39F;      /* engineering-unit suffix: smaller, dimmer */
+  --fld-rule: #1E2A1E;    /* hairline inside a multi-value field */
 
-  /* -- chart / plot furniture --------------------------------------------- */
-  --grid: rgba(255, 255, 255, 0.06);
-  --grid-strong: rgba(255, 255, 255, 0.11);
-  --phase-band-a: rgba(255, 255, 255, 0.028);
-  --phase-band-b: rgba(255, 255, 255, 0.055);
+  /* -- STATUS LAMPS (round, glassy) ---------------------------------------- */
+  --lamp-off: #4A4744;
+  --lamp-run: #16C60C;
+  --lamp-warn: #FFC000;
+  --lamp-alarm: #E81123;
+  --lamp-ring: #2A2A2A;                      /* 1px ring around every lamp */
+  --lamp-gloss: rgba(255, 255, 255, 0.80);   /* top-left highlight arc */
 
-  /* -- P&ID: pipes, valves, bed ------------------------------------------- */
-  --pipe-idle: #2A3441;
-  --flow-dash: rgba(255, 255, 255, 0.75);
-  --valve-closed: #3A4350;
-  --valve-open: #22C55E;
-  --bed-bead: #8E9AA8;
-  --col-glass: rgba(255, 255, 255, 0.03);
-  --gradient-front: #F2C14E;
+  /* -- TREND PENS — the trend is the most prominent element on the screen ---
+     PV pens SOLID 1.5px; SP pens the SAME HUE, DASHED 5-4 at 1px. Reading PV
+     against SP at a glance is the entire point of the screen. */
+  --plot-bg: #000000;
+  --plot-grid: #1F3D1F;   /* classic dark-green graticule */
+  --plot-axis: #C7C3BC;
+  --pen-flow: #00E5FF;
+  --pen-pctb: #FF6EC7;
+  --pen-press: #FFD400;
+  --pen-uv: #12FF4B;
+  --pen-cond: #FF9A3C;
+  --pen-ph: #B39DFF;
+  --pen-temp: #FFFFFF;
+  /* UV is a wavelength family: 280 is the reference pen, 260/300 are siblings
+     inside the same green hue band so the family reads as one measurement. */
+  --pen-uv2: #A7FF3C;     /* UV 260 */
+  --pen-uv3: #00C46A;     /* UV 300 */
+  --pen-dp: #FF8A5B;      /* differential pressure */
+  --pen-cursor: #FFFFFF;  /* the vertical read-out cursor */
+  /* Pen geometry, exported so chart.js never hard-codes a stroke. */
+  --pen-w-pv: 1.5;
+  --pen-w-sp: 1;
+  --pen-dash-sp: 5 4;
+  --pen-dash-limit: 2 3;
 
-  /* -- species bands in the packed bed (§9.2 step 4) ----------------------- */
-  --band-1: #4CC9F0;
-  --band-2: #B388FF;
-  --band-3: #FFB347;
-  --band-4: #7DF2B8;
+  /* -- PROCESS / PIPES — service-coloured, as on a real P&ID ---------------- */
+  --pipe-idle: #4A4744;
+  --svc-a: #2D6FB8;       /* buffer A */
+  --svc-b: #8A5BC8;       /* buffer B */
+  --svc-sample: #C8862B;
+  --svc-cip: #1FA98C;
+  --svc-product: #16C60C;
+  --svc-waste: #6B6B6B;
+  --flow-dash: #FFFFFF;   /* marching dashes on a flowing pipe */
+  --pipe-w: 3px;
+  --pipe-w-active: 4px;
 
-  /* -- fluid colour convention (§9.2) -------------------------------------- */
-  --fluid-a: #2E6FA8;
-  --fluid-b: #7A4FA8;
-  --fluid-sample: #C98A2B;
-  --fluid-cip: #2FA98C;
-  --fluid-waste: #6B7684;
+  /* -- PACKED-BED SPECIES BANDS -------------------------------------------- */
+  --band-1: #00E5FF;
+  --band-2: #B39DFF;
+  --band-3: #FF9A3C;
+  --band-4: #12FF4B;
+  --bed-bead: #9A968E;
+  --bed-bg: #17140F;
+  --col-glass: rgba(255, 255, 255, 0.22);
+  --gradient-front: var(--fld-sp);
+  --valve-open: var(--lamp-run);
+  --valve-closed: var(--pipe-idle);
 
-  /* -- phase band tints by block type (§9.3.3) ----------------------------- */
-  --phase-equil: rgba(167, 180, 196, 0.05);
-  --phase-load: rgba(201, 138, 43, 0.06);
-  --phase-wash: rgba(46, 111, 168, 0.05);
-  --phase-elute: rgba(122, 79, 168, 0.07);
-  --phase-strip: rgba(47, 169, 140, 0.06);
+  /* -- PHASE / BLOCK BANDS drawn over the black plot ------------------------ */
+  --phase-band-a: rgba(255, 255, 255, 0.030);
+  --phase-band-b: rgba(255, 255, 255, 0.060);
+  --phase-equil: rgba(199, 195, 188, 0.07);
+  --phase-load: rgba(200, 134, 43, 0.13);
+  --phase-wash: rgba(45, 111, 184, 0.13);
+  --phase-elute: rgba(138, 91, 200, 0.15);
+  --phase-strip: rgba(31, 169, 140, 0.13);
 
-  /* -- shadows and scrims -------------------------------------------------- */
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
-  --shadow-2: 0 6px 20px rgba(0, 0, 0, 0.45);
-  --dim: rgba(0, 0, 0, 0.55);
+  /* -- SIGNAL / SEVERITY on grey chrome ------------------------------------ */
+  --ok: var(--lamp-run);
+  --warn: var(--lamp-warn);
+  --alarm: var(--lamp-alarm);
+  --info: var(--svc-a);
+  --ok-soft: rgba(22, 198, 12, 0.18);
+  --warn-soft: rgba(255, 192, 0, 0.22);
+  --alarm-soft: rgba(232, 17, 35, 0.20);
+  --info-soft: rgba(45, 111, 184, 0.18);
+  --neutral-soft: rgba(0, 0, 0, 0.08);
+  --on-alarm: #FFFFFF;    /* text sitting on --alarm */
+  --on-warn: #101010;     /* text sitting on --warn */
+  --on-ok: #061206;
 
-  /* -- CHANNEL PALETTE (§9.3.1) — colour-blind safe, per theme ------------- *
-   * Channels sharing a y-axis differ by >=12 L* steps, and every channel     *
-   * also carries a dash signature in chart.js so colour is never the sole    *
-   * encoder. Dash signatures, for reference (owned by ui/chart.js opts):     *
-   *   UV280 solid 1.5 | UV260 solid 2 | UV300 dotted 1 4 | Cond solid        *
-   *   pH dash 6 3 | %B solid + 0.10 fill | Press dash 3 3 | Flow 8 2 2 2     */
-  --ch-uv280: #4CC9F0;
-  --ch-uv260: #B388FF;
-  --ch-uv300: #FF8FA3;
-  --ch-cond: #F2A93B;
-  --ch-ph: #4ADE80;
-  --ch-pctb: #E5E9EF;
-  --ch-press: #FF6B57;
-  --ch-flow: #64D9C4;
+  /* -- FOCUS, SELECTION, SCRIMS, TINTS ------------------------------------- */
+  --focus: #FFD400;                        /* 2px amber ring reads on grey */
+  /* The same ring, under the name the widget kit and the P&ID ask for. Both
+     used to carry their own fallback (one amber literal, one var(--fld-sp)),
+     which is how a token ends up defined in two places and drifting. */
+  --focus-ring: var(--focus);
+  --sel-bg: var(--svc-a);
+  --sel-ink: #FFFFFF;
+  --hover-tint: rgba(255, 255, 255, 0.16);
+  --press-tint: rgba(0, 0, 0, 0.10);
+  --dim: rgba(0, 0, 0, 0.50);              /* modal scrim */
+  --disabled-veil: rgba(127, 127, 127, 0.28);
 
-  /* ======================================================================== *
-   * THEME-INDEPENDENT TOKENS — identical on both themes.                     *
-   * ======================================================================== */
+  /* -- TYPOGRAPHY ----------------------------------------------------------
+     No web fonts. Labels 10px uppercase at .04em; numerics 13-20px bold and
+     tabular. Nothing exceeds 20px — the legacy 24/32 steps are capped here so
+     older markup cannot break the scale. */
+  --font-ui: system-ui, "Segoe UI", Tahoma, "Helvetica Neue", Arial, sans-serif;
+  --font-num: ui-monospace, "Cascadia Mono", Consolas, "Segoe UI Mono",
+    "Roboto Mono", Menlo, monospace;
 
-  /* -- typography (§9.4.2) -------------------------------------------------- */
-  --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
-  --font-num: ui-monospace, "SF Mono", "Cascadia Mono", "Segoe UI Mono",
-    "Roboto Mono", Menlo, Consolas, monospace;
-
+  --fs-8: 8px;
   --fs-9: 9px;
   --fs-10: 10px;
   --fs-11: 11px;
   --fs-12: 12px;
   --fs-13: 13px;
   --fs-15: 15px;
+  --fs-16: 16px;
   --fs-18: 18px;
-  --fs-24: 24px;
-  --fs-32: 32px;
-  --lh-tight: 1.15;
-  --lh-base: 1.45;
-  --ls-caps: 0.06em;
+  --fs-20: 20px;
+  --fs-24: 20px;   /* capped */
+  --fs-32: 20px;   /* capped */
+  --lh-tight: 1.05;
+  --lh-base: 1.30;
+  --ls-caps: 0.04em;
+  --ls-num: 0.01em;
 
-  /* -- spacing ------------------------------------------------------------- */
-  --sp-1: 2px;
-  --sp-2: 4px;
-  --sp-3: 6px;
-  --sp-4: 8px;
-  --sp-5: 12px;
-  --sp-6: 16px;
-  --sp-7: 20px;
-  --sp-8: 24px;
-  --sp-9: 32px;
-  --sp-10: 40px;
+  /* -- SPACING — dense. Whitespace is not a virtue on a plant screen. ------- */
+  --sp-1: 1px;
+  --sp-2: 2px;
+  --sp-3: 3px;
+  --sp-4: 4px;
+  --sp-5: 6px;
+  --sp-6: 8px;
+  --sp-7: 10px;
+  --sp-8: 12px;
+  --sp-9: 16px;
+  --sp-10: 20px;
+  --gap: 4px;
+  --panel-pad: 4px;
+  --panel-header: 20px;
 
-  /* -- radius -------------------------------------------------------------- */
-  --r-1: 3px;
-  --r-2: 5px;
-  --r-3: 8px;
-  --r-4: 12px;
-  --r-pill: 999px;
-
-  /* -- motion (§9.7 zeroes these under prefers-reduced-motion) -------------- */
-  --dur-1: 90ms;
-  --dur-2: 160ms;
-  --dur-3: 250ms;
-  --ease-out: cubic-bezier(0.2, 0.7, 0.3, 1);
-  --ease-inout: cubic-bezier(0.4, 0, 0.2, 1);
-
-  /* -- shell band heights (§9.1.1) ----------------------------------------- */
-  --h-titlebar: 44px;
-  --h-runbar: 56px;
-  --h-tabstrip: 36px;
-  --h-statusstrip: 28px;
-  --h-alarm: 40px;
-  --h-workspace-min: 560px;
-
-  /* -- run-view band sizes (§9.1.2) ---------------------------------------- */
-  --h-phaserail: 64px;
-  --h-fracstrip: 150px;
-  --h-legend: 132px;
-  --w-runleft-min: 380px;
-  --w-runleft-wide: 460px;
-  --h-chart-min: 320px;
-  --h-overview: 36px;
-
-  /* -- control heights and panel metrics (§9.4.2) --------------------------- */
-  --ctl-sm: 24px;
-  --ctl-md: 30px;
-  --ctl-lg: 36px;
-  --ctl-estop: 44px;
-  --panel-pad: 12px;
-  --panel-header: 32px;
-  --gap: 12px;
-  --row-h: 28px;
+  /* -- SHELL BAND HEIGHTS -------------------------------------------------- */
+  --h-titlebar: 26px;
+  --h-toolbar: 40px;
+  --h-runbar: 40px;        /* legacy name for the toolbar band */
+  --h-alarm: 24px;
+  --h-statusstrip: 24px;
+  --h-tabstrip: 24px;
+  --h-workspace-min: 420px;
   --splitter-hit: 6px;
 
-  /* -- stacking ------------------------------------------------------------ */
+  /* -- CONTROL METRICS ----------------------------------------------------- */
+  --btn-icon: 34px;        /* toolbar icon button, 34x34 */
+  --btn-icon-sm: 26px;
+  --icon: 20px;            /* inline SVG glyph box inside a 34px button */
+  --icon-sm: 14px;
+  --chip-h: 20px;          /* speed chips */
+  --chip-w: 30px;
+  --ctl-sm: 18px;
+  --ctl-md: 22px;
+  --ctl-lg: 26px;
+  --ctl-estop: 34px;
+  --row-h: 22px;           /* table row */
+  --head-h: 20px;          /* table header row */
+  --lbox-h: 18px;          /* label box */
+  --lbox-h-lg: 24px;
+  --lbox-min: 54px;
+  --lamp-d: 10px;
+  --lamp-d-lg: 14px;
+  --bubble-d: 34px;        /* ISA-5.1 balloon */
+  --bubble-fill: var(--face-3);  /* balloon interior, ink outline over it */
+  --estop-ink: var(--on-alarm);  /* glyph sitting on the e-stop's red face */
+
+  /* -- RUN-VIEW BAND SIZES (JS overrides these while dragging a splitter) --- */
+  --rv-bottom-h: 240px;
+  --rv-trend-h: 45%;
+  --rv-frac-h: 92px;
+  --h-phaserail: 22px;
+  --h-fracstrip: 92px;
+  --h-legend: 26px;
+  --h-chart-min: 200px;
+  --h-overview: 26px;
+  --w-runleft-min: 300px;
+  --w-runleft-wide: 380px;
+
+  /* -- CORNERS — square everywhere. Lamps and bubbles opt back in with 50%. - */
+  --r-0: 0;
+  --r-1: 0;
+  --r-2: 0;
+  --r-3: 0;
+  --r-4: 0;
+  --r-pill: 999px;
+  --r-round: 50%;
+
+  /* -- MOTION — short and mechanical; §"reduced motion" zeroes it. ---------- */
+  --dur-1: 60ms;
+  --dur-2: 100ms;
+  --dur-3: 140ms;
+  --ease-out: linear;
+  --ease-inout: linear;
+  --blink: 900ms;          /* alarm lamp / banner blink period */
+  --march: 900ms;          /* marching-dash cycle on a flowing pipe */
+
+  /* -- STACKING ------------------------------------------------------------ */
   --z-base: 0;
   --z-sticky: 10;
   --z-chrome: 20;
@@ -206,243 +359,88 @@
   --z-coach: 70;
   --z-toast: 80;
   --z-perf: 90;
-}
 
-/* ---------------------------------------------------------------------------
-   2. LIGHT — automatic, only while the document carries no data-theme
-   ------------------------------------------------------------------------ */
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme]) {
-    color-scheme: light;
+  /* =======================================================================
+     LEGACY TOKEN BRIDGE
+     src/ui/* modules inject their own <style> blocks that reference the
+     pre-refactor token names. Every one of them is re-pointed at the
+     FT-CLASSIC palette here, so nothing goes unstyled and no colour literal
+     has to live outside this file.
+     ==================================================================== */
+  --bg-0: var(--screen);
+  --bg-1: var(--face-2);
+  --surface-1: var(--face);
+  --surface-2: var(--face-2);
+  --surface-3: var(--face-3);
+  --overlay: var(--face);
 
-    --bg-0: #EEF1F5;
-    --bg-1: #F6F8FA;
-    --surface-1: #FFFFFF;
-    --surface-2: #F2F5F8;
-    --surface-3: #E7ECF2;
-    --overlay: #FFFFFF;
+  --line: var(--bev-sh);
+  --line-soft: var(--bev-lt);
+  --line-strong: var(--bev-dk);
+  --rule: var(--bev-sh);          /* 1px table rule */
 
-    --line: #D3DAE3;
-    --line-soft: #E3E8EE;
-    --line-strong: #AAB6C4;
-
-    --text-1: #0F1720;
-    --text-2: #48566A;
-    --text-3: #6B7A8C;
-    --text-inv: #FFFFFF;
-
-    --accent: #0B72D8;
-    --accent-hover: #0A63BC;
-    --accent-press: #08529C;
-    --accent-soft: rgba(11, 114, 216, 0.12);
-
-    --ok: #118A4E;
-    --warn: #9A6300;
-    --alarm: #C42B22;
-    --info: #0B72D8;
-    --ok-soft: rgba(17, 138, 78, 0.12);
-    --warn-soft: rgba(154, 99, 0, 0.14);
-    --alarm-soft: rgba(196, 43, 34, 0.13);
-    --info-soft: rgba(11, 114, 216, 0.12);
-    --neutral-soft: rgba(72, 86, 106, 0.10);
-
-    --focus: #0B72D8;
-
-    --grid: rgba(15, 23, 32, 0.08);
-    --grid-strong: rgba(15, 23, 32, 0.16);
-    --phase-band-a: rgba(15, 23, 32, 0.030);
-    --phase-band-b: rgba(15, 23, 32, 0.055);
-
-    --pipe-idle: #C9D2DC;
-    --flow-dash: rgba(15, 23, 32, 0.55);
-    --bed-bead: #A9B4C0;
-    --col-glass: rgba(15, 23, 32, 0.03);
-
-    --phase-equil: rgba(72, 86, 106, 0.05);
-    --phase-load: rgba(201, 138, 43, 0.10);
-    --phase-wash: rgba(46, 111, 168, 0.08);
-    --phase-elute: rgba(122, 79, 168, 0.10);
-    --phase-strip: rgba(47, 169, 140, 0.10);
-
-    --shadow-1: 0 1px 2px rgba(15, 23, 32, 0.10);
-    --shadow-2: 0 6px 20px rgba(15, 23, 32, 0.16);
-    --dim: rgba(15, 23, 32, 0.45);
-
-    --ch-uv280: #0B7EA8;
-    --ch-uv260: #6D3FD1;
-    --ch-uv300: #C2185B;
-    --ch-cond: #B26A00;
-    --ch-ph: #0F8A4A;
-    --ch-pctb: #37414D;
-    --ch-press: #C4341C;
-    --ch-flow: #0E7C6B;
-  }
-}
-
-/* ---------------------------------------------------------------------------
-   3. LIGHT — explicit, the user's choice
-   ------------------------------------------------------------------------ */
-:root[data-theme="light"] {
-  color-scheme: light;
-
-  --bg-0: #EEF1F5;
-  --bg-1: #F6F8FA;
-  --surface-1: #FFFFFF;
-  --surface-2: #F2F5F8;
-  --surface-3: #E7ECF2;
-  --overlay: #FFFFFF;
-
-  --line: #D3DAE3;
-  --line-soft: #E3E8EE;
-  --line-strong: #AAB6C4;
-
-  --text-1: #0F1720;
-  --text-2: #48566A;
-  --text-3: #6B7A8C;
+  --text-1: var(--ink);
+  --text-2: var(--ink-2);
+  --text-3: var(--ink-off);
   --text-inv: #FFFFFF;
 
-  --accent: #0B72D8;
-  --accent-hover: #0A63BC;
-  --accent-press: #08529C;
-  --accent-soft: rgba(11, 114, 216, 0.12);
+  --accent: var(--svc-a);
+  --accent-hover: #3E86D0;
+  --accent-press: #22568F;
+  --accent-soft: var(--info-soft);
 
-  --ok: #118A4E;
-  --warn: #9A6300;
-  --alarm: #C42B22;
-  --info: #0B72D8;
-  --ok-soft: rgba(17, 138, 78, 0.12);
-  --warn-soft: rgba(154, 99, 0, 0.14);
-  --alarm-soft: rgba(196, 43, 34, 0.13);
-  --info-soft: rgba(11, 114, 216, 0.12);
-  --neutral-soft: rgba(72, 86, 106, 0.10);
+  --grid: var(--plot-grid);
+  --grid-strong: #2E5C2E;
 
-  --focus: #0B72D8;
+  --fluid-a: var(--svc-a);
+  --fluid-b: var(--svc-b);
+  --fluid-sample: var(--svc-sample);
+  --fluid-cip: var(--svc-cip);
+  --fluid-waste: var(--svc-waste);
 
-  --grid: rgba(15, 23, 32, 0.08);
-  --grid-strong: rgba(15, 23, 32, 0.16);
-  --phase-band-a: rgba(15, 23, 32, 0.030);
-  --phase-band-b: rgba(15, 23, 32, 0.055);
+  --ch-uv280: var(--pen-uv);
+  --ch-uv260: var(--pen-uv2);
+  --ch-uv300: var(--pen-uv3);
+  --ch-cond: var(--pen-cond);
+  --ch-ph: var(--pen-ph);
+  --ch-pctb: var(--pen-pctb);
+  --ch-press: var(--pen-press);
+  --ch-flow: var(--pen-flow);
 
-  --pipe-idle: #C9D2DC;
-  --flow-dash: rgba(15, 23, 32, 0.55);
-  --bed-bead: #A9B4C0;
-  --col-glass: rgba(15, 23, 32, 0.03);
-
-  --phase-equil: rgba(72, 86, 106, 0.05);
-  --phase-load: rgba(201, 138, 43, 0.10);
-  --phase-wash: rgba(46, 111, 168, 0.08);
-  --phase-elute: rgba(122, 79, 168, 0.10);
-  --phase-strip: rgba(47, 169, 140, 0.10);
-
-  --shadow-1: 0 1px 2px rgba(15, 23, 32, 0.10);
-  --shadow-2: 0 6px 20px rgba(15, 23, 32, 0.16);
-  --dim: rgba(15, 23, 32, 0.45);
-
-  --ch-uv280: #0B7EA8;
-  --ch-uv260: #6D3FD1;
-  --ch-uv300: #C2185B;
-  --ch-cond: #B26A00;
-  --ch-ph: #0F8A4A;
-  --ch-pctb: #37414D;
-  --ch-press: #C4341C;
-  --ch-flow: #0E7C6B;
+  --shadow-1: none;
+  --shadow-2: var(--shadow-window);
 }
 
 /* ---------------------------------------------------------------------------
-   4. DARK — explicit, must beat the prefers-color-scheme block above
-   ------------------------------------------------------------------------ */
-:root[data-theme="dark"] {
-  color-scheme: dark;
-
-  --bg-0: #0B0F14;
-  --bg-1: #121821;
-  --surface-1: #161E29;
-  --surface-2: #1C2733;
-  --surface-3: #243040;
-  --overlay: #2B3A4A;
-
-  --line: #2A3441;
-  --line-soft: #212A35;
-  --line-strong: #3A4757;
-
-  --text-1: #E6EDF5;
-  --text-2: #A7B4C4;
-  --text-3: #71818F;
-  --text-inv: #0B0F14;
-
-  --accent: #5DA9FF;
-  --accent-hover: #7CBBFF;
-  --accent-press: #3E8FE6;
-  --accent-soft: rgba(93, 169, 255, 0.14);
-
-  --ok: #3FBF7F;
-  --warn: #E8A33D;
-  --alarm: #F2544B;
-  --info: #5DA9FF;
-  --ok-soft: rgba(63, 191, 127, 0.14);
-  --warn-soft: rgba(232, 163, 61, 0.16);
-  --alarm-soft: rgba(242, 84, 75, 0.16);
-  --info-soft: rgba(93, 169, 255, 0.14);
-  --neutral-soft: rgba(167, 180, 196, 0.12);
-
-  --focus: #8FD0FF;
-
-  --grid: rgba(255, 255, 255, 0.06);
-  --grid-strong: rgba(255, 255, 255, 0.11);
-  --phase-band-a: rgba(255, 255, 255, 0.028);
-  --phase-band-b: rgba(255, 255, 255, 0.055);
-
-  --pipe-idle: #2A3441;
-  --flow-dash: rgba(255, 255, 255, 0.75);
-  --bed-bead: #8E9AA8;
-  --col-glass: rgba(255, 255, 255, 0.03);
-
-  --phase-equil: rgba(167, 180, 196, 0.05);
-  --phase-load: rgba(201, 138, 43, 0.06);
-  --phase-wash: rgba(46, 111, 168, 0.05);
-  --phase-elute: rgba(122, 79, 168, 0.07);
-  --phase-strip: rgba(47, 169, 140, 0.06);
-
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
-  --shadow-2: 0 6px 20px rgba(0, 0, 0, 0.45);
-  --dim: rgba(0, 0, 0, 0.55);
-
-  --ch-uv280: #4CC9F0;
-  --ch-uv260: #B388FF;
-  --ch-uv300: #FF8FA3;
-  --ch-cond: #F2A93B;
-  --ch-ph: #4ADE80;
-  --ch-pctb: #E5E9EF;
-  --ch-press: #FF6B57;
-  --ch-flow: #64D9C4;
-}
-
-/* ---------------------------------------------------------------------------
-   5. prefers-contrast: more  (§9.7)
-   Raise --line to --line-strong and promote --text-3 to --text-2. app.css
-   additionally thickens rules and swaps alpha phase bands for 1 px edges.
+   6. prefers-contrast: more
+   Deepen the bevel steps so the chrome keeps its shape, promote disabled ink
+   to secondary, and brighten the graticule.
    ------------------------------------------------------------------------ */
 @media (prefers-contrast: more) {
   :root,
-  :root[data-theme="dark"],
-  :root[data-theme="light"] {
-    --line: var(--line-strong);
-    --line-soft: var(--line-strong);
-    --text-3: var(--text-2);
-    --grid: var(--grid-strong);
+  :root:not([data-theme]),
+  :root[data-theme="light"],
+  :root[data-theme="dark"] {
+    --ink-off: var(--ink-2);
+    --plot-grid: #2E5C2E;
+    --lamp-ring: #000000;
+    --fld-eu: #C3D6C3;
+    --rule: var(--bev-dk);
   }
 }
 
 /* ---------------------------------------------------------------------------
-   6. prefers-reduced-motion: reduce  (§9.7)
-   Decorative motion is zeroed here. DATA motion — trace growth, band
-   migration, tank levels — is NOT animated by CSS and is deliberately kept:
-   that motion is the information.
+   7. prefers-reduced-motion: reduce
+   Decorative motion is zeroed: marching pipe dashes stop (app.css swaps in a
+   static arrowhead) and lamp/banner blink stops. DATA motion — trace growth,
+   band migration, tank levels — is drawn to canvas, not animated by CSS, and
+   is deliberately kept: that motion is the information.
    ------------------------------------------------------------------------ */
 @media (prefers-reduced-motion: reduce) {
   :root,
-  :root[data-theme="dark"],
-  :root[data-theme="light"] {
+  :root:not([data-theme]),
+  :root[data-theme="light"],
+  :root[data-theme="dark"] {
     --dur-1: 0ms;
     --dur-2: 0ms;
     --dur-3: 0ms;

@@ -948,6 +948,20 @@ export function reconcileList(container, items, keyFn, createFn, updateFn) {
  * @type {readonly string[]}
  */
 export const THEME_TOKEN_NAMES = Object.freeze([
+  // FT-CLASSIC chrome — the eleven theme-dependent tokens, plus the field, lamp, plot and pen
+  // families that sit on them. These are the names `styles/tokens.css` actually declares; the
+  // block below is the legacy bridge kept so older injected stylesheets keep resolving.
+  '--screen', '--face', '--face-2', '--face-3',
+  '--bev-hi', '--bev-lt', '--bev-sh', '--bev-dk',
+  '--ink', '--ink-2', '--ink-off',
+  '--fld-bg', '--fld-pv', '--fld-sp', '--fld-out', '--fld-alarm', '--fld-stale',
+  '--fld-eu', '--fld-rule',
+  '--lamp-off', '--lamp-run', '--lamp-warn', '--lamp-alarm', '--lamp-ring', '--lamp-gloss',
+  '--plot-bg', '--plot-grid', '--plot-axis',
+  '--pen-flow', '--pen-pctb', '--pen-press', '--pen-uv', '--pen-cond', '--pen-ph', '--pen-temp',
+  '--pen-uv2', '--pen-uv3', '--pen-dp', '--pen-cursor',
+  '--svc-a', '--svc-b', '--svc-sample', '--svc-cip', '--svc-product', '--svc-waste',
+  '--focus-ring', '--estop-ink', '--bubble-fill',
   // surfaces and lines
   '--bg-0', '--bg-1', '--surface-1', '--surface-2', '--surface-3', '--overlay',
   '--line', '--line-soft', '--line-strong',
@@ -1056,13 +1070,17 @@ function primeThemeTokens() {
 
 /** Which theme the document is actually showing right now. */
 function activeTheme() {
-  if (typeof document === 'undefined' || !document.documentElement) return 'dark';
+  // FT-CLASSIC is a LIGHT design: block 1 of styles/tokens.css is `:root` and carries the light
+  // values, so LIGHT is what the document shows whenever nothing says otherwise. Defaulting to
+  // 'dark' here would hand the canvas painters a dark token map while the CSS chrome around them
+  // stayed grey. `activeTheme()` in ui/chart.js resolves the same way.
+  if (typeof document === 'undefined' || !document.documentElement) return 'light';
   const attr = document.documentElement.getAttribute('data-theme');
   if (attr === 'light' || attr === 'dark') return attr;
   if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
-    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
-  return 'dark';
+  return 'light';
 }
 
 /**

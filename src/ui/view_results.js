@@ -1,8 +1,10 @@
 /**
- * @file `src/ui/view_results.js` — the Results tab (architecture-v2 §6.30, §9.3, §9.7).
+ * @file `src/ui/view_results.js` — the RESULTS screen (architecture-v2 §6.30, §9.3, §9.7), drawn in
+ * the FT-CLASSIC operator vocabulary: beveled grey panels, sunken label boxes with a tag and an
+ * engineering unit, icon-only controls with tooltips, classic sunken data grids.
  *
- * The full-width chromatogram, the peak table, the pooling tool, the metrics cards, the mass
- * balance, the packing-test analysis, the exports and the post-run "What happened" panel.
+ * The full-width chromatogram, the peak table, the pooling tool, the pool metrics, the mass
+ * balance, the packing-test analysis, the exports and the post-run outcome summary.
  *
  * THIS MODULE OWNS THE GRID AND THE PACKING-TEST ANALYSIS (§6.30). It calls
  * `peaks.buildVolumeGrid(config, run)` — the single object cached on `run.grid` (§6.19) — and hands
@@ -18,9 +20,9 @@
  *   - `log.logEvent(..., 'PACKING_TEST_RESULT', ...)` once per analysed packing-test block.
  * Everything else goes through `ctx.sim`.
  *
- * Layout and component classes come from `styles/app.css` (§21 results view plus the shared panel,
- * button, numfield, segmented, table, metric, poolbar and empty-state vocabulary); this module adds
- * only the handful of `rv-*` utilities that file does not define.
+ * TEXT POLICY: no sentence renders on this screen. Values live in sunken label boxes carrying their
+ * tag and unit, truth-only metrics are drawn in the cyan output colour, controls are icons with
+ * `title` + `aria-label`, and every explanation lives in a tooltip or a glossary popover.
  */
 
 import {
@@ -29,7 +31,7 @@ import {
   exportPNG, destroyChart,
 } from './chart.js';
 import {
-  h, setText, setAttr, cls, reconcileList,
+  h, hSvg, setText, setAttr, cls, reconcileList,
   fmtVolume, fmtCond, fmtPH, fmtTime,
 } from './format.js';
 import { createOverlayHost, showGlossaryPopover, showToast, dismiss } from './overlay.js';
@@ -48,7 +50,7 @@ import { glossaryFor } from '../data/glossary.js';
 /* Constants                                                                  */
 /* ========================================================================== */
 
-const STYLE_ID = 'resultsview-style';
+const STYLE_ID = 'rv-ftclassic-style';
 
 /** Peak/pool analysis is operator-rate: never more often than this, in ms. */
 const ANALYSIS_MS = 600;
@@ -74,31 +76,34 @@ const UV_SUSPECT_MASK = 0x0001 /* UV_OVERRANGE */ | 0x0002 /* UV_SATURATED */
  * (2–12 and 0–100), which no single axis can satisfy, so %B is given its own fixed 0–100 axis.
  */
 const Y_AXES = [
-  { id: 'L1', label: 'Absorbance', unit: 'mAU', side: 'left', mode: 'auto-sticky', min: 0, max: 100 },
-  { id: 'R1', label: 'Conductivity', unit: 'mS/cm', side: 'right', mode: 'auto-sticky', min: 0, max: 10 },
+  { id: 'L1', label: 'UV', unit: 'mAU', side: 'left', mode: 'auto-sticky', min: 0, max: 100 },
+  { id: 'R1', label: 'COND', unit: 'mS/cm', side: 'right', mode: 'auto-sticky', min: 0, max: 10 },
   { id: 'R2', label: 'pH', unit: '', side: 'right', mode: 'manual', min: 2, max: 12 },
-  { id: 'R3', label: 'Pressure / flow', unit: 'bar', side: 'right', mode: 'auto-sticky', min: 0, max: 2 },
+  { id: 'R3', label: 'P / Q', unit: 'bar', side: 'right', mode: 'auto-sticky', min: 0, max: 2 },
   { id: 'R4', label: '%B', unit: '%', side: 'right', mode: 'manual', min: 0, max: 100 },
 ];
 
-/** The eight channels of §9.3.1, with their log channel and dash signature. */
+/**
+ * The eight channels of §9.3.1 on the FT-CLASSIC pen palette: PV pens solid, the paired dashes kept
+ * as each channel's dash signature so colour is never the sole encoder.
+ */
 const SERIES = [
-  { id: 'uv280', channel: 'UV_280_mAU', yAxis: 'L1', colorVar: '--ch-uv280',
-    dash: [], width: 1.5, label: 'UV 280', unit: 'mAU', visible: true },
-  { id: 'uv260', channel: 'UV_260_mAU', yAxis: 'L1', colorVar: '--ch-uv260',
-    dash: [], width: 2, label: 'UV 260', unit: 'mAU', visible: false },
-  { id: 'uv300', channel: 'UV_300_mAU', yAxis: 'L1', colorVar: '--ch-uv300',
-    dash: [1, 4], width: 1, label: 'UV 300', unit: 'mAU', visible: false },
-  { id: 'cond', channel: 'cond_mS_cm', yAxis: 'R1', colorVar: '--ch-cond',
-    dash: [], width: 1.5, label: 'Conductivity', unit: 'mS/cm', visible: true },
-  { id: 'ph', channel: 'pH', yAxis: 'R2', colorVar: '--ch-ph',
-    dash: [6, 3], width: 1.5, label: 'pH', unit: '', visible: false },
-  { id: 'pctb', channel: 'pctB_column_inlet', yAxis: 'R4', colorVar: '--ch-pctb',
-    dash: [], width: 1.5, label: '%B', unit: '%', visible: true },
-  { id: 'press', channel: 'P1_bar', yAxis: 'R3', colorVar: '--ch-press',
-    dash: [3, 3], width: 1.5, label: 'P1', unit: 'bar', visible: false },
-  { id: 'flow', channel: 'flow_mL_min', yAxis: 'R3', colorVar: '--ch-flow',
-    dash: [8, 2, 2, 2], width: 1.5, label: 'Flow', unit: 'mL/min', visible: false },
+  { id: 'uv280', channel: 'UV_280_mAU', yAxis: 'L1', colorVar: '--pen-uv', hex: '#12FF4B',
+    dash: [], width: 1.5, tag: 'UV-101', label: 'UV 280', unit: 'mAU', visible: true },
+  { id: 'uv260', channel: 'UV_260_mAU', yAxis: 'L1', colorVar: '--pen-temp', hex: '#FFFFFF',
+    dash: [], width: 1.2, tag: 'UV-260', label: 'UV 260', unit: 'mAU', visible: false },
+  { id: 'uv300', channel: 'UV_300_mAU', yAxis: 'L1', colorVar: '--pen-uv', hex: '#12FF4B',
+    dash: [1, 4], width: 1, tag: 'UV-300', label: 'UV 300', unit: 'mAU', visible: false },
+  { id: 'cond', channel: 'cond_mS_cm', yAxis: 'R1', colorVar: '--pen-cond', hex: '#FF9A3C',
+    dash: [], width: 1.5, tag: 'CE-101', label: 'Conductivity', unit: 'mS/cm', visible: true },
+  { id: 'ph', channel: 'pH', yAxis: 'R2', colorVar: '--pen-ph', hex: '#B39DFF',
+    dash: [6, 3], width: 1.5, tag: 'AE-101', label: 'pH', unit: '', visible: false },
+  { id: 'pctb', channel: 'pctB_column_inlet', yAxis: 'R4', colorVar: '--pen-pctb', hex: '#FF6EC7',
+    dash: [], width: 1.5, tag: 'AIC-101', label: '%B', unit: '%', visible: true },
+  { id: 'press', channel: 'P1_bar', yAxis: 'R3', colorVar: '--pen-press', hex: '#FFD400',
+    dash: [3, 3], width: 1.5, tag: 'PT-101', label: 'P1', unit: 'bar', visible: false },
+  { id: 'flow', channel: 'flow_mL_min', yAxis: 'R3', colorVar: '--pen-flow', hex: '#00E5FF',
+    dash: [8, 2, 2, 2], width: 1.5, tag: 'FIC-101', label: 'Flow', unit: 'mL/min', visible: false },
 ];
 
 /** Phase-band tint keys by block type (§9.3.3). */
@@ -109,60 +114,218 @@ const BAND_KIND = {
   STRIP: 'cip', CIP: 'cip', COLUMN_BYPASS: 'neutral', PACKING_TEST: 'wash',
 };
 
+/** X-axis modes, shown as one- or two-character chips (never a word on a button face). */
 const X_MODES = [
-  { id: 'volume', label: 'Volume' },
-  { id: 'time', label: 'Time' },
-  { id: 'cv', label: 'CV' },
+  { id: 'volume', chip: 'V', title: 'X axis: volume, mL' },
+  { id: 'time', chip: 'T', title: 'X axis: time' },
+  { id: 'cv', chip: 'CV', title: 'X axis: column volumes' },
 ];
 
-/** The pool metric cards, in display order. `truth` marks the ones only the simulator can know. */
+/**
+ * The pool metric boxes, in display order. `truth` marks the ones only the simulator can know —
+ * those are drawn in the cyan output colour, never in the lime PV colour.
+ */
 const POOL_CARDS = [
-  { key: 'yield', label: 'Yield', unit: '%', glossary: 'yield', truth: false },
-  { key: 'purityMass', label: 'Purity (mass)', unit: '%', glossary: 'purity', truth: true },
-  { key: 'purityArea', label: 'Purity (area)', unit: '%', glossary: 'purity', truth: true },
-  { key: 'aggregate', label: 'Aggregate', unit: '%', glossary: 'aggregate', truth: true },
-  { key: 'mass', label: 'Product mass', unit: 'mg', glossary: null, truth: false },
-  { key: 'conc', label: 'Concentration', unit: 'g/L', glossary: null, truth: false },
-  { key: 'volume', label: 'Pool volume', unit: '', glossary: null, truth: false },
-  { key: 'cfactor', label: 'Conc. factor', unit: '×', glossary: 'concentration-factor', truth: false },
-  { key: 'cond', label: 'Pool cond.', unit: '', glossary: 'conductivity', truth: false },
-  { key: 'ph', label: 'Pool pH', unit: '', glossary: 'ph', truth: false },
-  { key: 'productivity', label: 'Productivity', unit: 'g/L/h', glossary: 'productivity', truth: false },
-  { key: 'buffer', label: 'Buffer use', unit: 'L/g', glossary: 'buffer-consumption', truth: false },
+  { key: 'yield', tag: 'YIELD', label: 'Yield', unit: '%', glossary: 'yield', truth: false },
+  { key: 'purityMass', tag: 'PUR-M', label: 'Purity (mass)', unit: '%', glossary: 'purity', truth: true },
+  { key: 'purityArea', tag: 'PUR-A', label: 'Purity (area)', unit: '%', glossary: 'purity', truth: true },
+  { key: 'aggregate', tag: 'AGG', label: 'Aggregate', unit: '%', glossary: 'aggregate', truth: true },
+  { key: 'mass', tag: 'MASS', label: 'Product mass', unit: 'mg', glossary: null, truth: false },
+  { key: 'conc', tag: 'CONC', label: 'Concentration', unit: 'g/L', glossary: null, truth: false },
+  { key: 'volume', tag: 'V-POOL', label: 'Pool volume', unit: '', glossary: null, truth: false },
+  { key: 'cfactor', tag: 'C-FACT', label: 'Concentration factor', unit: 'x',
+    glossary: 'concentration-factor', truth: false },
+  { key: 'cond', tag: 'COND', label: 'Pool conductivity', unit: '', glossary: 'conductivity', truth: false },
+  { key: 'ph', tag: 'PH', label: 'Pool pH', unit: '', glossary: 'ph', truth: false },
+  { key: 'productivity', tag: 'PROD', label: 'Productivity', unit: 'g/L/h', glossary: 'productivity',
+    truth: false },
+  { key: 'buffer', tag: 'BUF', label: 'Buffer consumption', unit: 'L/g', glossary: 'buffer-consumption',
+    truth: false },
 ];
 
-/** The few utilities `styles/app.css` does not define. Everything else comes from that file. */
+/** Integration parameter fields: 10 px tag, sunken entry, unit. */
+const PARAM_FIELDS = [
+  { key: 'A_on_mAU', tag: 'A-ON', label: 'Height gate', unit: 'mAU', dec: 2, glossary: 'peak-max' },
+  { key: 'f_on_pct', tag: 'F-ON', label: 'Relative gate', unit: '%', dec: 2, glossary: null },
+  { key: 'p_min_mAU', tag: 'P-MIN', label: 'Minimum prominence', unit: 'mAU', dec: 2, glossary: null },
+  { key: 'w_min_CV', tag: 'W-MIN', label: 'Minimum width', unit: 'CV', dec: 3, glossary: 'cv' },
+  { key: 'W50_CV', tag: 'W50', label: 'Expected peak width at half height', unit: 'CV', dec: 3,
+    glossary: 'peak-width-w50' },
+  { key: 'maxPeaks', tag: 'N-MAX', label: 'Maximum peaks', unit: '-', dec: 0, glossary: null },
+];
+
+/** Icon geometry, authored here as 16×16 stroke paths — no icon font, no network (§0). */
+const ICONS = {
+  fit: ['M2 6V2h4', 'M14 6V2h-4', 'M2 10v4h4', 'M14 10v4h-4'],
+  pool: ['M4 2.5v11', 'M12 2.5v11', 'M4 8h8'],
+  table: ['M2 3h12v10H2z', 'M2 6.4h12', 'M6.2 3v10'],
+  png: ['M2 3h12v10H2z', 'M4 11.5 7 8.5l2 2 2-2 3 3'],
+  csvData: ['M2 3h12v10H2z', 'M2 6.4h12', 'M5.6 6.4v7.6', 'M9.8 6.4v7.6'],
+  csvPeaks: ['M1.5 12.5h13', 'M2.5 11 5 5l2.5 6', 'M8.5 11 11 7.5l2.5 3.5'],
+  csvFrac: ['M3 2.5h2.5v11H3z', 'M6.8 2.5h2.4v11H6.8z', 'M10.6 2.5H13v11h-2.4z'],
+  csvEvents: ['M2.5 4h11', 'M2.5 8h11', 'M2.5 12h7'],
+  json: ['M6 2C4 2 5.2 7 3 8c2.2 1 1 6 3 6', 'M10 2c2 0 .8 5 3 6-2.2 1-1 6-3 6'],
+  auto: ['M2.5 13.5 10 6', 'M11 1.5l1 2.2 2.2 1-2.2 1-1 2.2-1-2.2-2.2-1 2.2-1z'],
+  target: ['M8 1.5v3', 'M8 11.5v3', 'M1.5 8h3', 'M11.5 8h3',
+    'M8 5.4a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2z'],
+  clear: ['M4 4l8 8', 'M12 4l-8 8'],
+  refresh: ['M13.5 8a5.5 5.5 0 1 1-1.7-4', 'M13.5 1.5v3.2h-3.2'],
+  info: ['M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z', 'M8 7v4.5', 'M8 4.4v.9'],
+  caret: { f: ['M4 6h8l-4 5z'] },
+  caretRight: { f: ['M6 4v8l5-4z'] },
+};
+
+/** The scoped FT-CLASSIC sheet. Every value is a token with the palette hex as its fallback. */
 const CSS = `
-.view > .resultsview{height:100%}
-.rv-chartroot{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;min-width:0}
+.rv-root{
+  --screen:#6E6E6E;--face:#C7C3BC;--face-2:#BFBBB4;--face-3:#D2CEC7;
+  --bev-hi:#FFFFFF;--bev-lt:#E6E2DA;--bev-sh:#85817B;--bev-dk:#4A4744;
+  --ink:#101010;--ink-2:#3A3A3A;--ink-off:#7A7A7A;
+  --fld-bg:#0A0F0A;--fld-pv:#12FF4B;--fld-sp:#FFD400;--fld-out:#00E5FF;--fld-alarm:#FF3B30;
+  --fld-stale:#7A8A7A;--fld-eu:#9FB39F;
+  --lamp-off:#4A4744;--lamp-run:#16C60C;--lamp-warn:#FFC000;--lamp-alarm:#E81123;
+  --plot-bg:#000000;--plot-grid:#1F3D1F;--plot-axis:#C7C3BC;
+  --pen-flow:#00E5FF;--pen-pctb:#FF6EC7;--pen-press:#FFD400;--pen-uv:#12FF4B;
+  --pen-cond:#FF9A3C;--pen-ph:#B39DFF;--pen-temp:#FFFFFF;
+  --font-ui:system-ui,'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;
+  --font-num:ui-monospace,Consolas,'Cascadia Mono','Courier New',monospace;
+  position:relative;height:100%;min-height:0;display:flex;flex-direction:column;gap:3px;padding:3px;
+  background:var(--screen);color:var(--ink);font:400 11px/1.2 var(--font-ui);
+  -webkit-font-smoothing:antialiased;
+}
+:root[data-theme="dark"] .rv-root{
+  --screen:#2A2A2A;--face:#4A4744;--face-2:#3E3B38;--face-3:#565250;
+  --bev-hi:#7A7672;--bev-lt:#605C58;--bev-sh:#2E2B29;--bev-dk:#1A1817;
+  --ink:#E8E4DC;--ink-2:#B8B4AC;--ink-off:#8A8680;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme]) .rv-root{
+    --screen:#2A2A2A;--face:#4A4744;--face-2:#3E3B38;--face-3:#565250;
+    --bev-hi:#7A7672;--bev-lt:#605C58;--bev-sh:#2E2B29;--bev-dk:#1A1817;
+    --ink:#E8E4DC;--ink-2:#B8B4AC;--ink-off:#8A8680;
+  }
+}
+.rv-root *{box-sizing:border-box;border-radius:0}
+.rv-rz{box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
+  inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
+.rv-sk{box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),
+  inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt)}
+.rv-panel{background:var(--face);padding:3px;display:flex;flex-direction:column;min-width:0;min-height:0}
+.rv-panel--chart{flex:1 1 58%;min-height:240px}
+.rv-lower{flex:0 0 auto;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr) minmax(0,1fr);
+  gap:3px;min-height:0;max-height:46%}
+@media (max-width:1180px){.rv-lower{grid-template-columns:minmax(0,1fr);max-height:none}}
+.rv-hd{height:20px;flex:0 0 20px;display:flex;align-items:center;gap:4px;padding:0 4px;
+  background:var(--face-2);color:var(--ink);user-select:none;
+  font:700 10px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.04em}
+.rv-hd__sp{flex:1 1 auto}
+.rv-bar{display:flex;align-items:center;gap:2px;height:24px;flex:0 0 24px;padding:0 3px;
+  background:var(--face-2);overflow-x:auto;overflow-y:hidden}
+.rv-sep{width:2px;height:16px;flex:0 0 2px;margin:0 3px;background:var(--face);
+  box-shadow:inset 1px 0 0 var(--bev-dk),inset -1px 0 0 var(--bev-hi)}
+.rv-btn{width:22px;height:20px;flex:0 0 22px;padding:0;border:0;background:var(--face);color:var(--ink);
+  display:inline-flex;align-items:center;justify-content:center;cursor:pointer;
+  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
+    inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
+.rv-btn svg{width:12px;height:12px;display:block;fill:none;stroke:currentColor;stroke-width:1.5;
+  stroke-linecap:square;pointer-events:none}
+.rv-btn--chip{width:auto;min-width:22px;padding:0 5px;font:700 10px/1 var(--font-num);letter-spacing:.06em}
+.rv-btn:active:not(:disabled),.rv-btn[aria-pressed="true"],.rv-btn[aria-checked="true"]{
+  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),
+    inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt)}
+.rv-btn:active:not(:disabled) svg,.rv-btn[aria-pressed="true"] svg{transform:translate(1px,1px)}
+.rv-btn[aria-checked="true"]{color:var(--ink)}
+.rv-btn:disabled{color:var(--ink-off);cursor:not-allowed}
+.rv-btn:focus-visible{outline:2px solid #FFD400;outline-offset:1px}
+.rv-chartroot{flex:1 1 auto;min-height:0;min-width:0;display:flex;flex-direction:column;
+  background:var(--plot-bg)}
 .rv-chartroot.is-pooling,.rv-chartroot.is-pooling *{cursor:cell}
-.rv-stack{display:flex;flex-direction:column;gap:var(--gap);min-height:0;min-width:0}
-.rv-stack > .panel{flex:0 0 auto}
-.rv-details > summary{cursor:pointer;padding:var(--sp-3) 0;font:600 var(--fs-10)/1 var(--font-ui);
-  text-transform:uppercase;letter-spacing:var(--ls-caps);color:var(--text-3)}
-.rv-kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--sp-2) var(--sp-5);margin:0;
-  font:400 var(--fs-11)/1.3 var(--font-ui)}
-.rv-kv dt{color:var(--text-3);white-space:nowrap}
-.rv-kv dd{margin:0;text-align:right;color:var(--text-1);
+.rv-scroll{flex:1 1 auto;min-height:0;overflow:auto}
+.rv-form{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:1px 6px;padding:2px}
+.rv-form[hidden],.rv-row[hidden],.rv-f[hidden]{display:none}
+.rv-f{display:grid;grid-template-columns:62px minmax(0,1fr);align-items:center;gap:4px;height:20px}
+.rv-lb{font:700 10px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.04em;color:var(--ink-2);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:none;border:0;padding:0;text-align:left}
+button.rv-lb{cursor:help;text-decoration:underline dotted 1px;text-underline-offset:2px}
+button.rv-lb:hover{color:var(--ink)}
+.rv-box{display:flex;align-items:center;height:18px;min-width:0;padding:0 2px;background:var(--fld-bg)}
+.rv-box>input{flex:1 1 auto;min-width:0;width:100%;background:transparent;border:0;padding:0;margin:0;
+  text-align:right;color:var(--fld-sp);font:700 12px/1 var(--font-num);
   font-variant-numeric:tabular-nums lining-nums}
-.rv-notes{margin:0;padding-left:var(--sp-6)}
-.rv-notes li{list-style:disc;margin-bottom:var(--sp-3)}
-.rv-flag{margin-left:var(--sp-2);padding:0 4px;border-radius:var(--r-1);
-  font:700 var(--fs-9)/14px var(--font-ui);letter-spacing:.04em}
-.rv-flag[data-kind="warn"]{background:var(--warn-soft);color:var(--warn)}
-.rv-flag[data-kind="alarm"]{background:var(--alarm-soft);color:var(--alarm)}
-.rv-status{min-height:16px;font:400 var(--fs-11)/1.3 var(--font-ui);color:var(--text-3)}
-.rv-status[data-kind="warn"]{color:var(--warn)}
-.rv-tools{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
-.rv-caps{font:400 var(--fs-9)/1 var(--font-ui);text-transform:uppercase;
-  letter-spacing:var(--ls-caps);color:var(--text-3)}
+.rv-box>input:focus{outline:none}
+.rv-box>.rv-v{flex:1 1 auto;min-width:0;text-align:right;color:var(--fld-pv);
+  font:700 12px/1 var(--font-num);font-variant-numeric:tabular-nums lining-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rv-box>.rv-v[data-truth="1"]{color:var(--fld-out)}
+.rv-box>.rv-v[data-q="alarm"]{color:var(--fld-alarm)}
+.rv-box>.rv-v[data-q="stale"]{color:var(--fld-stale)}
+.rv-box>.rv-eu{flex:0 0 auto;padding-left:3px;color:var(--fld-eu);font:400 10px/1 var(--font-num);
+  white-space:nowrap}
+.rv-box:focus-within{outline:2px solid #FFD400;outline-offset:-2px}
+.rv-box--bad{outline:2px solid var(--fld-alarm);outline-offset:-2px}
+.rv-sel{height:18px;min-width:0;width:100%;padding:0 2px;background:var(--face-3);color:var(--ink);
+  border:0;font:400 11px/1 var(--font-ui);cursor:pointer}
+.rv-sel:focus-visible{outline:2px solid #FFD400;outline-offset:-2px}
+.rv-lamp{width:10px;height:10px;flex:0 0 10px;border-radius:50%;border:1px solid #2A2A2A;
+  background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.8) 0 1.2px,rgba(255,255,255,0) 2.2px),
+    var(--lamp-off)}
+.rv-lamp[data-s="run"]{background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.85) 0 1.2px,
+  rgba(255,255,255,0) 2.2px),var(--lamp-run)}
+.rv-lamp[data-s="warn"]{background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.85) 0 1.2px,
+  rgba(255,255,255,0) 2.2px),var(--lamp-warn)}
+.rv-lamp[data-s="alarm"]{background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.85) 0 1.2px,
+  rgba(255,255,255,0) 2.2px),var(--lamp-alarm)}
+.rv-tw{overflow:auto;background:var(--face-3);min-height:0}
+.rv-tbl{width:100%;border-collapse:collapse;font:400 11px/1 var(--font-ui);color:var(--ink)}
+.rv-tbl th{height:20px;padding:0 4px;text-align:left;white-space:nowrap;background:var(--face-2);
+  position:sticky;top:0;z-index:1;font:700 10px/1 var(--font-ui);text-transform:uppercase;
+  letter-spacing:.04em;box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-sh)}
+.rv-tbl td{height:22px;padding:0 4px;white-space:nowrap;border-bottom:1px solid var(--bev-sh);
+  overflow:hidden;text-overflow:ellipsis}
+.rv-tbl td.num,.rv-tbl th.num{text-align:right;font-family:var(--font-num);
+  font-variant-numeric:tabular-nums lining-nums}
+.rv-tbl td.lamp{width:18px;padding:0 0 0 4px}
+.rv-tbl tbody tr:nth-child(2n) td{background:rgba(0,0,0,.045)}
+.rv-tbl tbody tr:hover td{background:var(--face)}
+.rv-tbl tbody tr.is-selected td{background:var(--face-2);box-shadow:inset 2px 0 0 var(--fld-sp)}
+.rv-tbl tbody tr:focus-visible{outline:2px solid #FFD400;outline-offset:-2px}
+.rv-code{margin-left:3px;padding:0 2px;background:var(--face-2);color:var(--ink-2);
+  font:700 9px/13px var(--font-num);letter-spacing:.04em}
+.rv-code[data-kind="alarm"]{background:var(--lamp-alarm);color:#fff}
+.rv-code[data-kind="warn"]{background:var(--lamp-warn);color:#101010}
+.rv-grp{border-top:1px solid var(--bev-sh)}
+.rv-grp__hd{width:100%;height:18px;display:flex;align-items:center;gap:3px;padding:0 3px;border:0;
+  background:var(--face-2);color:var(--ink);cursor:pointer;text-align:left;
+  font:700 10px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.04em}
+.rv-grp__hd svg{width:11px;height:11px;fill:currentColor;stroke:none;flex:0 0 11px}
+.rv-grp.is-closed .rv-grp__b{display:none}
+.rv-row{display:flex;align-items:center;gap:3px;padding:2px 3px;flex-wrap:wrap}
+.rv-status{height:18px;display:flex;align-items:center;padding:0 3px;background:var(--fld-bg);
+  color:var(--fld-pv);font:700 10px/1 var(--font-num);letter-spacing:.04em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rv-status[data-kind="warn"]{color:var(--fld-alarm)}
+.rv-empty{display:flex;align-items:center;gap:4px;padding:3px 4px;background:var(--fld-bg);
+  color:var(--fld-stale);font:700 10px/1 var(--font-num);letter-spacing:.06em}
+.rv-empty[hidden]{display:none}
+.rv-mb{display:grid;grid-template-columns:14px 1fr 62px 62px;align-items:center;gap:4px;height:20px;
+  padding:0 3px;border-bottom:1px solid var(--bev-sh);font:400 11px/1 var(--font-ui)}
+.rv-mb__n{text-align:right;font:700 11px/1 var(--font-num);font-variant-numeric:tabular-nums lining-nums;
+  color:var(--ink)}
+.rv-mb[data-ok="false"] .rv-mb__n{color:#8E1710}
+:root[data-theme="dark"] .rv-mb[data-ok="false"] .rv-mb__n{color:#FF8A80}
+.rv-pen{display:inline-block;width:14px;height:0;border-top-width:2px;border-top-style:solid;
+  flex:0 0 14px;margin-right:2px}
+@media (prefers-reduced-motion:reduce){
+  .rv-btn:active:not(:disabled) svg,.rv-btn[aria-pressed="true"] svg{transform:none}
+}
+@media (prefers-contrast:more){.rv-root{--bev-sh:#5A5652;--ink-2:var(--ink)}}
 `;
 
 /* ========================================================================== */
 /* Small helpers                                                              */
 /* ========================================================================== */
 
-/** Inject the handful of utilities app.css does not carry, once per document. */
+/** Inject the scoped FT-CLASSIC sheet once per document. */
 function injectStyles() {
   if (document.getElementById(STYLE_ID)) return;
   const style = document.createElement('style');
@@ -214,10 +377,9 @@ function boxPass(src, dst, len, hw) {
  * millilitres; a preparative elution band is thousands of millilitres wide and carries real
  * shoulder structure on its top. `detectPeaks` splits a peak at the valley between ADJACENT
  * apexes, so every one of those shoulders becomes its own sliver with a prominence of hundredths
- * of a mAU, and the whole band is then rejected by `p_min` — the 100 mAU product peak of the
- * shipped preset disappears from the table entirely (measured). Smoothing at the SCALE OF THE
- * BAND is what makes it a single apex again. Detection only: every number in the table is still
- * measured by `detectPeaks` on the raw trace `grid.y`.
+ * of a mAU, and the whole band is then rejected by `p_min`. Smoothing at the SCALE OF THE BAND is
+ * what makes it a single apex again. Detection only: every number in the table is still measured
+ * by `detectPeaks` on the raw trace `grid.y`.
  *
  * @param {ArrayLike<number>} src input trace, AU/cm.
  * @param {Float64Array} dst output, AU/cm.
@@ -250,6 +412,41 @@ function nowMs() {
   return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
 }
 
+/** One inline icon. */
+function icon(name) {
+  const spec = ICONS[name];
+  const filled = spec && !Array.isArray(spec);
+  const paths = filled ? spec.f : spec;
+  const svg = hSvg('svg', { viewBox: '0 0 16 16', 'aria-hidden': 'true', focusable: 'false' });
+  for (const d of paths || []) svg.appendChild(hSvg('path', { d }));
+  return svg;
+}
+
+/** A round glassy status lamp. */
+function lamp(state, title) {
+  return h('span', {
+    class: 'rv-lamp', 'data-s': state || 'off', role: 'img',
+    'aria-label': title || state || 'off', title: title || '',
+  });
+}
+
+/** A sunken label box: right-aligned value plus a dimmer EU suffix. */
+function labelBox(unit, ariaLabel, truth) {
+  const v = h('span', { class: 'rv-v' }, '—');
+  if (truth) setAttr(v, 'data-truth', '1');
+  const el = h('div', { class: 'rv-box rv-sk', role: 'group', 'aria-label': ariaLabel || unit || '' },
+    v, unit ? h('span', { class: 'rv-eu' }, unit) : null);
+  return { el, v };
+}
+
+/** A sunken entry box: right-aligned tabular input plus a dimmer EU suffix. */
+function entryBox(unit, ariaLabel) {
+  const input = h('input', { type: 'text', inputmode: 'decimal', autocomplete: 'off',
+    spellcheck: 'false', 'aria-label': ariaLabel });
+  const el = h('div', { class: 'rv-box rv-sk' }, input, unit ? h('span', { class: 'rv-eu' }, unit) : null);
+  return { el, input };
+}
+
 /** One overlay host per document, reused across mounts; `ui/app.js`'s own host wins if exposed. */
 let sharedOverlayHost = null;
 
@@ -257,6 +454,9 @@ let sharedOverlayHost = null;
  * The overlay host to float popovers and toasts from. `ui/app.js` owns one host for the whole
  * application (§6.33) but does not put it on `ctx`, so this mirrors `ui/view_run.js`: prefer a host
  * exposed on `ctx`, otherwise create one shared host for this module.
+ *
+ * @param {object} ctx the §2.4 context
+ * @returns {object} the overlay host
  */
 function overlayHostFor(ctx) {
   if (ctx && ctx.overlayHost) return ctx.overlayHost;
@@ -279,17 +479,6 @@ function xPair(a, b) {
     if (Number.isFinite(x0) && Number.isFinite(x1)) return { x0, x1 };
   }
   return null;
-}
-
-/** A `.numfield` with a unit suffix (§9.4.2 markup). Returns `{ el, input }`. */
-function numfield(value, unit, ariaLabel) {
-  const input = h('input', {
-    class: 'numfield__input', type: 'text', inputmode: 'decimal',
-    value: String(value), 'aria-label': ariaLabel || unit || 'value',
-  });
-  const el = h('div', { class: 'numfield' }, input,
-    unit ? h('span', { class: 'numfield__unit' }, unit) : null);
-  return { el, input };
 }
 
 /* ========================================================================== */
@@ -383,57 +572,115 @@ export function createResultsView(rootEl, ctx) {
     }
   }
 
-  /** Inline aria-live status line plus a toast; the status line is the guaranteed path. */
-  function notify(message, kind) {
+  /**
+   * The status strip carries a SHORT uppercase code; the sentence lives in its tooltip and in the
+   * transient toast, never on the face of the screen.
+   */
+  function notify(code, message, kind) {
     if (dom.status) {
-      setText(dom.status, message);
+      setText(dom.status, code);
+      setAttr(dom.status, 'title', message);
       setAttr(dom.status, 'data-kind', kind === 'warn' || kind === 'blocked' ? 'warn' : 'info');
     }
     try {
       if (overlayHost) showToast(overlayHost, { message, kind: kind || 'info', ms: 4000 });
     } catch (err) {
-      // The aria-live status line above has already carried the message.
+      // The aria-live status strip above has already carried the message.
+    }
+  }
+
+  /** Open a glossary popover anchored at `anchor` (§6.33, §9.6). */
+  function openGlossary(anchor, entry) {
+    try {
+      if (openPopover) dismiss(openPopover);
+      openPopover = showGlossaryPopover(overlayHost, {
+        anchorEl: anchor, entry, placement: 'right',
+        onSeeAlso: (id) => {
+          const next = glossaryFor(id);
+          if (!next) return;
+          if (openPopover) dismiss(openPopover);
+          openPopover = showGlossaryPopover(overlayHost,
+            { anchorEl: anchor, entry: next, placement: 'right' });
+        },
+      });
+    } catch (err) {
+      notify('HELP', `${entry.term}: ${entry.short}`, 'info');
     }
   }
 
   /**
-   * The ⓘ affordance of §9.6. Returns null when the glossary has no entry, which §6.22.1 makes the
-   * condition for rendering no affordance at all. The listener is attached directly to the button
-   * so it is collected with the node — these are rebuilt whenever the metrics grid is rebuilt.
+   * The ⓘ affordance of §9.6, as an icon button. Returns null when the glossary has no entry,
+   * which §6.22.1 makes the condition for rendering no affordance at all.
    */
   function info(glossaryId) {
-    const entry = glossaryFor(glossaryId);
+    const entry = glossaryId ? glossaryFor(glossaryId) : null;
     if (!entry) return null;
     const btn = h('button', {
-      type: 'button', class: 'info-dot', 'aria-label': `About ${entry.term}`, title: entry.term,
-    }, 'i');
+      type: 'button', class: 'rv-btn', 'aria-label': `About ${entry.term}`,
+      title: `${entry.term} — ${entry.short}`,
+    }, icon('info'));
     btn.addEventListener('click', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      try {
-        if (openPopover) dismiss(openPopover);
-        openPopover = showGlossaryPopover(overlayHost, {
-          anchorEl: btn, entry, placement: 'right',
-          onSeeAlso: (id) => {
-            const next = glossaryFor(id);
-            if (!next) return;
-            if (openPopover) dismiss(openPopover);
-            openPopover = showGlossaryPopover(overlayHost,
-              { anchorEl: btn, entry: next, placement: 'right' });
-          },
-        });
-      } catch (err) {
-        notify(`${entry.term}: ${entry.short}`, 'info');
-      }
+      openGlossary(btn, entry);
     });
     return btn;
   }
 
-  /** A labelled control using the shell's `.field` vocabulary. */
-  function field(labelText, control, glossaryId) {
-    return h('label', { class: 'field' },
-      h('span', { class: 'field__label' }, labelText, glossaryId ? info(glossaryId) : null),
-      control);
+  /** The 10 px tag label; with a glossary entry it becomes a help button. */
+  function tagLabel(tag, fullLabel, glossaryId) {
+    const entry = glossaryId ? glossaryFor(glossaryId) : null;
+    if (!entry) return h('span', { class: 'rv-lb', title: fullLabel }, tag);
+    const b = h('button', {
+      type: 'button', class: 'rv-lb', title: `${fullLabel} — ${entry.short}`,
+      'aria-label': `About ${entry.term}`,
+    }, tag);
+    b.addEventListener('click', (ev) => { ev.preventDefault(); openGlossary(b, entry); });
+    return b;
+  }
+
+  /** A beveled icon-only button. */
+  function iconButton(name, label, fn, opts) {
+    const o = opts || {};
+    const b = h('button', {
+      type: 'button', class: 'rv-btn' + (o.chip ? ' rv-btn--chip' : ''), title: label,
+      'aria-label': label,
+    }, name ? icon(name) : null, o.chip ? h('span', {}, o.chip) : null);
+    if (o.pressed !== undefined) setAttr(b, 'aria-pressed', o.pressed ? 'true' : 'false');
+    on(b, 'click', fn);
+    return b;
+  }
+
+  /** One dense `[tag][field]` row. */
+  function frow(tag, label, glossaryId, control) {
+    return h('div', { class: 'rv-f' }, tagLabel(tag, label, glossaryId), control);
+  }
+
+  /** A panel: raised face with a face-2 header strip. */
+  function panel(title, ...children) {
+    const hd = h('div', { class: 'rv-hd rv-rz' }, h('span', {}, title), h('span', { class: 'rv-hd__sp' }));
+    const p = h('section', { class: 'rv-panel rv-rz' }, hd, ...children);
+    p._hd = hd;
+    return p;
+  }
+
+  /** A collapsible group with a caret and one or two uppercase words. */
+  function group(title, closed, ...children) {
+    const car = icon('caret');
+    const body = h('div', { class: 'rv-grp__b' }, ...children);
+    const hd = h('button', { type: 'button', class: 'rv-grp__hd', title,
+      'aria-expanded': closed ? 'false' : 'true' }, car, h('span', {}, title));
+    const sec = h('section', { class: 'rv-grp' + (closed ? ' is-closed' : '') }, hd, body);
+    on(hd, 'click', () => {
+      const nowClosed = !sec.classList.contains('is-closed');
+      cls(sec, 'is-closed', nowClosed);
+      setAttr(hd, 'aria-expanded', nowClosed ? 'false' : 'true');
+      while (car.firstChild) car.removeChild(car.firstChild);
+      const next = icon(nowClosed ? 'caretRight' : 'caret');
+      while (next.firstChild) car.appendChild(next.firstChild);
+    });
+    sec._body = body;
+    return sec;
   }
 
   /* ------------------------------------------------------- unit conversion */
@@ -796,66 +1043,65 @@ export function createResultsView(rootEl, ctx) {
 
   /* ------------------------------------------------------------ chart panel */
 
-  function toolButton(label, title, fn, extraClass) {
-    const b = h('button', {
-      type: 'button', class: `btn btn--sm${extraClass ? ` ${extraClass}` : ''}`, title: title || label,
-    }, label);
-    on(b, 'click', fn);
-    return b;
-  }
-
   function buildChartPanel() {
-    const seg = h('div', { class: 'segmented', role: 'radiogroup', 'aria-label': 'X axis mode' });
     dom.xModeButtons = {};
+    const seg = h('div', { class: 'rv-row', role: 'radiogroup', 'aria-label': 'X axis mode',
+      style: 'padding:0;gap:2px' });
     for (const m of X_MODES) {
       const b = h('button', {
-        type: 'button', class: 'segmented__btn', role: 'radio',
-        'aria-checked': m.id === xMode ? 'true' : 'false', title: `X axis: ${m.label} (X)`,
-      }, m.label);
+        type: 'button', class: 'rv-btn rv-btn--chip', role: 'radio', title: m.title,
+        'aria-label': m.title, 'aria-checked': m.id === xMode ? 'true' : 'false',
+      }, h('span', {}, m.chip));
       on(b, 'click', () => applyXMode(m.id));
       dom.xModeButtons[m.id] = b;
       seg.appendChild(b);
     }
 
-    dom.poolBtn = h('button', {
-      type: 'button', class: 'btn btn--sm', 'aria-pressed': 'false',
-      title: 'Pool mode: drag across the chromatogram to select a pool (Shift+P). ' +
-        'Hold Alt while dragging to ignore fraction boundaries.',
-    }, 'Pool mode');
-    on(dom.poolBtn, 'click', () => setPoolMode(!poolMode));
+    dom.poolBtn = iconButton('pool',
+      'Pool mode: drag across the chromatogram to select a pool. Hold Alt while dragging to ' +
+      'ignore fraction boundaries.', () => setPoolMode(!poolMode), { pressed: false });
 
-    dom.tableBtn = h('button', {
-      type: 'button', class: 'btn btn--sm', 'aria-pressed': 'false',
-      title: 'Accessible table of the chart data, decimated to 1 % of the run',
-    }, 'Data table');
-    on(dom.tableBtn, 'click', () => {
-      dataTableOpen = !dataTableOpen;
-      setAttr(dom.tableBtn, 'aria-pressed', dataTableOpen ? 'true' : 'false');
-      dom.dataTableDetails.open = dataTableOpen;
-      if (dataTableOpen) renderDataTable();
-    });
+    dom.tableBtn = iconButton('table',
+      'Accessible table of the chart data, decimated to 1 % of the run', () => {
+        dataTableOpen = !dataTableOpen;
+        setAttr(dom.tableBtn, 'aria-pressed', dataTableOpen ? 'true' : 'false');
+        cls(dom.dataGroup, 'is-closed', !dataTableOpen);
+        if (dataTableOpen) renderDataTable();
+      }, { pressed: false });
 
     dom.chartRoot = h('div', {
       class: 'rv-chartroot', role: 'img',
-      'aria-label': 'Chromatogram. The Data table button gives the same data as a table.',
+      'aria-label': 'Chromatogram. The data-table button gives the same data as a table.',
     });
 
-    return h('section', { class: 'panel' },
-      h('div', { class: 'panel__header' },
-        h('span', { class: 'panel__title' }, 'Chromatogram'),
-        h('div', { class: 'panel__tools' },
-          seg,
-          dom.poolBtn,
-          toolButton('Fit all', 'Fit the whole run (A)', fitAll),
-          dom.tableBtn,
-          h('span', { class: 'rv-caps' }, 'Export'),
-          toolButton('PNG', 'Chromatogram as PNG, light theme', doExportPNG),
-          toolButton('Data', 'Full 2 Hz data CSV', () => doExport('data')),
-          toolButton('Peaks', 'Peak table CSV', () => doExport('peaks')),
-          toolButton('Fractions', 'Fraction records CSV', () => doExport('fractions')),
-          toolButton('Events', 'Event log CSV', () => doExport('events')),
-          toolButton('JSON', 'Complete run record as JSON', () => doExport('json')))),
-      h('div', { class: 'panel__body panel__body--flush panel__body--fill' }, dom.chartRoot));
+    const legend = h('div', { class: 'rv-row', style: 'padding:0;gap:6px' });
+    for (const s of SERIES) {
+      const pen = h('span', { class: 'rv-pen',
+        style: `border-top-color:var(${s.colorVar},${s.hex});` +
+          (s.dash.length ? 'border-top-style:dashed;' : '') });
+      legend.appendChild(h('span', { class: 'rv-lb', title: `${s.label} (${s.unit || '-'})` },
+        pen, s.tag));
+    }
+
+    const p = panel('CHROMATOGRAM',
+      h('div', { class: 'rv-bar rv-rz' },
+        seg,
+        h('span', { class: 'rv-sep' }),
+        iconButton('fit', 'Fit the whole run on the x axis', fitAll),
+        dom.poolBtn,
+        dom.tableBtn,
+        h('span', { class: 'rv-sep' }),
+        iconButton('png', 'Export the chromatogram as a PNG image', doExportPNG),
+        iconButton('csvData', 'Export the full 2 Hz data as CSV', () => doExport('data')),
+        iconButton('csvPeaks', 'Export the peak table as CSV', () => doExport('peaks')),
+        iconButton('csvFrac', 'Export the fraction records as CSV', () => doExport('fractions')),
+        iconButton('csvEvents', 'Export the event log as CSV', () => doExport('events')),
+        iconButton('json', 'Export the complete run record as JSON', () => doExport('json')),
+        h('span', { class: 'rv-sep' }),
+        legend),
+      dom.chartRoot);
+    p.classList.add('rv-panel--chart');
+    return p;
   }
 
   function applyXMode(mode) {
@@ -878,15 +1124,16 @@ export function createResultsView(rootEl, ctx) {
     poolMode = next;
     setAttr(dom.poolBtn, 'aria-pressed', poolMode ? 'true' : 'false');
     cls(dom.chartRoot, 'is-pooling', poolMode);
-    notify(poolMode
-      ? 'Pool mode: drag across the chromatogram. Hold Alt to ignore fraction boundaries.'
-      : 'Pool mode off.', 'info');
+    notify(poolMode ? 'POOL ARM' : 'POOL OFF',
+      poolMode
+        ? 'Pool mode: drag across the chromatogram. Hold Alt to ignore fraction boundaries.'
+        : 'Pool mode off.', 'info');
   }
 
   function fitAll() {
     if (!chart) return;
     const store = ctx.run.log;
-    if (!store || !store.n) { notify('Nothing logged yet.', 'warn'); return; }
+    if (!store || !store.n) { notify('NO DATA', 'Nothing has been logged yet.', 'warn'); return; }
     const x = logColumn(store, xChannel());
     if (!x.length) return;
     setFollow(chart, false);
@@ -898,99 +1145,119 @@ export function createResultsView(rootEl, ctx) {
 
   /* ------------------------------------------------------------ peak panel */
 
-  const PEAK_COLUMNS = ['#', 'Start (mL)', 'Apex (mL)', 'End (mL)', 'Height (mAU)',
-    'Area (mAU·mL)', 'Area %', 'W50 (mL)', 'As', 'N', 'HETP (cm)', 'Rs prev', 'Est. mass (mg)'];
+  const PEAK_COLUMNS = [
+    { t: '', cls: 'lamp', title: 'Peak quality lamp' },
+    { t: '#', title: 'Peak index and quality codes' },
+    { t: 'START', cls: 'num', title: 'Window start, mL' },
+    { t: 'APEX', cls: 'num', title: 'Apex retention volume, mL' },
+    { t: 'END', cls: 'num', title: 'Window end, mL' },
+    { t: 'HEIGHT', cls: 'num', title: 'Apex height, mAU' },
+    { t: 'AREA', cls: 'num', title: 'Area, mAU·mL' },
+    { t: 'AREA %', cls: 'num', title: 'Share of the total integrated area' },
+    { t: 'W50', cls: 'num', title: 'Width at half height, mL' },
+    { t: 'AS', cls: 'num', title: 'Asymmetry at 10 % height' },
+    { t: 'N', cls: 'num', title: 'Plate number from the half-height width' },
+    { t: 'HETP', cls: 'num', title: 'Plate height, cm' },
+    { t: 'RS', cls: 'num', title: 'Resolution against the previous peak' },
+    { t: 'MASS', cls: 'num', title: 'Estimated product mass, mg' },
+  ];
 
   function buildParams() {
-    const group = h('div', { class: 'fieldgroup' });
+    const grp = h('div', { class: 'rv-form' });
+    dom.paramInputs = {};
 
-    const mk = (label, key, unit, decimals, glossaryId) => {
-      const nf = numfield(params[key], unit, label);
-      on(nf.input, 'change', () => {
-        const v = parseFloat(nf.input.value);
+    for (const f of PARAM_FIELDS) {
+      const box = entryBox(f.unit, `${f.label} in ${f.unit}`);
+      box.input.value = num(params[f.key], f.dec);
+      on(box.input, 'change', () => {
+        const v = parseFloat(box.input.value);
         if (!Number.isFinite(v) || v < 0) {
-          cls(nf.el, 'numfield--invalid', true);
-          setAttr(nf.input, 'aria-invalid', 'true');
-          notify(`${label} must be a non-negative number.`, 'warn');
+          cls(box.el, 'rv-box--bad', true);
+          setAttr(box.input, 'aria-invalid', 'true');
+          notify('RANGE', `${f.label} must be a non-negative number.`, 'warn');
           return;
         }
-        cls(nf.el, 'numfield--invalid', false);
-        setAttr(nf.input, 'aria-invalid', null);
-        params[key] = v;
-        nf.input.value = v.toFixed(decimals);
+        cls(box.el, 'rv-box--bad', false);
+        setAttr(box.input, 'aria-invalid', null);
+        params[f.key] = v;
+        box.input.value = v.toFixed(f.dec);
         lastAnalysisMs = -1e9;
         refreshAnalysis();
       });
-      group.appendChild(field(label, nf.el, glossaryId));
-    };
+      dom.paramInputs[f.key] = box.input;
+      grp.appendChild(frow(f.tag, f.label, f.glossary, box.el));
+    }
 
-    mk('Height gate', 'A_on_mAU', 'mAU', 2, 'peak-max');
-    mk('Relative gate', 'f_on_pct', '%', 2, null);
-    mk('Min prominence', 'p_min_mAU', 'mAU', 2, null);
-    mk('Min width', 'w_min_CV', 'CV', 3, 'cv');
-    mk('Expected W50', 'W50_CV', 'CV', 3, 'peak-width-w50');
-    mk('Max peaks', 'maxPeaks', '–', 0, null);
-
-    const sel = h('select', { class: 'input', 'aria-label': 'Integration baseline' },
-      h('option', { value: 'anchored' }, 'Anchored baseline'),
-      h('option', { value: 'zero' }, 'Zero baseline'));
+    const sel = h('select', { class: 'rv-sel rv-sk', 'aria-label': 'Integration baseline',
+      title: 'Integration baseline' },
+    h('option', { value: 'anchored' }, 'ANCHORED'),
+    h('option', { value: 'zero' }, 'ZERO'));
     sel.value = params.baseline;
     on(sel, 'change', () => {
       params.baseline = sel.value;
       lastAnalysisMs = -1e9;
       refreshAnalysis();
     });
-    group.appendChild(field('Baseline', sel, null));
+    grp.appendChild(frow('BASE', 'Integration baseline', null, sel));
 
-    dom.detectNote = h('div', { class: 'field__hint' }, '');
-    return h('details', { class: 'rv-details' },
-      h('summary', {}, 'Integration parameters'), group, dom.detectNote);
+    const smooth = labelBox('mL', 'Detection smoothing half width');
+    dom.detectNote = smooth.v;
+    dom.detectBox = smooth.el;
+    grp.appendChild(frow('SMOOTH', 'Detection smoothing half width', null, smooth.el));
+
+    return group('INTEGRATION', true, grp);
   }
 
   function buildDataTable() {
     dom.dataTableBody = h('tbody', {});
-    dom.dataTableDetails = h('details', { class: 'rv-details' },
-      h('summary', {}, 'Chart data, 1 % steps'),
-      h('div', { class: 'table-wrap', style: 'max-height:260px' },
-        h('table', { class: 'table table--compact' },
+    dom.dataGroup = group('CHART DATA', true,
+      h('div', { class: 'rv-tw rv-sk', style: 'max-height:220px' },
+        h('table', { class: 'rv-tbl' },
           h('thead', {}, h('tr', {},
-            h('th', { class: 'num', scope: 'col' }, 'V (mL)'),
-            h('th', { class: 'num', scope: 'col' }, 'CV'),
-            h('th', { class: 'num', scope: 'col' }, 't (s)'),
-            ...SERIES.map((s) => h('th', { class: 'num', scope: 'col' },
-              `${s.label}${s.unit ? ` (${s.unit})` : ''}`)))),
+            h('th', { class: 'num', scope: 'col', title: 'Volume, mL' }, 'V'),
+            h('th', { class: 'num', scope: 'col', title: 'Column volumes' }, 'CV'),
+            h('th', { class: 'num', scope: 'col', title: 'Time, s' }, 'T'),
+            ...SERIES.map((s) => h('th', { class: 'num', scope: 'col',
+              title: `${s.label}${s.unit ? ` (${s.unit})` : ''}` }, s.tag)))),
           dom.dataTableBody)));
-    return dom.dataTableDetails;
+    // The group header and the toolbar button drive the same state, so opening the group from its
+    // own caret still fills the table.
+    const groupHead = dom.dataGroup.firstChild;
+    on(groupHead, 'click', () => {
+      dataTableOpen = !dom.dataGroup.classList.contains('is-closed');
+      setAttr(dom.tableBtn, 'aria-pressed', dataTableOpen ? 'true' : 'false');
+      if (dataTableOpen) renderDataTable();
+    });
+    return dom.dataGroup;
   }
 
   function buildPeakPanel() {
-    dom.peakCount = h('span', { class: 'rv-caps' }, '0 peaks');
+    dom.peakCount = h('span', { class: 'rv-v' }, '0');
     dom.peakBody = h('tbody', {});
-    dom.peakEmpty = h('div', { class: 'empty' },
-      h('div', { class: 'empty__title' }, 'No peaks detected'),
-      h('div', {}, 'Run a method, or lower the height gate in the integration parameters.'));
+    dom.peakEmpty = h('div', { class: 'rv-empty' }, lamp('off', 'No peaks detected'), 'NO PEAKS');
 
-    return h('section', { class: 'panel' },
-      h('div', { class: 'panel__header' },
-        h('span', { class: 'panel__title' }, 'Peaks'),
-        info('plate-number'),
-        h('div', { class: 'panel__tools' }, dom.peakCount)),
-      h('div', { class: 'panel__body' },
-        buildParams(),
-        buildDataTable(),
-        h('div', { class: 'table-wrap' },
-          h('table', { class: 'table table--compact' },
-            h('thead', {}, h('tr', {}, ...PEAK_COLUMNS.map((c, i) => h('th',
-              { class: i === 0 ? '' : 'num', scope: 'col' }, c)))),
-            dom.peakBody)),
-        dom.peakEmpty));
+    const p = panel('PEAKS',
+      buildParams(),
+      buildDataTable(),
+      h('div', { class: 'rv-tw rv-sk rv-scroll' },
+        h('table', { class: 'rv-tbl' },
+          h('thead', {}, h('tr', {}, ...PEAK_COLUMNS.map((c) => h('th',
+            { class: c.cls === 'num' ? 'num' : '', scope: 'col', title: c.title }, c.t)))),
+          dom.peakBody)),
+      dom.peakEmpty);
+    const inf = info('plate-number');
+    if (inf) p._hd.appendChild(inf);
+    p._hd.appendChild(h('div', { class: 'rv-box rv-sk', style: 'width:58px', role: 'group',
+      'aria-label': 'Peak count' }, dom.peakCount, h('span', { class: 'rv-eu' }, 'PK')));
+    return p;
   }
 
   function renderPeakTable() {
-    setText(dom.peakCount, `${peakRows.length} peak${peakRows.length === 1 ? '' : 's'}`);
+    setText(dom.peakCount, String(peakRows.length));
     dom.peakEmpty.hidden = peakRows.length > 0;
     if (dom.detectNote) {
-      setText(dom.detectNote, Number.isFinite(detectWidth_mL)
+      setText(dom.detectNote, num(detectWidth_mL, 0));
+      setAttr(dom.detectBox, 'title', Number.isFinite(detectWidth_mL)
         ? `Detection trace smoothed over ±${num(detectWidth_mL, 0)} mL ` +
           `(${num(detectWidth_mL / ctx.config.column.V_mL, 3)} CV), widened automatically until at ` +
           `most ${params.maxPeaks} apexes cleared the height gate. Every number in the table is ` +
@@ -1000,12 +1267,15 @@ export function createResultsView(rootEl, ctx) {
 
     reconcileList(dom.peakBody, peakRows, (r) => r.key,
       (r) => {
+        const lp = lamp('off', `Peak ${r.i + 1} quality`);
         const tr = h('tr', {
           tabindex: '0', role: 'button', 'aria-label': `Peak ${r.i + 1}, zoom to it`,
-        });
-        for (let c = 0; c < PEAK_COLUMNS.length; c++) {
-          tr.appendChild(h('td', c === 0 ? {} : { class: 'num' }, ''));
+          title: `Peak ${r.i + 1} — click to zoom the chart onto it`,
+        }, h('td', { class: 'lamp' }, lp));
+        for (let c = 1; c < PEAK_COLUMNS.length; c++) {
+          tr.appendChild(h('td', PEAK_COLUMNS[c].cls === 'num' ? { class: 'num' } : {}, ''));
         }
+        tr._lamp = lp;
         tr.addEventListener('mouseenter', () => { hoverPeak = r.i; refreshAnnotations(); });
         tr.addEventListener('mouseleave', () => { hoverPeak = -1; refreshAnnotations(); });
         tr.addEventListener('focus', () => { hoverPeak = r.i; refreshAnnotations(); });
@@ -1019,35 +1289,34 @@ export function createResultsView(rootEl, ctx) {
       (tr, r) => {
         const p = r.p;
         const c = tr.children;
-        setText(c[0], `P${r.i + 1}`);
-        if (p.flags.INDETERMINATE) {
-          c[0].appendChild(h('span', { class: 'rv-flag', 'data-kind': 'warn',
-            title: 'A width could not be measured; everything derived from it is unreliable.' }, 'IND'));
+        setText(c[1], `P${r.i + 1}`);
+        const codes = [];
+        if (p.flags.INDETERMINATE) codes.push(['IND', 'warn', 'A width could not be measured; ' +
+          'everything derived from it is unreliable.']);
+        if (p.flags.FLAT_APEX) codes.push(['FLAT', 'warn', 'Flat or saturated apex.']);
+        if (p.flags.SUSPECT) codes.push(['SUS', 'warn',
+          'Truncated at a window edge, or poorly resolved from its neighbour.']);
+        if (r.qualitySuspect) codes.push(['UV?', 'alarm',
+          'The UV signal was SUSPECT or INVALID somewhere in this peak window (§5.3).']);
+        for (const [code, kind, why] of codes) {
+          c[1].appendChild(h('span', { class: 'rv-code', 'data-kind': kind, title: why }, code));
         }
-        if (p.flags.FLAT_APEX) {
-          c[0].appendChild(h('span', { class: 'rv-flag', 'data-kind': 'warn',
-            title: 'Flat or saturated apex.' }, 'FLAT'));
-        }
-        if (p.flags.SUSPECT) {
-          c[0].appendChild(h('span', { class: 'rv-flag', 'data-kind': 'warn',
-            title: 'Truncated at a window edge, or poorly resolved from its neighbour.' }, 'SUS'));
-        }
-        if (r.qualitySuspect) {
-          c[0].appendChild(h('span', { class: 'rv-flag', 'data-kind': 'alarm',
-            title: 'The UV signal was SUSPECT or INVALID somewhere in this peak window (§5.3).' }, 'UV?'));
-        }
-        setText(c[1], num(r.V0, 1));
-        setText(c[2], num(p.VR_mL, 2));
-        setText(c[3], num(r.V1, 1));
-        setText(c[4], num(AUcmToMAU(p.Amax_AUcm), 1));
-        setText(c[5], num(AUcmToMAU(p.area_AUcm_mL), 1));
-        setText(c[6], num(r.areaPct, 1));
-        setText(c[7], num(p.W50_mL, 2));
-        setText(c[8], num(p.As10, 2));
-        setText(c[9], num(p.Nhalf, 0));
-        setText(c[10], num(p.HETP_cm, 4));
-        setText(c[11], num(r.rs, 2));
-        setText(c[12], num(r.mass_mg, 1));
+        setAttr(tr._lamp, 'data-s', codes.length === 0 ? 'run'
+          : (r.qualitySuspect ? 'alarm' : 'warn'));
+        setAttr(tr._lamp, 'title', codes.length === 0 ? 'Integration clean'
+          : codes.map((k) => `${k[0]}: ${k[2]}`).join(' · '));
+        setText(c[2], num(r.V0, 1));
+        setText(c[3], num(p.VR_mL, 2));
+        setText(c[4], num(r.V1, 1));
+        setText(c[5], num(AUcmToMAU(p.Amax_AUcm), 1));
+        setText(c[6], num(AUcmToMAU(p.area_AUcm_mL), 1));
+        setText(c[7], num(r.areaPct, 1));
+        setText(c[8], num(p.W50_mL, 2));
+        setText(c[9], num(p.As10, 2));
+        setText(c[10], num(p.Nhalf, 0));
+        setText(c[11], num(p.HETP_cm, 4));
+        setText(c[12], num(r.rs, 2));
+        setText(c[13], num(r.mass_mg, 1));
         cls(tr, 'is-selected', r.i === selectedPeak);
       });
   }
@@ -1068,34 +1337,54 @@ export function createResultsView(rootEl, ctx) {
   /* ------------------------------------------------------------- pool panel */
 
   function buildPoolPanel() {
-    dom.poolLabel = h('span', {}, 'No pool selected');
-    const poolbar = h('div', { class: 'poolbar' }, dom.poolLabel);
+    const ports = labelBox('', 'Fraction ports in the pool');
+    const vpool = labelBox('mL', 'Pool volume');
+    const v0 = labelBox('mL', 'Pool window start');
+    const v1 = labelBox('mL', 'Pool window end');
+    dom.poolPorts = ports.v;
+    dom.poolV = vpool.v;
+    dom.poolV0 = v0.v;
+    dom.poolV1 = v1.v;
+    const head = h('div', { class: 'rv-form' },
+      frow('PORTS', 'Fraction ports covered by the pool', null, ports.el),
+      frow('V-POOL', 'Pool volume', null, vpool.el),
+      frow('V-START', 'Pool window start', null, v0.el),
+      frow('V-END', 'Pool window end', null, v1.el));
 
-    const typeSel = h('select', { class: 'input', 'aria-label': 'Auto-pool criterion' },
-      h('option', { value: 'APEX_PCT' }, '% of apex'),
-      h('option', { value: 'THRESHOLD' }, 'Signal threshold'),
-      h('option', { value: 'PURITY' }, 'Purity constraint'));
+    const typeSel = h('select', { class: 'rv-sel rv-sk', 'aria-label': 'Auto-pool criterion',
+      title: 'Auto-pool criterion' },
+    h('option', { value: 'APEX_PCT' }, '% OF APEX'),
+    h('option', { value: 'THRESHOLD' }, 'THRESHOLD'),
+    h('option', { value: 'PURITY' }, 'PURITY'));
     typeSel.value = autoPoolCriterion.type;
     on(typeSel, 'change', () => { autoPoolCriterion.type = typeSel.value; });
 
-    const valueField = numfield(autoPoolCriterion.value, '', 'Auto-pool value');
+    const valueField = entryBox('', 'Auto-pool criterion value');
+    valueField.input.value = String(autoPoolCriterion.value);
     on(valueField.input, 'change', () => {
       const v = parseFloat(valueField.input.value);
-      if (Number.isFinite(v)) autoPoolCriterion.value = v;
-      else notify('The auto-pool value must be a number.', 'warn');
+      if (Number.isFinite(v)) {
+        autoPoolCriterion.value = v;
+        cls(valueField.el, 'rv-box--bad', false);
+      } else {
+        cls(valueField.el, 'rv-box--bad', true);
+        notify('RANGE', 'The auto-pool value must be a number.', 'warn');
+      }
     });
 
-    const sigSel = h('select', { class: 'input', 'aria-label': 'Auto-pool signal' },
-      h('option', { value: 'UV_280' }, 'UV 280'),
-      h('option', { value: 'UV_260' }, 'UV 260'),
-      h('option', { value: 'COND' }, 'Conductivity'),
-      h('option', { value: 'PH' }, 'pH'));
+    const sigSel = h('select', { class: 'rv-sel rv-sk', 'aria-label': 'Auto-pool signal',
+      title: 'Auto-pool signal' },
+    h('option', { value: 'UV_280' }, 'UV 280'),
+    h('option', { value: 'UV_260' }, 'UV 260'),
+    h('option', { value: 'COND' }, 'COND'),
+    h('option', { value: 'PH' }, 'PH'));
     sigSel.value = autoPoolCriterion.signal;
     on(sigSel, 'change', () => { autoPoolCriterion.signal = sigSel.value; });
 
-    const modeSel = h('select', { class: 'input', 'aria-label': 'Metrics data source' },
-      h('option', { value: 'truth' }, 'Truth (simulator)'),
-      h('option', { value: 'detector' }, 'Detector only'));
+    const modeSel = h('select', { class: 'rv-sel rv-sk', 'aria-label': 'Metrics data source',
+      title: 'Metrics data source: simulator truth, or the detector trace alone' },
+    h('option', { value: 'truth' }, 'TRUTH'),
+    h('option', { value: 'detector' }, 'DETECTOR'));
     modeSel.value = poolMetricsMode;
     on(modeSel, 'change', () => {
       poolMetricsMode = modeSel.value;
@@ -1103,79 +1392,64 @@ export function createResultsView(rootEl, ctx) {
       else renderPool();
     });
 
-    const autoBtn = h('button', { type: 'button', class: 'btn btn--primary btn--sm' }, 'Auto-pool');
-    on(autoBtn, 'click', () => {
-      if (!grid || grid.n < 4) { notify('There is no data to pool yet.', 'warn'); return; }
-      const r = pooling.rePool(ctx.config, ctx.run, grid,
-        { type: 'CRITERION', criterion: autoPoolCriterion, mode: poolMetricsMode });
-      setPool(r.i0, r.i1);
-      notify('Auto-pool applied.', 'info');
-    });
+    const criteria = h('div', { class: 'rv-form' },
+      frow('CRIT', 'Auto-pool criterion', null, typeSel),
+      frow('VALUE', 'Auto-pool criterion value', null, valueField.el),
+      frow('SIGNAL', 'Auto-pool signal', null, sigSel),
+      frow('SOURCE', 'Metrics data source', 'purity', modeSel));
 
-    const peakBtn = h('button', { type: 'button', class: 'btn btn--sm' }, 'Pool selected peak');
-    on(peakBtn, 'click', () => {
-      if (selectedPeak < 0 || selectedPeak >= peakList.length) {
-        notify('Select a peak in the table first.', 'warn');
-        return;
-      }
-      const p = peakList[selectedPeak];
-      setPool(p.iStart, p.iEnd);
-    });
+    const tools = h('div', { class: 'rv-bar rv-rz' },
+      iconButton('auto', 'Auto-pool with the criterion above', () => {
+        if (!grid || grid.n < 4) { notify('NO DATA', 'There is no data to pool yet.', 'warn'); return; }
+        const r = pooling.rePool(ctx.config, ctx.run, grid,
+          { type: 'CRITERION', criterion: autoPoolCriterion, mode: poolMetricsMode });
+        setPool(r.i0, r.i1);
+        notify('POOL SET', 'Auto-pool applied.', 'info');
+      }),
+      iconButton('target', 'Pool the peak selected in the peak table', () => {
+        if (selectedPeak < 0 || selectedPeak >= peakList.length) {
+          notify('NO PEAK', 'Select a peak in the table first.', 'warn');
+          return;
+        }
+        const p = peakList[selectedPeak];
+        setPool(p.iStart, p.iEnd);
+      }),
+      iconButton('clear', 'Clear the pool selection', clearPool));
 
-    const clearBtn = h('button', { type: 'button', class: 'btn btn--ghost btn--sm' }, 'Clear');
-    on(clearBtn, 'click', clearPool);
-
-    dom.poolMetrics = h('div', { class: 'metrics' });
+    dom.poolMetrics = h('div', { class: 'rv-form' });
     dom.poolValues = {};
-    dom.poolCards = {};
     for (const card of POOL_CARDS) {
-      const value = h('span', {}, '—');
-      const el = h('div', { class: 'metric' },
-        h('div', { class: 'metric__label' }, card.label, info(card.glossary)),
-        h('div', { class: 'metric__value' }, value,
-          card.unit ? h('span', { class: 'metric__unit' }, ` ${card.unit}`) : null));
-      dom.poolValues[card.key] = value;
-      dom.poolCards[card.key] = el;
-      dom.poolMetrics.appendChild(el);
+      const box = labelBox(card.unit, `${card.label}${card.unit ? ` in ${card.unit}` : ''}`, card.truth);
+      setAttr(box.el, 'title', card.truth
+        ? `${card.label} — simulator ground truth; a single UV trace could not tell you this.`
+        : card.label);
+      dom.poolValues[card.key] = box.v;
+      dom.poolMetrics.appendChild(frow(card.tag, card.label, card.glossary, box.el));
     }
 
-    dom.poolHint = h('div', { class: 'metric__truthnote' },
-      'Purity, aggregate content and per-species mass come from the simulator\'s ground truth — ' +
-      'you would not know this in the lab from a single UV trace.');
-    dom.poolEmpty = h('div', { class: 'empty' },
-      h('div', { class: 'empty__title' }, 'No pool selected'),
-      h('div', {}, 'Turn on Pool mode and drag across the chromatogram, pool the selected peak, ' +
-        'or use Auto-pool.'));
+    dom.poolEmpty = h('div', { class: 'rv-empty' }, lamp('off', 'No pool selected'), 'NO POOL');
+    dom.status = h('div', { class: 'rv-status rv-sk', role: 'status', 'aria-live': 'polite' }, '');
 
-    dom.status = h('div', { class: 'rv-status', role: 'status', 'aria-live': 'polite' }, '');
-
-    return h('section', { class: 'panel' },
-      h('div', { class: 'panel__header' },
-        h('span', { class: 'panel__title' }, 'Pool'), info('pool')),
-      h('div', { class: 'panel__body' },
-        poolbar,
-        h('div', { class: 'fieldgroup' },
-          field('Criterion', typeSel, null),
-          field('Value', valueField.el, null),
-          field('Signal', sigSel, null),
-          field('Metrics from', modeSel, 'purity')),
-        h('div', { class: 'btn-row' }, autoBtn, peakBtn, clearBtn),
-        dom.poolEmpty,
-        dom.poolMetrics,
-        dom.poolHint,
-        dom.status));
+    const p = panel('POOL', head, criteria, tools, dom.poolEmpty,
+      h('div', { class: 'rv-scroll' }, dom.poolMetrics), dom.status);
+    const inf = info('pool');
+    if (inf) p._hd.appendChild(inf);
+    return p;
   }
 
   function renderPool() {
     const has = !!pool;
     dom.poolEmpty.hidden = has;
     dom.poolMetrics.hidden = !has;
-    dom.poolHint.hidden = !has || poolMetricsMode !== 'truth';
     for (const card of POOL_CARDS) {
-      cls(dom.poolCards[card.key], 'metric--truth', card.truth && poolMetricsMode === 'truth');
+      setAttr(dom.poolValues[card.key], 'data-truth',
+        card.truth && poolMetricsMode === 'truth' ? '1' : null);
     }
     if (!has) {
-      setText(dom.poolLabel, 'No pool selected');
+      setText(dom.poolPorts, '—');
+      setText(dom.poolV, '—');
+      setText(dom.poolV0, '—');
+      setText(dom.poolV1, '—');
       return;
     }
     const m = pool.metrics;
@@ -1188,9 +1462,11 @@ export function createResultsView(rootEl, ctx) {
       ? (inPool.length === 1
         ? inPool[0].port
         : `${inPool[0].port}–${inPool[inPool.length - 1].port}`)
-      : 'free window';
-    setText(dom.poolLabel,
-      `Pool: ${ports} · ${num(m.V_pool_mL, 1)} mL · ${num(V0, 1)}–${num(V1, 1)} mL`);
+      : 'FREE';
+    setText(dom.poolPorts, ports);
+    setText(dom.poolV, num(m.V_pool_mL, 1));
+    setText(dom.poolV0, num(V0, 1));
+    setText(dom.poolV1, num(V1, 1));
 
     const iProd = config.idxById[config.load.productSpeciesId];
     const hasProd = iProd !== undefined && iProd >= 0;
@@ -1214,30 +1490,44 @@ export function createResultsView(rootEl, ctx) {
   /* ------------------------------------------------------- audit / packing */
 
   function buildAuditPanel() {
-    const refresh = h('button', { type: 'button', class: 'btn btn--sm' }, 'Refresh audit');
-    on(refresh, 'click', () => refreshAudit(true));
-
-    dom.auditState = h('span', { class: 'pill', 'data-variant': 'neutral' }, 'not run');
+    dom.auditLamp = lamp('off', 'Mass balance not computed');
+    dom.auditState = h('span', { class: 'rv-v' }, '—');
     dom.auditRows = h('div', {});
-    dom.auditNote = h('div', { class: 'field__hint' },
-      'Not computed yet — the audit flushes the column batch first, so it runs on demand.');
+    dom.packingBody = h('div', {});
+    dom.outcomeBody = h('div', { class: 'rv-form' });
+    dom.packingEmpty = h('div', { class: 'rv-empty' },
+      lamp('off', 'No packing test has run'), 'NO PACKING TEST');
+    dom.outcomeEmpty = h('div', { class: 'rv-empty' }, lamp('off', 'No run logged yet'), 'NO RUN');
 
-    dom.packingBody = h('div', { class: 'panel__body' });
-    dom.outcomeBody = h('div', { class: 'panel__body' });
+    // The closure grid is a data grid, so its two numeric columns carry their tag and unit in a
+    // header strip — the same contract a label box keeps, paid once for the whole column.
+    const auditHead = h('div', { class: 'rv-mb' },
+      h('span', {}),
+      h('span', { class: 'rv-lb', title: 'Species id' }, 'ID'),
+      h('span', { class: 'rv-lb', style: 'text-align:right', title: 'Total presented, µmol' },
+        'IN µmol'),
+      h('span', { class: 'rv-lb', style: 'text-align:right',
+        title: 'xi = (in - out - column - defect) / in, read at the column plane' }, 'XI'));
 
-    return h('div', { class: 'rv-stack' },
-      h('section', { class: 'panel' },
-        h('div', { class: 'panel__header' },
-          h('span', { class: 'panel__title' }, 'Mass balance'), info('mass-balance'),
-          h('div', { class: 'panel__tools' }, dom.auditState, refresh)),
-        h('div', { class: 'panel__body' }, dom.auditRows, dom.auditNote)),
-      h('section', { class: 'panel' },
-        h('div', { class: 'panel__header' },
-          h('span', { class: 'panel__title' }, 'Packing test'), info('packing-test')),
-        dom.packingBody),
-      h('section', { class: 'panel' },
-        h('div', { class: 'panel__header' }, h('span', { class: 'panel__title' }, 'What happened')),
-        dom.outcomeBody));
+    const auditPanel = panel('MASS BALANCE',
+      h('div', { class: 'rv-scroll' }, auditHead, dom.auditRows));
+    auditPanel._hd.appendChild(dom.auditLamp);
+    auditPanel._hd.appendChild(h('div', { class: 'rv-box rv-sk', style: 'width:74px', role: 'group',
+      'aria-label': 'Mass balance state' }, dom.auditState));
+    const inf = info('mass-balance');
+    if (inf) auditPanel._hd.appendChild(inf);
+    auditPanel._hd.appendChild(iconButton('refresh',
+      'Recompute the mass balance; the column batch is flushed first', () => refreshAudit(true)));
+    dom.auditPanel = auditPanel;
+
+    const packPanel = panel('PACKING TEST', dom.packingEmpty, dom.packingBody);
+    const infoPack = info('packing-test');
+    if (infoPack) packPanel._hd.appendChild(infoPack);
+
+    const outPanel = panel('OUTCOME', dom.outcomeEmpty, dom.outcomeBody);
+
+    return h('div', { class: 'rv-panel', style: 'gap:3px;background:transparent;box-shadow:none;padding:0' },
+      auditPanel, packPanel, outPanel);
   }
 
   function renderAudit() {
@@ -1257,55 +1547,70 @@ export function createResultsView(rootEl, ctx) {
       });
     }
     reconcileList(dom.auditRows, rows, (r) => r.key,
-      () => h('div', { class: 'massbalance__row' },
-        h('span', {}, ''), h('span', { class: 'num' }, ''), h('span', { class: 'num' }, '')),
+      () => {
+        const lp = lamp('off', 'species closure');
+        const el = h('div', { class: 'rv-mb' }, lp, h('span', { class: 'rv-lb' }, ''),
+          h('span', { class: 'rv-mb__n' }, ''), h('span', { class: 'rv-mb__n' }, ''));
+        el._lamp = lp;
+        return el;
+      },
       (el, r) => {
         const ok = Number.isFinite(r.xi) && Math.abs(r.xi) < XI_TOL;
         setAttr(el, 'data-ok', ok ? 'true' : 'false');
+        setAttr(el._lamp, 'data-s', ok ? 'run' : 'alarm');
         setAttr(el, 'title',
-          `in ${num(r.inU, 3)} · out ${num(r.outU, 3)} · column ${num(r.colU, 3)} · ` +
-          `defect ${num(r.defU, 6)} · pooled ${num(r.poolU, 3)} µmol`);
-        setText(el.children[0], r.id);
-        setText(el.children[1], num(r.inU, 2));
-        setText(el.children[2], Number.isFinite(r.xi) ? r.xi.toExponential(2) : '—');
+          `${r.id} · in ${num(r.inU, 3)} · out ${num(r.outU, 3)} · column ${num(r.colU, 3)} · ` +
+          `defect ${num(r.defU, 6)} · pooled ${num(r.poolU, 3)} µmol · ` +
+          `xi = (in - out - column - defect) / in, read at the column plane`);
+        setText(el.children[1], r.id);
+        setText(el.children[2], num(r.inU, 2));
+        setText(el.children[3], Number.isFinite(r.xi) ? r.xi.toExponential(2) : '—');
       });
 
     const ok = audit.ok === true;
-    setText(dom.auditState, !audit.flushed ? 'unflushed' : (ok ? 'closed' : 'open'));
-    setAttr(dom.auditState, 'data-variant', !audit.flushed ? 'warn' : (ok ? 'ok' : 'alarm'));
-    setText(dom.auditNote, audit.flushed
+    setText(dom.auditState, !audit.flushed ? 'UNFLUSHED' : (ok ? 'CLOSED' : 'OPEN'));
+    setAttr(dom.auditLamp, 'data-s', !audit.flushed ? 'warn' : (ok ? 'run' : 'alarm'));
+    setAttr(dom.auditLamp, 'title', audit.flushed
       ? (ok
         ? 'Every species closes to better than 1e-6 relative. ' +
-          'ξ = (in − out − column − defect) / in, read at the column plane. Hover a row for the terms.'
+          'xi = (in - out - column - defect) / in, read at the column plane.'
         : 'At least one species is outside 1e-6. The column-plane terms are the audit; the ' +
           'skid-plane totals lead and lag by up to one column batch and are not used here.')
-      : 'The column batch was not flushed, so the audit is not valid. Press Refresh audit.');
+      : 'The column batch was not flushed, so the audit is not valid. Press the refresh button.');
   }
 
   function renderPacking() {
     while (dom.packingBody.firstChild) dom.packingBody.removeChild(dom.packingBody.firstChild);
-    if (packing.length === 0) {
-      dom.packingBody.appendChild(h('div', { class: 'empty' },
-        h('div', { class: 'empty__title' }, 'No packing test has run'),
-        h('div', {}, 'A PACKING_TEST block injects a tracer; this panel then reports N with and ' +
-          'without the extra-column correction.')));
-      return;
-    }
+    dom.packingEmpty.hidden = packing.length > 0;
+    if (packing.length === 0) return;
     for (const entry of packing) {
       const r = entry.result;
-      dom.packingBody.appendChild(h('div', {},
-        h('div', { class: 'field__label' }, entry.blockId,
-          h('span', { class: 'verdict', 'data-verdict': r.verdict }, r.verdict)),
-        h('dl', { class: 'rv-kv' },
-          h('dt', {}, 'V_R'), h('dd', {}, `${num(r.VR_mL, 2)} mL`),
-          h('dt', {}, 'W50'), h('dd', {}, `${num(r.W50_mL, 3)} mL`),
-          h('dt', {}, 'N apparent'), h('dd', {}, num(r.N_apparent, 0)),
-          h('dt', {}, 'N corrected'), h('dd', {}, num(r.N_corrected, 0)),
-          h('dt', {}, 'HETP corrected'), h('dd', {}, `${num(r.HETP_corrected_cm, 4)} cm`),
-          h('dt', {}, 'Plates / m'), h('dd', {}, num(r.N_per_m, 0)),
-          h('dt', {}, 'σ measured'), h('dd', {}, `${num(r.sigma_measured_mL, 4)} mL`),
-          h('dt', {}, 'σ extra-column'), h('dd', {}, `${num(r.sigma_extracolumn_mL, 4)} mL`),
-          h('dt', {}, 'As (10 %)'), h('dd', {}, num(r.As10, 2)))));
+      const verdictLamp = lamp(r.verdict === 'GOOD' || r.verdict === 'PASS' ? 'run'
+        : (r.verdict === 'FAIL' || r.verdict === 'POOR' ? 'alarm' : 'warn'),
+      `${entry.blockId} verdict: ${r.verdict}`);
+      const head = h('div', { class: 'rv-row' }, verdictLamp,
+        h('span', { class: 'rv-lb', title: `Packing test block ${entry.blockId}` }, entry.blockId),
+        h('div', { class: 'rv-box rv-sk', style: 'width:76px', role: 'group',
+          'aria-label': `${entry.blockId} verdict` },
+        h('span', { class: 'rv-v' }, r.verdict)));
+      const gridEl = h('div', { class: 'rv-form' });
+      const rows = [
+        ['V-R', num(r.VR_mL, 2), 'mL', 'Tracer retention volume'],
+        ['W50', num(r.W50_mL, 3), 'mL', 'Width at half height'],
+        ['N-APP', num(r.N_apparent, 0), '-', 'Apparent plate number'],
+        ['N-COR', num(r.N_corrected, 0), '-', 'Plate number corrected for extra-column dispersion'],
+        ['HETP', num(r.HETP_corrected_cm, 4), 'cm', 'Corrected plate height'],
+        ['N/M', num(r.N_per_m, 0), '1/m', 'Corrected plates per metre'],
+        ['SIG-M', num(r.sigma_measured_mL, 4), 'mL', 'Measured peak sigma'],
+        ['SIG-EC', num(r.sigma_extracolumn_mL, 4), 'mL', 'Extra-column sigma'],
+        ['AS-10', num(r.As10, 2), '-', 'Asymmetry at 10 % height'],
+      ];
+      for (const [tag, value, unit, title] of rows) {
+        const box = labelBox(unit, title);
+        setText(box.v, value);
+        gridEl.appendChild(frow(tag, title, null, box.el));
+      }
+      dom.packingBody.appendChild(h('div', {}, head, gridEl));
     }
   }
 
@@ -1322,15 +1627,10 @@ export function createResultsView(rootEl, ctx) {
 
   function renderOutcome() {
     const { config, run } = ctx;
-    while (dom.outcomeBody.firstChild) dom.outcomeBody.removeChild(dom.outcomeBody.firstChild);
-
-    if (!run.log || run.log.n === 0) {
-      dom.outcomeBody.appendChild(h('div', { class: 'empty' },
-        h('div', { class: 'empty__title' }, 'No run yet'),
-        h('div', {}, 'Load a scenario or press Start. Replay and scrubbing are deferred, so this ' +
-          'tab is the post-run surface.')));
-      return;
-    }
+    const hasRun = !!(run.log && run.log.n);
+    dom.outcomeEmpty.hidden = hasRun;
+    dom.outcomeBody.hidden = !hasRun;
+    if (!hasRun) return;
 
     const alarms = { WARN: 0, ALARM: 0, CRITICAL: 0, FAULT: 0 };
     for (const e of run.events || []) {
@@ -1342,36 +1642,44 @@ export function createResultsView(rootEl, ctx) {
       if (!Number.isFinite(worstRs) || rs < worstRs) worstRs = rs;
     }
     const m = pool ? pool.metrics : null;
-
-    const body = h('div', { class: 'whathappened' },
-      h('dl', { class: 'rv-kv' },
-        h('dt', {}, 'State'), h('dd', {}, run.state),
-        h('dt', {}, 'Duration'), h('dd', {}, fmtTime(run.t_s)),
-        h('dt', {}, 'Total volume'),
-        h('dd', {}, `${num(run.V_tot_mL, 1)} mL · ${num(run.V_tot_mL / config.column.V_mL, 2)} CV`),
-        h('dt', {}, 'Peaks'), h('dd', {}, String(peakList.length)),
-        h('dt', {}, 'Worst Rs'), h('dd', {}, num(worstRs, 2)),
-        h('dt', {}, 'Fractions'),
-        h('dd', {}, String((run.frac && run.frac.records && run.frac.records.length) || 0)),
-        h('dt', {}, 'Pool yield'), h('dd', {}, m ? `${num(m.yield_frac * 100, 1)} %` : '—'),
-        h('dt', {}, 'Pool purity'), h('dd', {}, m ? `${num(m.purityMass_frac * 100, 2)} %` : '—'),
-        h('dt', {}, 'Alarms'),
-        h('dd', {}, `${alarms.WARN} W · ${alarms.ALARM} A · ${alarms.CRITICAL} C · ` +
-          `${alarms.FAULT} F`)));
-    dom.outcomeBody.appendChild(body);
-
     const sc = activeScenario();
-    if (!sc) {
-      body.appendChild(h('div', { class: 'field__hint' },
-        'No scenario is loaded — this is a free run against the loaded method.'));
-      return;
-    }
-    body.appendChild(h('div', { class: 'whathappened__note' },
-      h('strong', {}, sc.name), sc.expectedOutcome ? ` — ${sc.expectedOutcome}` : ''));
-    if (Array.isArray(sc.teachingNotes) && sc.teachingNotes.length) {
-      body.appendChild(h('ul', { class: 'rv-notes' },
-        ...sc.teachingNotes.map((t) => h('li', {}, t))));
-    }
+    const notes = sc && Array.isArray(sc.teachingNotes) ? sc.teachingNotes.join(' · ') : '';
+
+    // Every number carries an engineering unit, counts included: `PK`, `FR` and `EV` are the EU of
+    // a count exactly as `mL` is the EU of a volume. Only the two rows whose value is a NAME —
+    // the run state and the scenario id — have no unit, because they are not measurements.
+    const rows = [
+      ['STATE', String(run.state), '', 'Run state'],
+      ['DUR', fmtTime(run.t_s), '', 'Run duration'],
+      ['V-TOT', num(run.V_tot_mL, 1), 'mL', 'Total volume delivered'],
+      ['CV', num(run.V_tot_mL / config.column.V_mL, 2), 'CV', 'Total volume in column volumes'],
+      ['PEAKS', String(peakList.length), 'PK', 'Detected peaks'],
+      ['RS-MIN', num(worstRs, 2), '-', 'Worst adjacent-pair resolution'],
+      ['FRACS', String((run.frac && run.frac.records && run.frac.records.length) || 0), 'FR',
+        'Fractions collected'],
+      ['YIELD', m ? num(m.yield_frac * 100, 1) : '—', '%', 'Pool yield'],
+      ['PURITY', m ? num(m.purityMass_frac * 100, 2) : '—', '%', 'Pool purity by mass'],
+      ['ALM-W', String(alarms.WARN), 'EV', 'WARN alarms raised'],
+      ['ALM-A', String(alarms.ALARM), 'EV', 'ALARM alarms raised'],
+      ['ALM-C', String(alarms.CRITICAL), 'EV', 'CRITICAL alarms raised'],
+      ['ALM-F', String(alarms.FAULT), 'EV', 'FAULT alarms raised'],
+      ['SCEN', sc ? sc.id : 'NONE', '', sc
+        ? `${sc.name}${sc.expectedOutcome ? ` — ${sc.expectedOutcome}` : ''}` +
+          `${notes ? ` · ${notes}` : ''}`
+        : 'No scenario is loaded — this is a free run against the loaded method.'],
+    ];
+    reconcileList(dom.outcomeBody, rows.map((r) => ({ key: r[0], r })), (o) => o.key,
+      (o) => {
+        const box = labelBox(o.r[2], o.r[3]);
+        const row = frow(o.r[0], o.r[3], null, box.el);
+        row._v = box.v;
+        row._box = box.el;
+        return row;
+      },
+      (row, o) => {
+        setText(row._v, o.r[1]);
+        setAttr(row._box, 'title', o.r[3]);
+      });
   }
 
   /* -------------------------------------------------------- accessible table */
@@ -1462,9 +1770,9 @@ export function createResultsView(rootEl, ctx) {
         });
         downloadText(`${runId()}.json`, JSON.stringify(obj, null, 2), 'application/json');
       }
-      notify(`Exported ${kind}.`, 'info');
+      notify('EXPORT OK', `Exported ${kind}.`, 'info');
     } catch (err) {
-      notify(`Export failed: ${(err && err.message) || String(err)}`, 'warn');
+      notify('EXPORT ERR', `Export failed: ${(err && err.message) || String(err)}`, 'warn');
     }
   }
 
@@ -1481,15 +1789,15 @@ export function createResultsView(rootEl, ctx) {
         footer,
       });
     } catch (err) {
-      notify(`PNG export failed: ${(err && err.message) || String(err)}`, 'warn');
+      notify('EXPORT ERR', `PNG export failed: ${(err && err.message) || String(err)}`, 'warn');
       return;
     }
     Promise.resolve(promise).then((blob) => {
       if (!blob) throw new Error('the chart returned no image');
       downloadBlob(`${runId()}_chromatogram.png`, blob);
-      notify('Chromatogram exported as PNG.', 'info');
+      notify('EXPORT OK', 'Chromatogram exported as PNG.', 'info');
     }).catch((err) => {
-      notify(`PNG export failed: ${(err && err.message) || String(err)}`, 'warn');
+      notify('EXPORT ERR', `PNG export failed: ${(err && err.message) || String(err)}`, 'warn');
     });
   }
 
@@ -1566,14 +1874,14 @@ export function createResultsView(rootEl, ctx) {
 
   /* ------------------------------------------------------------ build tree */
 
-  const el = h('div', { class: 'resultsview' });
+  const el = h('div', { class: 'rv-root' });
   const chartPanel = buildChartPanel();
   const peakPanel = buildPeakPanel();
   const poolPanel = buildPoolPanel();
   const auditPanel = buildAuditPanel();
 
   el.appendChild(chartPanel);
-  el.appendChild(h('div', { class: 'resultsview__lower' }, peakPanel, poolPanel, auditPanel));
+  el.appendChild(h('div', { class: 'rv-lower' }, peakPanel, poolPanel, auditPanel));
 
   /* --------------------------------------------------------------- lifecycle */
 
@@ -1592,8 +1900,8 @@ export function createResultsView(rootEl, ctx) {
     packingLogged.clear();
     selectedPeak = -1;
     hoverPeak = -1;
-    setText(dom.auditState, 'not run');
-    setAttr(dom.auditState, 'data-variant', 'neutral');
+    setText(dom.auditState, '—');
+    setAttr(dom.auditLamp, 'data-s', 'off');
     if (chart) {
       setPoolWindow(chart, null, null);
       if (ctx.run.log) setSource(chart, ctx.run.log, { volume: 'V_mL', time: 't_s', cv: 'V_CV' });
@@ -1613,7 +1921,7 @@ export function createResultsView(rootEl, ctx) {
     try {
       overlayHost = overlayHostFor(ctx);
     } catch (err) {
-      overlayHost = null;   // popovers and toasts degrade to the inline status line
+      overlayHost = null;   // popovers and toasts degrade to the inline status strip
     }
     buildChart();
 

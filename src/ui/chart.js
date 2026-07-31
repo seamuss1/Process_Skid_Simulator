@@ -1,146 +1,224 @@
 /**
  * @file src/ui/chart.js
- * The three-layer canvas chromatogram engine (architecture-v2 §6.26, §9.3).
+ * The FT-CLASSIC process trend: a three-layer canvas plot well, a legend rail of ISA
+ * tags and label boxes, and a slim history strip — styled as a Rockwell FactoryTalk /
+ * Wonderware operator trend rather than as a web chart.
  *
- * Three stacked canvases in one wrapper, each sized `cssW*dpr x cssH*dpr` with the
- * context scaled by `dpr`:
- *   1. static  — axes, gridlines, phase bands, fraction ticks, peak labels, pool region.
- *   2. traces  — the data, min/max decimated to at most 2W vertices per series.
- *   3. overlay — crosshair, drag rectangle, live-edge marker; cleared every frame.
+ * WHY PV-VERSUS-SP IS THE WHOLE DESIGN
+ * Every pen is a pair. The process variable is a SOLID 1.5 px stroke; its setpoint is the
+ * SAME HUE, DASHED 5-4, at 1 px. FIC-101 (flow) and AIC-101 (%B) are true closed loops and
+ * are lit by default. PT-101 and PDT-101 have no setpoint — they get their alarm LIMIT as
+ * a dashed line in their own hue, captioned `LIM`, never `SP`. UV-101, CE-101, AE-101 and
+ * TT-101 are bare measurements and show a PV box only. The rail never invents a setpoint.
  *
- * Decimation bins on the X-CHANNEL VALUE, never the row index (§6.2): the log is uniform
- * in TIME, not in volume, so index binning makes retention volume unreadable off the chart
- * in the `volume` and `cv` x-modes. The hierarchical pyramid is DEFERRED (§12 D25); the
- * brute-force pass is amortised with a cached `pixelStart` boundary table that every series
- * reuses, and the append-only blit path is load-bearing rather than a nicety.
+ * LAYERS (each `cssW*dpr x cssH*dpr`, context scaled by `dpr`)
+ *   1. static  — black well, dark-green graticule, phase bands, fraction ticks, pooled
+ *                region, peak flags, axis furniture.
+ *   2. traces  — PV and SP pens, min/max decimated to at most two vertices per device
+ *                pixel column, with the append-only blit fast path at the live edge.
+ *   3. overlay — alarm limit lines, live edge, crosshair, drag rectangle; every frame.
  *
- * Full repaint on: zoom · theme change · channel toggle · ANY y-axis bound change ·
- * unconditionally every 2000 frames as a drift guard.
+ * Decimation bins on the X-CHANNEL VALUE, never the row index: the log is uniform in TIME,
+ * not in volume, so index binning makes retention volume unreadable in the `volume` and
+ * `cv` x-modes. One shared `pixelStart` boundary table serves every trace. A full repaint
+ * happens on zoom, theme change, pen toggle, any y-bound change, and unconditionally every
+ * 2000 frames as a drift guard.
  *
- * This module mutates neither `config` nor `run`; it reads a `ChannelStore` only.
+ * SIZING. The backing store is sized from an EXPLICIT measurement on mount, from the
+ * `ResizeObserver`, on `visibilitychange`, and again from `frame` whenever the plot is
+ * still degenerate. A `ResizeObserver` does not fire in a background tab, so a page that
+ * loaded hidden used to sit at a 1x1 backing store forever; measuring on mount and
+ * re-measuring from `frame` is what makes that impossible.
+ *
+ * This module mutates neither `config` nor `run`. It reads a `ChannelStore` and a handful
+ * of caller-supplied annotations, and it never schedules a frame of its own — `ui/app.js`
+ * owns the single rAF loop and calls {@link frame}.
  */
 
 import { NUMERIC_CHANNELS, column, xIndexRange, decimateMinMax } from '../core/log.js';
-import { h, setText, cls, readThemeTokens } from './format.js';
+import { h, setText, cls } from './format.js';
+import { glossaryFor } from '../data/glossary.js';
 
 /* -------------------------------------------------------------------------- */
 /* 0. CONSTANTS                                                               */
 /* -------------------------------------------------------------------------- */
 
-/** Frames between unconditional full repaints — the blit drift guard (§6.26). */
+/** Frames between unconditional full repaints — the blit drift guard. */
 const DRIFT_GUARD_FRAMES = 2000;
-/** Autoscale re-measure period, ms (§9.3.5). */
+/** Decimate/autoscale re-measure period, ms. */
 const MEASURE_PERIOD_MS = 250;
-/** Axis shrink ease duration, ms (§9.3.5). */
+/** Legend rail refresh period, ms. The rail is DOM; 10 Hz is plenty and costs nothing. */
+const RAIL_PERIOD_MS = 100;
+/** Re-measure period for a degenerate plot rectangle, ms. */
+const REMEASURE_PERIOD_MS = 250;
+/** Axis shrink ease duration, ms. */
 const SHRINK_EASE_MS = 4000;
-/** Hysteresis band below which a shrink is not started (§9.3.5). */
-const SHRINK_HYSTERESIS = 0.20;
-/** Top / bottom headroom on an autoscaled axis (§9.3.5). */
+/** Hysteresis band below which a shrink is not started. */
+const SHRINK_HYSTERESIS = 0.2;
+/** Top / bottom headroom on an autoscaled axis. */
 const HEADROOM_TOP = 0.08;
 const HEADROOM_BOTTOM = 0.04;
-/** Nested right-hand axis spacing, css px (§9.3.1). */
-const RIGHT_AXIS_STEP = 46;
-/** Live edge sits at this fraction of the plot width while following (§9.3.4). */
+/** Nested right-hand axis gutter width, css px. */
+const RIGHT_AXIS_STEP = 40;
+/** Live edge sits at this fraction of the plot width while following. */
 const LIVE_EDGE_FRAC = 0.85;
 /** Below this samples-per-pixel the decimator is bypassed and raw points are drawn. */
 const RAW_SPP = 1.5;
-/** Overview strip height, css px (§9.3.4). */
-const OVERVIEW_H = 36;
-/** aria-live announcement throttle, ms (§9.7). */
+/** History strip height, css px. */
+const OVERVIEW_H = 26;
+/** aria-live announcement throttle, ms. */
 const ARIA_PERIOD_MS = 400;
-/** Nice-number mantissa ladder for axis bounds (§9.3.5). */
+/** Nice-number mantissa ladder for axis bounds. */
 const NICE_LADDER = [1, 2, 2.5, 5, 10];
 /** Finer ladder for the auto-fit window span, so growth still happens in rungs. */
 const SPAN_LADDER = [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+/** The SP / limit dash signature. Binding: 5 on, 4 off, 1 px wide. */
+const SP_DASH = [5, 4];
+/** PV stroke width, css px. Binding: solid 1.5 px. */
+const PV_WIDTH = 1.5;
+/** SP stroke width, css px. */
+const SP_WIDTH = 1;
+/** Shared empty dash array, so `setLineDash` never allocates on the hot path. */
+const EMPTY_DASH = [];
+/** Crosshair dash. */
+const CROSS_DASH = [2, 3];
+/** Marker dash. */
+const MARKER_DASH = [3, 3];
+/** SVG namespace, for the icon builder. */
+const SVG_NS = 'http://www.w3.org/2000/svg';
 
-/** Default x-channel names per x-mode (§5.1). */
+/** Default x-channel names per x-mode. */
 const XCH_DEFAULT = Object.freeze({ volume: 'V_mL', time: 't_s', cv: 'V_CV' });
 
-/** Axis titles per x-mode. Time is logged in seconds and displayed in minutes. */
-const X_TITLE = Object.freeze({
-  volume: 'Volume (mL)',
-  time: 'Time (min)',
-  cv: 'Column volumes (CV)',
-});
-
-/** Short x unit suffix per mode, for the cursor card. */
-const X_UNIT = Object.freeze({ volume: 'mL', time: 'min', cv: 'CV' });
+/** Engineering unit of each x-mode. Time is logged in seconds and displayed in minutes. */
+const X_EU = Object.freeze({ volume: 'mL', time: 'min', cv: 'CV' });
 
 /**
- * The default y-axis stack of §9.3.1. L1 left; R1/R2/R3 right, nested 46 px apart.
- * R2 is the fixed context axis: pH 2–12 is its primary scale and %B 0–100 is its
- * `alt` scale, which is an exact affine remap, so both channels read correctly off
- * one 46 px gutter.
+ * The default y-axis stack. Axes are labelled by ENGINEERING UNIT only — an operator
+ * trend never carries a sentence. `pct` is the fixed context axis: %B 0–100 is its primary
+ * scale and pH 0–14 its `alt` scale, an exact affine remap, so both read off one gutter.
  */
 const DEFAULT_Y_AXES = Object.freeze([
-  { id: 'l1', label: 'Absorbance', unit: 'mAU', side: 'left', mode: 'auto-sticky', min: 0, max: 100 },
-  { id: 'r1', label: 'Conductivity', unit: 'mS/cm', side: 'right', mode: 'auto-sticky', min: 0, max: 10 },
+  { id: 'uv', eu: 'mAU', side: 'left', mode: 'auto-sticky', min: 0, max: 100 },
+  { id: 'cond', eu: 'mS/cm', side: 'right', mode: 'auto-sticky', min: 0, max: 10 },
+  { id: 'pct', eu: '%', side: 'right', mode: 'manual', min: 0, max: 100, alt: { eu: 'pH', min: 0, max: 14 } },
+  // A closed loop gets a BANDED axis, not a zero-anchored one: FIC-101 running 190 against
+  // a 196 setpoint is two pixels of deviation on a 0–250 scale and unreadable. Banding is
+  // what makes the PV/SP pair do its job.
+  { id: 'flow', eu: 'mL/min', side: 'right', mode: 'auto-band', min: 0, max: 10 },
+  { id: 'press', eu: 'bar', side: 'right', mode: 'auto-sticky', min: 0, max: 2 },
+  { id: 'temp', eu: 'C', side: 'right', mode: 'auto-sticky', min: 0, max: 40 },
+]);
+
+/**
+ * The eight default pens, in rail order. `sp` names a real log channel; `limitSignal`
+ * names an `ALARM_TABLE` signal whose lowest rising threshold becomes the limit line.
+ * A pen never has both.
+ */
+const DEFAULT_PENS = Object.freeze([
   {
-    id: 'r2', label: 'pH', unit: '', side: 'right', mode: 'manual', min: 2, max: 12,
-    alt: { label: '%B', unit: '%', min: 0, max: 100 },
+    id: 'uv', tag: 'UV-101', channel: 'UV_280_mAU', sp: null, eu: 'mAU', dec: 1,
+    axis: 'uv', penVar: '--pen-uv', gloss: 'UV-101', visible: true,
   },
-  { id: 'r3', label: 'Pressure / flow', unit: 'bar', side: 'right', mode: 'auto-sticky', min: 0, max: 5 },
+  {
+    id: 'flow', tag: 'FIC-101', channel: 'flow_mL_min', sp: 'flow_setpoint_mL_min',
+    eu: 'mL/min', dec: 1, axis: 'flow', penVar: '--pen-flow', gloss: 'FT-101', visible: true,
+  },
+  {
+    id: 'pctb', tag: 'AIC-101', channel: 'pctB_column_inlet', sp: 'pctB_setpoint',
+    eu: '%', dec: 1, axis: 'pct', penVar: '--pen-pctb', gloss: 'pctB', visible: true, fill: 0.1,
+  },
+  {
+    id: 'cond', tag: 'CE-101', channel: 'cond_mS_cm', sp: null, eu: 'mS/cm', dec: 2,
+    axis: 'cond', penVar: '--pen-cond', gloss: 'CE-101', visible: true,
+  },
+  {
+    id: 'press', tag: 'PT-101', channel: 'P1_bar', sp: null, limitSignal: 'P1', eu: 'bar',
+    dec: 2, axis: 'press', penVar: '--pen-press', gloss: 'PT-101', visible: false,
+  },
+  {
+    id: 'dp', tag: 'PDT-101', channel: 'dP_bar', sp: null, limitSignal: 'DP', eu: 'bar',
+    dec: 2, axis: 'press', penVar: '--pen-dp', gloss: 'PDT-101', visible: false,
+  },
+  {
+    id: 'ph', tag: 'AE-101', channel: 'pH', sp: null, eu: 'pH', dec: 2,
+    axis: 'pct', alt: true, penVar: '--pen-ph', gloss: 'AE-101', visible: false,
+  },
+  {
+    id: 'temp', tag: 'TT-101', channel: 'temp_fluid_C', sp: null, eu: 'C', dec: 1,
+    axis: 'temp', penVar: '--pen-temp', gloss: 'TT-101', visible: false,
+  },
 ]);
 
 /**
- * The eight default series of §9.3.1. Every channel carries a dash signature as well as
- * a colour, so colour is never the sole encoder.
+ * Pen-token fallbacks, used when `styles/tokens.css` has not defined them. These are the
+ * FT-CLASSIC trend pens and are IDENTICAL in both themes — the plot well is black either
+ * way, so the pens never change. `--pen-dp` is the one pen the palette does not name:
+ * PDT-101 needs a hue of its own, because its limit line must be "the same hue" as its own
+ * PV and therefore cannot share PT-101's amber.
  */
-const DEFAULT_SERIES = Object.freeze([
-  { id: 'uv280', label: 'UV 280', channel: 'UV_280_mAU', yAxis: 'l1', colorVar: '--ch-uv280', dash: [], width: 1.5, visible: true },
-  { id: 'uv260', label: 'UV 260', channel: 'UV_260_mAU', yAxis: 'l1', colorVar: '--ch-uv260', dash: [], width: 2, visible: false },
-  { id: 'uv300', label: 'UV 300', channel: 'UV_300_mAU', yAxis: 'l1', colorVar: '--ch-uv300', dash: [1, 4], width: 1, visible: false },
-  { id: 'cond', label: 'Conductivity', channel: 'cond_mS_cm', yAxis: 'r1', colorVar: '--ch-cond', dash: [], width: 1.5, visible: true },
-  { id: 'ph', label: 'pH', channel: 'pH', yAxis: 'r2', colorVar: '--ch-ph', dash: [6, 3], width: 1.5, visible: true },
-  { id: 'pctb', label: '%B', channel: 'pctB_column_inlet', yAxis: 'r2', alt: true, fill: 0.10, colorVar: '--ch-pctb', dash: [], width: 1.5, visible: true },
-  { id: 'press', label: 'Pressure', channel: 'P1_bar', yAxis: 'r3', colorVar: '--ch-press', dash: [3, 3], width: 1.5, visible: true },
-  { id: 'flow', label: 'Flow', channel: 'flow_mL_min', yAxis: 'r3', colorVar: '--ch-flow', dash: [8, 2, 2, 2], width: 1.5, visible: false },
+const FALLBACK_PEN = Object.freeze({
+  '--pen-flow': '#00E5FF',
+  '--pen-pctb': '#FF6EC7',
+  '--pen-press': '#FFD400',
+  '--pen-uv': '#12FF4B',
+  '--pen-cond': '#FF9A3C',
+  '--pen-ph': '#B39DFF',
+  '--pen-temp': '#FFFFFF',
+  '--pen-dp': '#5AA9FF',
+});
+
+/** Rotating pen palette for a caller-supplied pen whose token resolves to nothing. */
+const PEN_CYCLE = Object.freeze([
+  '#12FF4B', '#00E5FF', '#FF6EC7', '#FFD400', '#FF9A3C', '#B39DFF', '#FFFFFF', '#5AA9FF',
 ]);
 
-/** Channel-token fallbacks, used when styles/tokens.css has not defined them (§9.3.1). */
-const FALLBACK_CH = Object.freeze({
-  dark: {
-    '--ch-uv280': '#4CC9F0', '--ch-uv260': '#B388FF', '--ch-uv300': '#FF8FA3',
-    '--ch-cond': '#F2A93B', '--ch-ph': '#4ADE80', '--ch-pctb': '#E5E9EF',
-    '--ch-press': '#FF6B57', '--ch-flow': '#64D9C4',
-  },
+/** Field / plot tokens, theme-independent. */
+const FIXED_TOKENS = Object.freeze({
+  '--plot-bg': '#000000',
+  '--plot-grid': '#1F3D1F',
+  '--plot-axis': '#C7C3BC',
+  '--fld-bg': '#0A0F0A',
+  '--fld-pv': '#12FF4B',
+  '--fld-sp': '#FFD400',
+  '--fld-out': '#00E5FF',
+  '--fld-alarm': '#FF3B30',
+  '--fld-stale': '#7A8A7A',
+  '--fld-eu': '#9FB39F',
+  '--lamp-warn': '#FFC000',
+  '--lamp-alarm': '#E81123',
+});
+
+/** Chrome tokens per theme, used when `styles/tokens.css` has not loaded. */
+const FALLBACK_CHROME = Object.freeze({
   light: {
-    '--ch-uv280': '#0B7EA8', '--ch-uv260': '#6D3FD1', '--ch-uv300': '#C2185B',
-    '--ch-cond': '#B26A00', '--ch-ph': '#0F8A4A', '--ch-pctb': '#37414D',
-    '--ch-press': '#C4341C', '--ch-flow': '#0E7C6B',
+    '--screen': '#6E6E6E', '--face': '#C7C3BC', '--face-2': '#BFBBB4', '--face-3': '#D2CEC7',
+    '--bev-hi': '#FFFFFF', '--bev-lt': '#E6E2DA', '--bev-sh': '#85817B', '--bev-dk': '#4A4744',
+    '--ink': '#101010', '--ink-2': '#3A3A3A', '--ink-off': '#7A7A7A',
+  },
+  dark: {
+    '--screen': '#2A2A2A', '--face': '#4A4744', '--face-2': '#3E3B38', '--face-3': '#565250',
+    '--bev-hi': '#7A7672', '--bev-lt': '#605C58', '--bev-sh': '#2E2B29', '--bev-dk': '#1A1817',
+    '--ink': '#E8E4DC', '--ink-2': '#B8B4AC', '--ink-off': '#7A7A7A',
   },
 });
 
-/** Theme-token fallbacks, used when styles/tokens.css has not loaded (§9.4.1). */
-const FALLBACK_THEME = Object.freeze({
-  dark: {
-    '--bg-1': '#121821', '--surface-1': '#161E29', '--surface-2': '#1C2733',
-    '--line': '#2A3441', '--line-soft': '#212A35', '--line-strong': '#3A4757',
-    '--text-1': '#E6EDF5', '--text-2': '#A7B4C4', '--text-3': '#71818F',
-    '--accent': '#5DA9FF', '--accent-soft': 'rgba(93,169,255,0.14)',
-    '--grid': 'rgba(255,255,255,0.06)', '--grid-strong': 'rgba(255,255,255,0.11)',
-    '--warn': '#E8A33D', '--alarm': '#F2544B', '--focus': '#8FD0FF',
-  },
-  light: {
-    '--bg-1': '#F6F8FA', '--surface-1': '#FFFFFF', '--surface-2': '#F2F5F8',
-    '--line': '#D3DAE3', '--line-soft': '#E3E8EE', '--line-strong': '#AAB6C4',
-    '--text-1': '#0F1720', '--text-2': '#48566A', '--text-3': '#6B7A8C',
-    '--accent': '#0B72D8', '--accent-soft': 'rgba(11,114,216,0.12)',
-    '--grid': 'rgba(15,23,32,0.08)', '--grid-strong': 'rgba(15,23,32,0.16)',
-    '--warn': '#9A6300', '--alarm': '#C42B22', '--focus': '#0B72D8',
-  },
-});
+/** Every custom property the canvas painters resolve, read once per theme change. */
+const TOKEN_NAMES = Object.freeze(
+  Object.keys(FIXED_TOKENS)
+    .concat(Object.keys(FALLBACK_CHROME.light))
+    .concat(Object.keys(FALLBACK_PEN))
+);
 
 /**
- * Phase-band tints (§9.3.3): load amber 6 %, wash blue 5 %, elute violet 7 %,
- * strip/CIP teal 6 %, everything else neutral. Keyed on BOTH the raw §5.4 block type
- * and the short kind slug a caller may already have collapsed it to, so a band set
- * built either way tints identically.
+ * Phase-band tints. Keyed on BOTH the raw block type and the short kind slug a caller may
+ * already have collapsed it to, so a band set built either way tints identically. On a
+ * black well the tints are additive and deliberately faint.
  */
-const TINT_LOAD = 'rgba(242,169,59,0.06)';
-const TINT_WASH = 'rgba(76,201,240,0.05)';
-const TINT_ELUTE = 'rgba(179,136,255,0.07)';
-const TINT_STRIP = 'rgba(125,242,184,0.06)';
+const TINT_LOAD = 'rgba(200,134,43,0.065)';
+const TINT_WASH = 'rgba(45,111,184,0.075)';
+const TINT_ELUTE = 'rgba(138,91,200,0.085)';
+const TINT_STRIP = 'rgba(31,169,140,0.065)';
 const BAND_TINT = Object.freeze({
   LOAD: TINT_LOAD, load: TINT_LOAD,
   WASH: TINT_WASH, wash: TINT_WASH,
@@ -151,7 +229,17 @@ const BAND_TINT = Object.freeze({
   STRIP: TINT_STRIP, CIP: TINT_STRIP, strip: TINT_STRIP,
 });
 
-/** name -> { unit, decimals } for every fixed numeric log channel (§5.1). */
+/**
+ * Alternating band wash, so consecutive blocks are separable without colour. Kept very
+ * faint: on a black well every wash is additive, and the graticule must survive it.
+ */
+const BAND_A = 'rgba(255,255,255,0.020)';
+const BAND_B = 'rgba(255,255,255,0.040)';
+/** Pooled-region wash and edge. */
+const POOL_FILL = 'rgba(255,212,0,0.10)';
+const POOL_EDGE = '#FFD400';
+
+/** name -> { unit, decimals } for every fixed numeric log channel. */
 const CHANNEL_META = (() => {
   const m = new Map();
   for (let i = 0; i < NUMERIC_CHANNELS.length; i++) {
@@ -161,17 +249,17 @@ const CHANNEL_META = (() => {
   return m;
 })();
 
-/** Canvas font stacks. `ctx.font` is a CSS font shorthand and cannot resolve var(). */
-const FONT_UI = 'system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
-const FONT_NUM = 'ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace';
+/** Canvas font stacks. `ctx.font` is a CSS font shorthand and cannot resolve `var()`. */
+const FONT_UI = 'system-ui, -apple-system, "Segoe UI", Tahoma, Arial, sans-serif';
+const FONT_NUM = 'ui-monospace, Consolas, "Cascadia Mono", "Segoe UI Mono", Menlo, monospace';
 
 /* -------------------------------------------------------------------------- */
 /* 1. SMALL NUMERIC HELPERS                                                   */
 /* -------------------------------------------------------------------------- */
 
 /**
- * First index with `x[i] >= target` over `x[0..n)`. Local copy so the hot decimation
- * loop never crosses a module boundary and stays monomorphic.
+ * First index with `x[i] >= target` over `x[0..n)`. Local copy so the hot decimation loop
+ * never crosses a module boundary and stays monomorphic.
  * @param {Float32Array} x Monotone non-decreasing channel.
  * @param {number} n Valid sample count.
  * @param {number} target Search value, x-channel unit.
@@ -189,7 +277,7 @@ function lowerBoundF32(x, n, target) {
 }
 
 /**
- * Clamp helper (chart-local; ui/* may not import core/util.js under §4).
+ * Clamp helper (chart-local; `ui/*` may not import `core/util.js`).
  * @param {number} v Value.
  * @param {number} lo Lower bound.
  * @param {number} hi Upper bound.
@@ -217,7 +305,7 @@ function ladderCeil(v, ladder) {
 }
 
 /**
- * Nice tick step for an axis span (§9.3.2, §9.3.5).
+ * Nice tick step for an axis span.
  * @param {number} raw Raw step estimate, axis unit.
  * @returns {number} Step on the 1/2/2.5/5x10^n ladder.
  */
@@ -226,7 +314,7 @@ function niceStep(raw) {
 }
 
 /**
- * Fixed decimal count implied by a tick step, so digits never change width (§9.7).
+ * Fixed decimal count implied by a tick step, so digits never change width.
  * @param {number} step Tick step.
  * @returns {number} Decimals, 0..6.
  */
@@ -240,22 +328,18 @@ function decimalsFor(step) {
 }
 
 /**
- * Read one CSS custom property out of a cached token map, tolerating both `--name`
- * and `name` keying, with a documented fallback.
- * @param {object|null} tokens Cached map from `format.readThemeTokens`.
- * @param {string} name Custom property name including the leading `--`.
- * @param {string} fallback Value used when the token is absent.
- * @returns {string} A CSS colour string.
+ * Format a value for a label box: fixed decimals, or the classic dash when absent.
+ * @param {number} v Value.
+ * @param {number} dec Decimals.
+ * @returns {string} Digits, or `'----'`.
  */
-function tokenOf(tokens, name, fallback) {
-  if (tokens) {
-    const a = tokens[name];
-    if (typeof a === 'string' && a.length > 0) return a.trim();
-    const b = tokens[name.slice(2)];
-    if (typeof b === 'string' && b.length > 0) return b.trim();
-  }
-  return fallback;
+function fmtBox(v, dec) {
+  return v === v && isFinite(v) ? v.toFixed(dec) : '----';
 }
+
+/* -------------------------------------------------------------------------- */
+/* 2. TOKENS AND COLOURS                                                      */
+/* -------------------------------------------------------------------------- */
 
 /**
  * The theme the document is currently showing.
@@ -263,162 +347,299 @@ function tokenOf(tokens, name, fallback) {
  */
 function activeTheme() {
   const attr = document.documentElement.getAttribute('data-theme');
-  if (attr === 'light' || attr === 'dark') return attr;
-  return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
-    ? 'light'
-    : 'dark';
+  if (attr === 'dark') return 'dark';
+  if (attr === 'light') return 'light';
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+    ? 'dark'
+    : 'light';
+}
+
+/**
+ * Read every token the painters need off the document element. Called once per theme
+ * change, never per frame: reading custom properties inside a frame is a layout-thrash
+ * trap. Values absent from `styles/tokens.css` fall back to the FT-CLASSIC constants.
+ * @param {'dark'|'light'|'current'} theme Theme to resolve.
+ * @returns {object} `{ theme, <token>: value, ... }`.
+ */
+function readTokens(theme) {
+  const name = theme === 'current' || theme === undefined ? activeTheme() : theme;
+  const live = name === activeTheme();
+  const chrome = FALLBACK_CHROME[name] || FALLBACK_CHROME.light;
+  const out = { theme: name };
+  let cs = null;
+  try {
+    cs = getComputedStyle(document.documentElement);
+  } catch (err) {
+    cs = null;
+  }
+  for (let i = 0; i < TOKEN_NAMES.length; i++) {
+    const key = TOKEN_NAMES[i];
+    const fb = FIXED_TOKENS[key] !== undefined
+      ? FIXED_TOKENS[key]
+      : chrome[key] !== undefined ? chrome[key] : FALLBACK_PEN[key];
+    // Chrome tokens differ per theme, so only the ACTIVE theme may be read live. Pens and
+    // field colours are theme-independent and are read live whichever theme is asked for.
+    const readable = cs && (live || chrome[key] === undefined);
+    let v = '';
+    if (readable) v = cs.getPropertyValue(key).trim();
+    out[key] = v.length > 0 ? v : fb;
+  }
+  return out;
+}
+
+/**
+ * Resolve the full colour map for one theme, including a stroke colour per pen.
+ * @param {'dark'|'light'|'current'} theme Theme to resolve.
+ * @param {Array<object>} pens Pen list, for the per-pen tokens.
+ * @returns {object} Colour map with a `pen[id]` stroke table.
+ */
+function resolveColors(theme, pens) {
+  const t = readTokens(theme);
+  const c = {
+    theme: t.theme,
+    face: t['--face'],
+    face2: t['--face-2'],
+    face3: t['--face-3'],
+    ink: t['--ink'],
+    ink2: t['--ink-2'],
+    inkOff: t['--ink-off'],
+    bevHi: t['--bev-hi'],
+    bevSh: t['--bev-sh'],
+    bevDk: t['--bev-dk'],
+    plotBg: t['--plot-bg'],
+    plotGrid: t['--plot-grid'],
+    plotAxis: t['--plot-axis'],
+    fldSp: t['--fld-sp'],
+    fldEu: t['--fld-eu'],
+    fldStale: t['--fld-stale'],
+    warn: t['--lamp-warn'],
+    alarm: t['--lamp-alarm'],
+    pen: Object.create(null),
+  };
+  for (let i = 0; i < pens.length; i++) {
+    const p = pens[i];
+    let v = t[p.penVar];
+    if (!v) {
+      // A caller-supplied token this build does not define: resolve it live, then fall
+      // back onto the rotating pen palette so no pen is ever invisible.
+      try {
+        v = getComputedStyle(document.documentElement).getPropertyValue(p.penVar).trim();
+      } catch (err) {
+        v = '';
+      }
+      if (!v) v = PEN_CYCLE[i % PEN_CYCLE.length];
+    }
+    c.pen[p.id] = v;
+  }
+  return c;
 }
 
 /* -------------------------------------------------------------------------- */
-/* 2. STYLES                                                                  */
+/* 3. STYLES                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/** Raised bevel: outer highlight, outer shadow, inner highlight, inner shadow. */
+const RAISED =
+  'box-shadow:inset 1px 1px 0 var(--bev-hi,#FFFFFF),inset -1px -1px 0 var(--bev-dk,#4A4744),' +
+  'inset 2px 2px 0 var(--bev-lt,#E6E2DA),inset -2px -2px 0 var(--bev-sh,#85817B)';
+/** Sunken bevel: the raised recipe with the two pairs swapped. */
+const SUNKEN =
+  'box-shadow:inset 1px 1px 0 var(--bev-dk,#4A4744),inset -1px -1px 0 var(--bev-hi,#FFFFFF),' +
+  'inset 2px 2px 0 var(--bev-sh,#85817B),inset -2px -2px 0 var(--bev-lt,#E6E2DA)';
+
 const CHART_CSS = `
-.chart{position:relative;display:flex;flex-direction:column;width:100%;height:100%;
-  min-height:180px;min-width:220px;font-family:var(--font-ui,system-ui,sans-serif);
-  color:var(--text-1,#E6EDF5);user-select:none}
-.chart__plot{position:relative;flex:1 1 auto;min-height:120px;cursor:crosshair;outline:none}
-.chart__plot:focus-visible{outline:2px solid var(--focus,#8FD0FF);outline-offset:-2px}
-.chart__plot--pan{cursor:grab}
-.chart__plot--panning{cursor:grabbing}
-.chart__plot--pool{cursor:cell}
-.chart__layer{position:absolute;inset:0;width:100%;height:100%;display:block}
-.chart__layer--static{z-index:1}
-.chart__layer--traces{z-index:2}
-.chart__layer--overlay{z-index:3;touch-action:none}
-.chart__ov{position:relative;flex:0 0 auto;height:36px;margin-top:4px;cursor:ew-resize}
-.chart__ov canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
-.chart__card{position:absolute;top:0;left:0;z-index:4;pointer-events:none;
-  min-width:172px;max-width:260px;padding:6px 8px;border-radius:6px;
-  background:var(--surface-2,#1C2733);border:1px solid var(--line,#2A3441);
-  box-shadow:var(--shadow-2,0 6px 20px rgba(0,0,0,.45));
-  font-size:var(--fs-11,11px);line-height:1.45;opacity:0;transition:opacity 90ms linear;
-  will-change:transform}
-.chart__card--on{opacity:1;pointer-events:auto;user-select:text}
-.chart__card-x{font-family:var(--font-num,ui-monospace,monospace);
-  font-variant-numeric:tabular-nums lining-nums;color:var(--text-2,#A7B4C4);
-  padding-bottom:4px;margin-bottom:4px;border-bottom:1px solid var(--line-soft,#212A35)}
-.chart__card-row{display:flex;align-items:center;gap:6px;white-space:nowrap}
-.chart__sw{flex:0 0 auto;width:14px;height:0;border-top-width:2px;border-top-style:solid}
-.chart__card-lab{flex:1 1 auto;color:var(--text-2,#A7B4C4);overflow:hidden;
-  text-overflow:ellipsis}
-.chart__card-val{flex:0 0 auto;font-family:var(--font-num,ui-monospace,monospace);
-  font-variant-numeric:tabular-nums lining-nums;color:var(--text-1,#E6EDF5);font-weight:600}
-.chart__card-unit{flex:0 0 auto;color:var(--text-3,#71818F);font-size:var(--fs-10,10px)}
-.chart__tools{position:absolute;top:6px;right:8px;z-index:5;display:flex;gap:4px}
-.chart__btn{height:22px;padding:0 8px;border-radius:var(--r-pill,999px);
-  border:1px solid var(--line,#2A3441);background:var(--surface-2,#1C2733);
-  color:var(--text-2,#A7B4C4);font:600 11px/1 var(--font-ui,system-ui,sans-serif);
-  cursor:pointer}
-.chart__btn:hover{background:var(--surface-3,#243040);color:var(--text-1,#E6EDF5)}
-.chart__btn:focus-visible{outline:2px solid var(--focus,#8FD0FF);outline-offset:2px}
-.chart__btn[aria-pressed="true"]{background:var(--accent-soft,rgba(93,169,255,.14));
-  border-color:var(--accent,#5DA9FF);color:var(--text-1,#E6EDF5)}
-.chart__live{position:absolute;bottom:48px;right:12px;z-index:5;height:24px;padding:0 10px;
-  border-radius:var(--r-pill,999px);border:1px solid var(--accent,#5DA9FF);
-  background:var(--accent-soft,rgba(93,169,255,.14));color:var(--text-1,#E6EDF5);
-  font:600 11px/22px var(--font-ui,system-ui,sans-serif);cursor:pointer;display:none}
-.chart__live--on{display:block}
-.chart__sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+.ftx{position:relative;display:flex;flex-direction:column;width:100%;height:100%;
+  min-height:150px;min-width:280px;background:var(--face,#C7C3BC);color:var(--ink,#101010);
+  font-family:var(--font-ui,system-ui,'Segoe UI',Tahoma,sans-serif);user-select:none;
+  overflow:hidden}
+.ftx *{box-sizing:border-box;border-radius:0}
+.ftx__bar{flex:0 0 auto;display:flex;align-items:center;gap:2px;height:26px;padding:0 3px;
+  background:var(--face-2,#BFBBB4);${RAISED}}
+.ftx__grp{display:flex;align-items:center;gap:2px}
+.ftx__sep{flex:0 0 auto;width:2px;height:18px;margin:0 3px;
+  box-shadow:inset 1px 0 0 var(--bev-sh,#85817B),inset -1px 0 0 var(--bev-hi,#FFFFFF)}
+.ftx__sp{flex:1 1 auto}
+.ftx__btn{flex:0 0 auto;width:22px;height:22px;padding:0;display:inline-flex;
+  align-items:center;justify-content:center;border:0;background:var(--face,#C7C3BC);
+  color:var(--ink-2,#3A3A3A);cursor:pointer;${RAISED}}
+.ftx__btn:hover{color:var(--ink,#101010)}
+.ftx__btn:focus-visible{outline:2px solid #FFD400;outline-offset:-3px}
+.ftx__btn[aria-pressed="true"],.ftx__btn:active{color:var(--ink,#101010);${SUNKEN}}
+.ftx__btn[aria-pressed="true"] svg,.ftx__btn:active svg{transform:translate(1px,1px)}
+.ftx__btn[disabled]{color:var(--ink-off,#7A7A7A);cursor:default}
+.ftx__btn svg{display:block;fill:none;stroke:currentColor;stroke-width:1.4;
+  stroke-linecap:square;stroke-linejoin:miter}
+.ftx__btn svg [fill]{stroke:none}
+.ftx__body{flex:1 1 auto;display:flex;min-height:0;min-width:0;gap:2px;padding:2px}
+.ftx__well{position:relative;flex:1 1 auto;min-width:120px;min-height:70px;
+  background:var(--plot-bg,#000000);${SUNKEN};cursor:crosshair;outline:none}
+.ftx__well:focus-visible{outline:2px solid #FFD400;outline-offset:-2px}
+.ftx__well--pan{cursor:grab}
+.ftx__well--panning{cursor:grabbing}
+.ftx__well--pool{cursor:col-resize}
+.ftx__host{position:absolute;inset:3px}
+.ftx__layer{position:absolute;inset:0;width:100%;height:100%;display:block}
+.ftx__layer--s{z-index:1}
+.ftx__layer--t{z-index:2}
+.ftx__layer--o{z-index:3;touch-action:none}
+.ftx__rail{flex:0 0 auto;width:174px;display:flex;flex-direction:column;min-height:0;
+  padding:2px;background:var(--face,#C7C3BC);${RAISED}}
+.ftx__railhd{flex:0 0 auto;display:grid;grid-template-columns:14px 1fr 15px;gap:1px 3px;
+  align-items:center;padding:0 1px 2px;font-size:9px;font-weight:700;line-height:1.2;
+  letter-spacing:.04em;text-transform:uppercase;color:var(--ink-2,#3A3A3A);
+  box-shadow:inset 0 -1px 0 var(--bev-sh,#85817B)}
+.ftx__railhd b{grid-column:2;grid-row:1;font-weight:700}
+.ftx__railhd i{grid-column:2/4;grid-row:2;display:flex;gap:2px;font-style:normal}
+.ftx__railhd i span{text-align:right}
+.ftx__railhd i span:first-child{flex:1.35 1 0}
+.ftx__railhd i span:last-child{flex:1 1 0}
+.ftx__rows{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden}
+.ftx__row{display:grid;grid-template-columns:14px 1fr 15px;gap:1px 3px;align-items:center;
+  padding:2px 1px;box-shadow:inset 0 1px 0 var(--bev-hi,#FFFFFF),
+  inset 0 -1px 0 var(--bev-sh,#85817B)}
+.ftx__row--focus{background:var(--face-3,#D2CEC7)}
+.ftx__row--off .ftx__tag{color:var(--ink-off,#7A7A7A)}
+.ftx__chip{grid-column:1;grid-row:1/3;align-self:center;position:relative;width:14px;
+  height:16px;background:var(--fld-bg,#0A0F0A);
+  box-shadow:inset 1px 1px 0 var(--bev-dk,#4A4744),inset -1px -1px 0 var(--bev-hi,#FFFFFF)}
+.ftx__chip i{position:absolute;left:2px;right:2px;display:block;font-style:normal}
+.ftx__chip i.pv{top:5px;height:2px;background:currentColor}
+.ftx__chip i.sp{top:10px;height:1px;
+  background:repeating-linear-gradient(90deg,currentColor 0 3px,transparent 3px 6px)}
+.ftx__tag{grid-column:2;grid-row:1;font-size:10px;font-weight:700;letter-spacing:.04em;
+  color:var(--ink,#101010);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  cursor:help}
+.ftx__cb{grid-column:3;grid-row:1;appearance:none;-webkit-appearance:none;margin:0;
+  width:13px;height:13px;position:relative;background:var(--face-3,#D2CEC7);cursor:pointer;
+  box-shadow:inset 1px 1px 0 var(--bev-dk,#4A4744),inset -1px -1px 0 var(--bev-hi,#FFFFFF),
+  inset 2px 2px 0 var(--bev-sh,#85817B)}
+.ftx__cb:checked::after{content:'';position:absolute;left:3px;top:3px;width:7px;height:7px;
+  background:currentColor}
+.ftx__cb:focus-visible{outline:2px solid #FFD400;outline-offset:1px}
+.ftx__flds{grid-column:2/4;grid-row:2;display:flex;gap:2px;min-width:0}
+.ftx__fld{flex:1 1 0;min-width:0;display:flex;align-items:baseline;gap:2px;padding:1px 3px;
+  background:var(--fld-bg,#0A0F0A);overflow:hidden;
+  font:700 12px/1.2 var(--font-num,ui-monospace,Consolas,monospace);
+  font-variant-numeric:tabular-nums lining-nums;
+  box-shadow:inset 1px 1px 0 var(--bev-dk,#4A4744),inset -1px -1px 0 var(--bev-hi,#FFFFFF),
+  inset 2px 2px 0 var(--bev-sh,#85817B)}
+.ftx__fld--pv{flex:1.35 1 0}
+.ftx__fld em{flex:0 0 auto;font-style:normal;font-size:8px;font-weight:700;
+  letter-spacing:.04em;color:var(--fld-eu,#9FB39F)}
+.ftx__fld b{flex:1 1 auto;font-weight:700;text-align:right;overflow:hidden;
+  color:var(--fld-pv,#12FF4B)}
+.ftx__fld u{flex:0 0 auto;text-decoration:none;font-size:80%;font-weight:400;
+  color:var(--fld-eu,#9FB39F)}
+.ftx__fld--sp b{color:var(--fld-sp,#FFD400)}
+.ftx__fld--x b{color:var(--fld-out,#00E5FF)}
+.ftx__fld--alarm b{color:var(--fld-alarm,#FF3B30)}
+.ftx__fld--stale b{color:var(--fld-stale,#7A8A7A)}
+.ftx__card{position:absolute;top:0;left:0;z-index:4;display:none;padding:2px;gap:2px;
+  background:var(--face,#C7C3BC);pointer-events:none;${RAISED}}
+.ftx__card--on{display:flex}
+.ftx__card .ftx__fld{flex:0 0 auto;min-width:62px}
+.ftx__ov{flex:0 0 auto;position:relative;height:${OVERVIEW_H}px;margin:0 2px 2px 2px;
+  background:var(--plot-bg,#000000);cursor:ew-resize;${SUNKEN}}
+.ftx__ovhost{position:absolute;inset:3px}
+.ftx__ovhost canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.ftx__table{display:none;flex:0 0 auto;max-height:172px;overflow:auto;margin:0 2px 2px 2px;
+  background:var(--fld-bg,#0A0F0A);${SUNKEN}}
+.ftx__table--on{display:block}
+.ftx__table table{border-collapse:collapse;width:100%}
+.ftx__table th,.ftx__table td{padding:1px 6px;text-align:right;white-space:nowrap;
+  font:400 11px/1.35 var(--font-num,ui-monospace,Consolas,monospace);
+  font-variant-numeric:tabular-nums lining-nums;color:var(--fld-pv,#12FF4B)}
+.ftx__table th{position:sticky;top:0;z-index:1;background:var(--face-2,#BFBBB4);
+  color:var(--ink,#101010);font:700 9px/1.6 var(--font-ui,system-ui,sans-serif);
+  letter-spacing:.04em;text-transform:uppercase;box-shadow:inset 0 -1px 0 var(--bev-dk,#4A4744)}
+.ftx__table th small{display:block;font-size:8px;font-weight:400;color:var(--ink-2,#3A3A3A)}
+.ftx__table td:first-child,.ftx__table th:first-child{text-align:left;
+  color:var(--fld-out,#00E5FF)}
+.ftx__sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
   clip:rect(0 0 0 0);white-space:nowrap;border:0}
-.chart__table{display:none;flex:0 0 auto;max-height:220px;overflow:auto;margin-top:6px;
-  border:1px solid var(--line,#2A3441);border-radius:var(--r-2,5px);
-  background:var(--surface-1,#161E29)}
-.chart__table--on{display:block}
-.chart__table table{border-collapse:collapse;width:100%;font-size:var(--fs-11,11px)}
-.chart__table caption{text-align:left;padding:6px 8px;color:var(--text-3,#71818F);
-  font-size:var(--fs-10,10px);text-transform:uppercase;letter-spacing:.06em}
-.chart__table th,.chart__table td{padding:2px 8px;text-align:right;
-  border-bottom:1px solid var(--line-soft,#212A35);
-  font-family:var(--font-num,ui-monospace,monospace);
-  font-variant-numeric:tabular-nums lining-nums;white-space:nowrap}
-.chart__table th{position:sticky;top:0;background:var(--surface-2,#1C2733);
-  color:var(--text-3,#71818F);font-weight:600;text-transform:uppercase;
-  font-size:var(--fs-10,10px);letter-spacing:.04em}
-.chart__table td:first-child,.chart__table th:first-child{text-align:left}
-@media (prefers-reduced-motion: reduce){ .chart__card{transition:none} }
 `;
 
 /**
  * Inject the chart stylesheet once. `styles/app.css` belongs to another owner, so the
- * chart carries its own scoped rules and consumes theme tokens through `var()` with
- * spec-accurate fallbacks.
+ * trend carries its own scoped rules and consumes the FT-CLASSIC tokens through `var()`
+ * with the palette's own values as fallbacks.
  * @returns {void}
  */
 function ensureStyles() {
-  if (document.getElementById('chart-css')) return;
+  if (document.getElementById('ftx-css')) return;
   const st = document.createElement('style');
-  st.id = 'chart-css';
+  st.id = 'ftx-css';
   st.textContent = CHART_CSS;
   document.head.appendChild(st);
 }
 
 /* -------------------------------------------------------------------------- */
-/* 3. COLOURS AND GEOMETRY                                                    */
+/* 4. ICONS                                                                   */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Resolve every colour the painters need for one theme, once per theme change.
- * Reading CSS custom properties per frame is a layout-thrash trap (§6.25).
- * @param {'dark'|'light'|'current'} theme Theme to resolve.
- * @param {Array<object>} series Series list, for the per-series channel tokens.
- * @returns {object} A flat colour map plus a `series[id]` stroke map.
+ * Build one inline SVG icon. Every icon is authored here: no icon font, no CDN.
+ * @param {Array<object>} parts Element descriptors; `tag` defaults to `'path'`, every
+ *   other key becomes an attribute.
+ * @returns {SVGElement} A 14x14 icon on a 16x16 grid.
  */
-function resolveColors(theme, series) {
-  const name = theme === 'current' ? activeTheme() : theme;
-  let tokens = null;
-  try {
-    tokens = readThemeTokens(theme);
-  } catch (err) {
-    tokens = null;
+function svgIcon(parts) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('width', '14');
+  svg.setAttribute('height', '14');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    const el = document.createElementNS(SVG_NS, p.tag || 'path');
+    const keys = Object.keys(p);
+    for (let k = 0; k < keys.length; k++) {
+      if (keys[k] !== 'tag') el.setAttribute(keys[k], p[keys[k]]);
+    }
+    svg.appendChild(el);
   }
-  const fb = FALLBACK_THEME[name] || FALLBACK_THEME.dark;
-  const fc = FALLBACK_CH[name] || FALLBACK_CH.dark;
-  const c = {
-    theme: name,
-    bg: tokenOf(tokens, '--surface-1', fb['--surface-1']),
-    panel: tokenOf(tokens, '--bg-1', fb['--bg-1']),
-    surface2: tokenOf(tokens, '--surface-2', fb['--surface-2']),
-    line: tokenOf(tokens, '--line', fb['--line']),
-    lineSoft: tokenOf(tokens, '--line-soft', fb['--line-soft']),
-    lineStrong: tokenOf(tokens, '--line-strong', fb['--line-strong']),
-    text1: tokenOf(tokens, '--text-1', fb['--text-1']),
-    text2: tokenOf(tokens, '--text-2', fb['--text-2']),
-    text3: tokenOf(tokens, '--text-3', fb['--text-3']),
-    accent: tokenOf(tokens, '--accent', fb['--accent']),
-    accentSoft: tokenOf(tokens, '--accent-soft', fb['--accent-soft']),
-    grid: tokenOf(tokens, '--grid', fb['--grid']),
-    gridStrong: tokenOf(tokens, '--grid-strong', fb['--grid-strong']),
-    warn: tokenOf(tokens, '--warn', fb['--warn']),
-    alarm: tokenOf(tokens, '--alarm', fb['--alarm']),
-    bandA: name === 'light' ? 'rgba(15,23,32,0.030)' : 'rgba(255,255,255,0.028)',
-    bandB: name === 'light' ? 'rgba(15,23,32,0.055)' : 'rgba(255,255,255,0.055)',
-    series: Object.create(null),
-  };
-  for (let i = 0; i < series.length; i++) {
-    const s = series[i];
-    c.series[s.id] = tokenOf(tokens, s.colorVar, fc[s.colorVar] || c.text2);
-  }
-  return c;
+  return svg;
 }
 
+/** X axis in volume: a graduated cylinder. */
+const ICON_VOL = [{ d: 'M5 2h6v9.5a3 3 0 0 1-6 0Z' }, { d: 'M5 7h6M5 9.5h6' }];
+/** X axis in time: a clock. */
+const ICON_TIME = [{ tag: 'circle', cx: '8', cy: '8', r: '5.5' }, { d: 'M8 4.5V8l2.5 1.5' }];
+/** X axis in column volumes: a packed column with a downward flow arrow. */
+const ICON_CV = [
+  { d: 'M5 2h6v12H5z' }, { d: 'M5 5h6M5 11h6' }, { d: 'M8 6.5v3M6.5 8.5 8 10l1.5-1.5' },
+];
+/** Jump to the live edge. */
+const ICON_LIVE = [{ d: 'M3 3v10l7-5z', fill: 'currentColor' }, { d: 'M12.5 3v10' }];
+/** Reset the view: fit everything. */
+const ICON_FIT = [{ d: 'M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4' }];
+/** Y autoscale. */
+const ICON_YAUTO = [{ d: 'M3 2v12h11' }, { d: 'M6 11 9 6l2 3 2.5-4' }];
+/** The accessible data table. */
+const ICON_TABLE = [{ d: 'M2 3h12v10H2z' }, { d: 'M2 6.5h12M6.5 3v10' }];
+
+/* -------------------------------------------------------------------------- */
+/* 5. GEOMETRY AND SIZING                                                     */
+/* -------------------------------------------------------------------------- */
+
 /**
- * True when at least one visible series draws on the given axis.
+ * True when at least one lit pen draws on the given axis.
  * @param {object} chart The chart.
  * @param {string} axisId Axis id.
  * @returns {boolean} Whether the axis must be drawn.
  */
-function axisHasVisibleSeries(chart, axisId) {
-  for (let i = 0; i < chart.series.length; i++) {
-    const s = chart.series[i];
-    if (s.visible && s.yAxis === axisId) return true;
+function axisHasVisiblePen(chart, axisId) {
+  for (let i = 0; i < chart.pens.length; i++) {
+    const p = chart.pens[i];
+    if (p.visible && p.axis === axisId) return true;
   }
   return false;
 }
 
 /**
  * Recompute the plot rectangle from the cached element size and the visible axis set.
- * Never reads the DOM — sizes come from the `ResizeObserver` callback (§6.24).
+ * Never reads the DOM — sizes arrive through {@link applySize}.
  * @param {object} chart The chart.
  * @returns {void}
  */
@@ -428,15 +649,15 @@ function layout(chart) {
   let hasLeft = false;
   for (let i = 0; i < chart.yAxes.length; i++) {
     const a = chart.yAxes[i];
-    a.visible = axisHasVisibleSeries(chart, a.id);
+    a.visible = axisHasVisiblePen(chart, a.id);
     if (!a.visible) continue;
     if (a.side === 'left') hasLeft = true;
     else nRight++;
   }
-  g.padL = hasLeft ? 56 : 14;
-  g.padR = 14 + RIGHT_AXIS_STEP * nRight;
-  g.padT = 22;
-  g.padB = 42;
+  g.padL = hasLeft ? 42 : 8;
+  g.padR = 8 + RIGHT_AXIS_STEP * nRight;
+  g.padT = 16;
+  g.padB = 26;
   g.px0 = g.padL;
   g.py0 = g.padT;
   g.px1 = Math.max(g.padL + 8, g.cssW - g.padR);
@@ -454,18 +675,18 @@ function layout(chart) {
 }
 
 /**
- * Grow the per-series min/max buffers and the shared boundary tables to the current
- * pixel width. Caller-owned outputs, zero allocation once the size is stable (§6.26).
+ * Grow the per-trace min/max buffers and the shared boundary tables to the current pixel
+ * width. Caller-owned outputs, zero allocation once the size is stable.
  * @param {object} chart The chart.
  * @returns {void}
  */
 function ensureBuffers(chart) {
   const p = chart.geom.pixels;
-  for (let i = 0; i < chart.series.length; i++) {
-    const s = chart.series[i];
-    if (!s.minBuf || s.minBuf.length < p) {
-      s.minBuf = new Float32Array(p);
-      s.maxBuf = new Float32Array(p);
+  for (let i = 0; i < chart.traces.length; i++) {
+    const t = chart.traces[i];
+    if (!t.minBuf || t.minBuf.length < p) {
+      t.minBuf = new Float32Array(p);
+      t.maxBuf = new Float32Array(p);
     }
   }
   if (chart.pixelStart.length < p + 1) chart.pixelStart = new Int32Array(p + 1);
@@ -491,32 +712,93 @@ function resizeCanvases(chart) {
     const cx = cxs[i];
     cx.setTransform(g.dpr, 0, 0, g.dpr, 0, 0);
     cx.imageSmoothingEnabled = false;
-    cx.lineJoin = 'round';
+    cx.lineJoin = 'miter';
     cx.miterLimit = 2;
   }
   chart.blit.w = w;
   chart.blit.h = hp;
   chart.blit.valid = false;
   chart.blit.validPx = 0;
-  if (chart.ovCanvas) {
-    const ow = w;
-    const oh = Math.max(1, Math.round(OVERVIEW_H * g.dpr));
-    if (chart.ovCanvas.width !== ow) chart.ovCanvas.width = ow;
-    if (chart.ovCanvas.height !== oh) chart.ovCanvas.height = oh;
-    chart.gOv.setTransform(g.dpr, 0, 0, g.dpr, 0, 0);
-    chart.ovDirty = true;
-  }
   ensureBuffers(chart);
 }
 
+/**
+ * Size the history strip's backing store.
+ * @param {object} chart The chart.
+ * @returns {void}
+ */
+function resizeOverview(chart) {
+  if (!chart.ovCanvas) return;
+  const dpr = chart.geom.dpr;
+  const w = Math.max(1, Math.round(chart.ovW * dpr));
+  const hgt = Math.max(1, Math.round(chart.ovH * dpr));
+  if (chart.ovCanvas.width !== w) chart.ovCanvas.width = w;
+  if (chart.ovCanvas.height !== hgt) chart.ovCanvas.height = hgt;
+  chart.gOv.setTransform(dpr, 0, 0, dpr, 0, 0);
+  chart.gOv.imageSmoothingEnabled = false;
+  chart.ovDirty = true;
+}
+
+/**
+ * Adopt a new css size for the plot host. No-ops when nothing moved, so it is safe to call
+ * from a `ResizeObserver`, from `visibilitychange` and from `frame` alike.
+ * @param {object} chart The chart.
+ * @param {number} wCss Host width, css px.
+ * @param {number} hCss Host height, css px.
+ * @returns {boolean} True when the backing store was resized.
+ */
+function applySize(chart, wCss, hCss) {
+  const g = chart.geom;
+  const w = Math.max(1, Math.round(wCss));
+  const hh = Math.max(1, Math.round(hCss));
+  const dpr = window.devicePixelRatio || 1;
+  if (g.cssW === w && g.cssH === hh && g.dpr === dpr) return false;
+  g.cssW = w;
+  g.cssH = hh;
+  g.dpr = dpr;
+  layout(chart);
+  resizeCanvases(chart);
+  resizeOverview(chart);
+  invalidate(chart, 'all');
+  return true;
+}
+
+/**
+ * Measure the plot host and the history strip explicitly and adopt those sizes.
+ *
+ * THIS IS THE FIX for the 1x1 backing store: a `ResizeObserver` never fires while the tab
+ * is in the background, and the observed box never changes afterwards, so a chart built on
+ * a hidden page would otherwise stay at its construction-time size forever. Measuring on
+ * mount, on unhide and from `frame` closes every one of those paths.
+ * @param {object} chart The chart.
+ * @returns {void}
+ */
+function measureNow(chart) {
+  if (chart.destroyed) return;
+  const r = chart.hostEl.getBoundingClientRect();
+  if (r.width > 0 && r.height > 0) applySize(chart, r.width, r.height);
+  if (chart.ovHostEl) {
+    const q = chart.ovHostEl.getBoundingClientRect();
+    if (q.width > 0 && q.height > 0) {
+      const w = Math.max(1, Math.round(q.width));
+      const hh = Math.max(1, Math.round(q.height));
+      if (w !== chart.ovW || hh !== chart.ovH) {
+        chart.ovW = w;
+        chart.ovH = hh;
+        resizeOverview(chart);
+      }
+    }
+  }
+}
+
 /* -------------------------------------------------------------------------- */
-/* 4. X WINDOW                                                                */
+/* 6. X WINDOW                                                                */
 /* -------------------------------------------------------------------------- */
 
 /**
  * The store channel name backing the current x-mode.
  * @param {object} chart The chart.
- * @returns {string} Channel name, 'V_mL' | 't_s' | 'V_CV'.
+ * @returns {string} Channel name, `'V_mL' | 't_s' | 'V_CV'`.
  */
 function xChannel(chart) {
   return chart.xChannels[chart.xMode] || XCH_DEFAULT[chart.xMode];
@@ -555,11 +837,10 @@ function liveX(chart) {
 
 /**
  * Recompute the follow window. Two regimes, both cheap:
- *  - auto-fit: `x0 = 0` and the span is snapped up the {@link SPAN_LADDER}, so the span
- *    changes only when it crosses a rung and the blit buffer survives between rungs;
- *  - fixed-span follow (after a zoom, then "Jump to live"): the window scrolls so the
- *    live edge sits at 85 % width, quantised to whole device pixels so the self-blit
- *    accumulates no sub-pixel error.
+ *  - auto-fit: `x0 = 0` and the span snaps up {@link SPAN_LADDER}, so the span changes only
+ *    when it crosses a rung and the blit buffer survives between rungs;
+ *  - fixed-span follow: the window scrolls so the live edge sits at 85 % width, quantised
+ *    to whole device pixels so the self-blit accumulates no sub-pixel error.
  * @param {object} chart The chart.
  * @returns {boolean} True when the window changed.
  */
@@ -585,17 +866,16 @@ function updateFollowWindow(chart) {
   if (dPx === 0) return false;
   chart.x0 += dPx / kx;
   chart.x1 = chart.x0 + span;
-  // ACCUMULATE, never assign: a frame that scrolls but then takes the full-repaint
-  // branch must not leave its delta behind for the next append to re-apply. The full
-  // repaint zeroes it; the append path consumes it.
+  // ACCUMULATE, never assign: a frame that scrolls but then takes the full-repaint branch
+  // must not leave its delta behind for the next append to re-apply. The full repaint
+  // zeroes it; the append path consumes it.
   chart.scrollPx += dPx;
   return true;
 }
 
 /**
  * Map the visible window through the row index when the x-mode changes, so the same
- * samples stay on screen (§9.3.2). Uses `log.xIndexRange`, which is legal because every
- * x channel is monotone non-decreasing (§6.2).
+ * samples stay on screen. Legal because every x channel is monotone non-decreasing.
  * @param {object} chart The chart.
  * @param {string} fromCh Previous x channel name.
  * @param {string} toCh New x channel name.
@@ -613,7 +893,7 @@ function remapWindow(chart, fromCh, toCh) {
   if (n === 0) return;
   const i0 = clamp(r.i0, 0, n - 1);
   const i1 = clamp(r.i1 - 1, 0, n - 1);
-  let a = nx[i0];
+  const a = nx[i0];
   let b = nx[i1];
   if (!(b > a)) b = a + (chart.xMode === 'time' ? 60 : 1);
   chart.x0 = a;
@@ -621,28 +901,44 @@ function remapWindow(chart, fromCh, toCh) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* 5. Y AXES AND AUTOSCALE                                                    */
+/* 7. Y AXES AND AUTOSCALE                                                    */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Series value -> axis value. Identity unless the series rides the axis' `alt` scale
- * (the %B-on-the-pH-gutter case of §9.3.1), which is an exact affine remap.
- * @param {object} s Series.
+ * The axis a pen rides, with a documented fallback so a caller-supplied pen that names an
+ * axis this stack does not define still draws instead of collapsing onto the floor.
+ * @param {object} chart The chart.
+ * @param {object} pen Pen.
+ * @returns {object|null} Axis record.
+ */
+function axisOf(chart, pen) {
+  const a = chart.axisById.get(pen.axis);
+  if (a) return a;
+  return chart.yAxes.length > 0 ? chart.yAxes[0] : null;
+}
+
+/**
+ * Pen value -> axis value. Identity unless the pen rides the axis' `alt` scale (the
+ * pH-on-the-%B-gutter case), which is an exact affine remap.
+ * @param {object} pen Pen.
  * @param {object} a Axis.
- * @param {number} v Series value.
+ * @param {number} v Pen value.
  * @returns {number} Value in the axis' primary unit.
  */
-function toAxisValue(s, a, v) {
-  if (!s.alt || !a.alt) return v;
+function toAxisValue(pen, a, v) {
+  if (!pen.alt || !a.alt) return v;
   const span = a.alt.max - a.alt.min;
-  if (!(span !== 0)) return v;
+  if (span === 0) return v;
   return a.min + ((v - a.alt.min) / span) * (a.max - a.min);
 }
 
 /**
- * Recompute every autoscaled axis from the freshly decimated per-series buffers.
- * The max grows immediately; a shrink is armed only outside a 20 % hysteresis band and
- * then eased over 4 s (§9.3.5). Reduced motion applies the shrink at once (§9.7).
+ * Recompute every autoscaled axis from the freshly decimated per-trace buffers. The
+ * maximum grows immediately; a shrink is armed only outside a 20 % hysteresis band and
+ * then eased over 4 s. Reduced motion applies the shrink at once.
+ *
+ * SP traces and alarm limits take part: an operator must never lose the setpoint or the
+ * trip line off the top of the trend.
  * @param {object} chart The chart.
  * @param {number} now_ms Frame timestamp.
  * @returns {void}
@@ -653,26 +949,38 @@ function measureAxes(chart, now_ms) {
     if (a.mode === 'manual' || !a.visible) continue;
     let lo = Infinity;
     let hi = -Infinity;
-    for (let j = 0; j < chart.series.length; j++) {
-      const s = chart.series[j];
-      if (!s.visible || s.yAxis !== a.id || !s.hasData) continue;
-      const mn = s.dataMin;
-      const mx = s.dataMax;
+    for (let j = 0; j < chart.traces.length; j++) {
+      const t = chart.traces[j];
+      const pen = t.pen;
+      if (!pen.visible || axisOf(chart, pen) !== a || !t.hasData) continue;
+      const mn = t.dataMin;
+      const mx = t.dataMax;
       if (mn !== mn || mx !== mx) continue;
-      const av0 = toAxisValue(s, a, mn);
-      const av1 = toAxisValue(s, a, mx);
+      const av0 = toAxisValue(pen, a, mn);
+      const av1 = toAxisValue(pen, a, mx);
       if (av0 < lo) lo = av0;
       if (av1 > hi) hi = av1;
+    }
+    for (let j = 0; j < chart.pens.length; j++) {
+      const pen = chart.pens[j];
+      if (!pen.visible || axisOf(chart, pen) !== a) continue;
+      if (!(pen.limit === pen.limit)) continue;
+      const lv = toAxisValue(pen, a, pen.limit);
+      if (lv < lo) lo = lv;
+      if (lv > hi) hi = lv;
     }
     if (!(lo <= hi)) {
       lo = 0;
       hi = a.mode === 'auto' ? 1 : Math.max(1, a.targetMax);
     }
-    if (lo > 0) lo = 0; // chromatography axes are anchored at zero unless data goes negative
+    const band = a.mode === 'auto-band';
+    // Process axes are anchored at zero unless the data goes negative; a banded control
+    // axis is not, so its deviation stays legible.
+    if (!band && lo > 0) lo = 0;
     let span = hi - lo;
     if (!(span > 0)) span = Math.abs(hi) > 0 ? Math.abs(hi) : 1;
     const wantMax = hi + span * HEADROOM_TOP;
-    const wantMin = lo - (lo < 0 ? span * HEADROOM_BOTTOM : 0);
+    const wantMin = lo - (band || lo < 0 ? span * HEADROOM_BOTTOM : 0);
 
     if (a.targetMax === undefined || !(a.targetMax > -Infinity)) a.targetMax = wantMax;
     if (wantMax > a.targetMax) {
@@ -687,14 +995,14 @@ function measureAxes(chart, now_ms) {
         if (chart.reducedMotion) a.targetMax = wantMax;
       }
     }
-    a.targetMin = Math.min(0, wantMin);
+    a.targetMin = band ? wantMin : Math.min(0, wantMin);
   }
 }
 
 /**
  * Advance the shrink ease and quantise the applied bounds onto the nice-number ladder.
- * Quantising is what keeps a 4 s shrink to a handful of full repaints instead of 240
- * (§6.26): the eased value moves continuously, the applied bound only steps at a rung.
+ * Quantising is what keeps a 4 s shrink to a handful of full repaints instead of 240: the
+ * eased value moves continuously, the applied bound only steps at a rung.
  * @param {object} chart The chart.
  * @param {number} now_ms Frame timestamp.
  * @returns {boolean} True when any applied bound changed.
@@ -723,7 +1031,8 @@ function applyAxisBounds(chart, now_ms) {
       const mag = Math.abs(hi - lo);
       const step = niceStep(mag / 5);
       hi = Math.ceil(hi / step - 1e-9) * step;
-      lo = lo < 0 ? -Math.ceil(-lo / step - 1e-9) * step : 0;
+      if (a.mode === 'auto-band') lo = Math.floor(lo / step + 1e-9) * step;
+      else lo = lo < 0 ? -Math.ceil(-lo / step - 1e-9) * step : 0;
       if (!(hi > lo)) hi = lo + step;
     }
     if (!isFinite(lo) || !isFinite(hi) || !(hi > lo)) {
@@ -740,10 +1049,10 @@ function applyAxisBounds(chart, now_ms) {
 }
 
 /**
- * Precompute the per-series pixel mapping `py = bPix - v*kPix`, folding the axis
- * transform and any `alt` remap into two scalars so the point loop never branches.
+ * Precompute the per-trace pixel mapping `py = bPix - v*kPix`, folding the axis transform
+ * and any `alt` remap into two scalars so the point loop never branches.
  * @param {object} chart The chart.
- * @param {object} g Geometry (may be an export geometry, not the live one).
+ * @param {object} g Geometry in use (may be an export geometry, not the live one).
  * @returns {void}
  */
 function prepareMapping(chart, g) {
@@ -753,37 +1062,44 @@ function prepareMapping(chart, g) {
     a.k = span !== 0 ? g.plotH / span : 0;
     a.b = g.py1 + a.aMin * a.k;
   }
-  for (let i = 0; i < chart.series.length; i++) {
-    const s = chart.series[i];
-    const a = chart.axisById.get(s.yAxis);
+  for (let i = 0; i < chart.pens.length; i++) {
+    const pen = chart.pens[i];
+    const a = axisOf(chart, pen);
     if (!a) {
-      s.kPix = 0;
-      s.bPix = g.py1;
-      continue;
-    }
-    let ka = 1;
-    let ba = 0;
-    if (s.alt && a.alt) {
-      const as = a.alt.max - a.alt.min;
-      if (as !== 0) {
-        ka = (a.aMax - a.aMin) / as;
-        ba = a.aMin - a.alt.min * ka;
+      pen.kPix = 0;
+      pen.bPix = g.py1;
+    } else {
+      let ka = 1;
+      let ba = 0;
+      if (pen.alt && a.alt) {
+        const as = a.alt.max - a.alt.min;
+        if (as !== 0) {
+          ka = (a.aMax - a.aMin) / as;
+          ba = a.aMin - a.alt.min * ka;
+        }
       }
+      pen.kPix = a.k * ka;
+      pen.bPix = a.b - ba * a.k;
     }
-    s.kPix = a.k * ka;
-    s.bPix = a.b - ba * a.k;
+    if (pen.pvTrace) {
+      pen.pvTrace.kPix = pen.kPix;
+      pen.pvTrace.bPix = pen.bPix;
+    }
+    if (pen.spTrace) {
+      pen.spTrace.kPix = pen.kPix;
+      pen.spTrace.bPix = pen.bPix;
+    }
   }
 }
 
 /* -------------------------------------------------------------------------- */
-/* 6. DECIMATION                                                              */
+/* 8. DECIMATION                                                              */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Rebuild the shared `pixelStart` boundary table for the current window. Recomputed
- * only when the window bounds, the pixel width or `store.n` change — not per frame and
- * not per series (§6.2, §6.26); every series then reuses one table and the inner loop
- * stays index-based.
+ * Rebuild the shared `pixelStart` boundary table for the current window. Recomputed only
+ * when the window bounds, the pixel width or `store.n` change — not per frame and not per
+ * trace; every trace then reuses one table and the inner loop stays index-based.
  * @param {object} chart The chart.
  * @returns {boolean} True when a usable table exists.
  */
@@ -825,10 +1141,10 @@ function ensurePixelTable(chart) {
 }
 
 /**
- * Min/max fold over a half-open run of rows per bin, using a precomputed boundary
- * table. Empty bins receive `NaN`; `NaN` samples are skipped so a `NaN` in e.g.
- * `UV_ratio_260_280` cannot poison a bin (matches `log.decimateMinMax`).
- * @param {Float32Array} y Series channel view.
+ * Min/max fold over a half-open run of rows per bin, using a precomputed boundary table.
+ * Empty bins receive `NaN`; `NaN` samples are skipped so one bad sample cannot poison a
+ * bin (matches `log.decimateMinMax`).
+ * @param {Float32Array} y Channel view.
  * @param {Int32Array} starts Row boundary per bin, length >= bEnd+1 relative to `off`.
  * @param {number} off Bin index that `starts[0]` refers to.
  * @param {number} bStart First bin to fill, absolute.
@@ -882,9 +1198,8 @@ function buildStripTable(chart, bStart, bEnd) {
 }
 
 /**
- * Decimate every visible series over the whole window into its own buffers and record
- * the per-series data range for the autoscaler. This is the measured ~1.3 ms pass for
- * 50 k rows x 8 series (§12 D25); it runs at 4 Hz, not per frame.
+ * Decimate every lit trace over the whole window into its own buffers and record the
+ * per-trace data range for the autoscaler. Runs at 4 Hz, not per frame.
  * @param {object} chart The chart.
  * @returns {void}
  */
@@ -892,46 +1207,38 @@ function decimateAllVisible(chart) {
   const g = chart.geom;
   const p = g.pixels;
   const haveTable = ensurePixelTable(chart);
-  for (let i = 0; i < chart.series.length; i++) {
-    const s = chart.series[i];
-    s.hasData = false;
-    s.dataMin = NaN;
-    s.dataMax = NaN;
-    if (!s.visible || !chart.store) continue;
-    const y = column(chart.store, s.channel);
+  for (let i = 0; i < chart.traces.length; i++) {
+    const t = chart.traces[i];
+    t.hasData = false;
+    t.dataMin = NaN;
+    t.dataMax = NaN;
+    if (!t.pen.visible || !chart.store) continue;
+    const y = column(chart.store, t.channel);
     if (y.length === 0) continue;
     if (haveTable) {
-      decimateBins(y, chart.pixelStart, 0, 0, p, s.minBuf, s.maxBuf);
+      decimateBins(y, chart.pixelStart, 0, 0, p, t.minBuf, t.maxBuf);
     } else {
-      decimateMinMax(chart.store, xChannel(chart), s.channel, chart.x0, chart.x1, p, s.minBuf, s.maxBuf);
+      decimateMinMax(chart.store, xChannel(chart), t.channel, chart.x0, chart.x1, p, t.minBuf, t.maxBuf);
     }
     let mn = NaN;
     let mx = NaN;
     for (let b = 0; b < p; b++) {
-      const a = s.minBuf[b];
+      const a = t.minBuf[b];
       if (a === a) {
         if (mn !== mn || a < mn) mn = a;
-        const c = s.maxBuf[b];
+        const c = t.maxBuf[b];
         if (mx !== mx || c > mx) mx = c;
       }
     }
-    s.dataMin = mn;
-    s.dataMax = mx;
-    s.hasData = mn === mn;
+    t.dataMin = mn;
+    t.dataMax = mx;
+    t.hasData = mn === mn;
   }
-  chart.dataBinsValid = true;
-  chart.dataBinsX0 = chart.x0;
-  chart.dataBinsX1 = chart.x1;
-  chart.dataBinsN = chart.store ? chart.store.n : 0;
 }
-
-/* -------------------------------------------------------------------------- */
-/* 7. TRACE PAINTING                                                          */
-/* -------------------------------------------------------------------------- */
 
 /**
  * Samples per device pixel column over the current window. Below {@link RAW_SPP} the
- * decimator is bypassed and raw points are drawn (§6.26).
+ * decimator is bypassed and raw points are drawn.
  * @param {object} chart The chart.
  * @param {object} g Geometry in use.
  * @returns {number} Samples per pixel, 0 when there is no source.
@@ -942,33 +1249,37 @@ function samplesPerPixel(chart, g) {
   return (r.i1 - r.i0) / Math.max(1, g.pixels);
 }
 
+/* -------------------------------------------------------------------------- */
+/* 9. TRACE PAINTING                                                          */
+/* -------------------------------------------------------------------------- */
+
 /**
- * Stroke one series across a bin range from its decimated envelope. Emits at most two
- * vertices per pixel column: `lineTo(x, yMin); lineTo(x, yMax)` (§6.26). Empty bins
- * break the path so a gap in the log is never bridged by a straight line.
+ * Stroke one PV trace across a bin range from its decimated envelope. Emits at most two
+ * vertices per pixel column: `lineTo(x, yMin); lineTo(x, yMax)`. Empty bins break the path
+ * so a gap in the log is never bridged by a straight line.
  * @param {CanvasRenderingContext2D} ctx Target context, already dpr-scaled.
- * @param {object} s Series with `minBuf`/`maxBuf` filled for `[bStart,bEnd)`.
+ * @param {object} t Trace with `minBuf`/`maxBuf` filled for `[bStart,bEnd)`.
  * @param {object} g Geometry in use.
  * @param {number} bStart First bin, absolute.
  * @param {number} bEnd One past the last bin, absolute.
  * @returns {void}
  */
-function strokeEnvelope(ctx, s, g, bStart, bEnd) {
+function strokeEnvelope(ctx, t, g, bStart, bEnd) {
   const invDpr = 1 / g.dpr;
   const x0 = g.px0;
-  const kPix = s.kPix;
-  const bPix = s.bPix;
+  const kPix = t.kPix;
+  const bPix = t.bPix;
   const yTop = g.py0 - 2;
   const yBot = g.py1 + 2;
   let pen = false;
   ctx.beginPath();
   for (let b = bStart; b < bEnd; b++) {
-    const lo = s.minBuf[b];
+    const lo = t.minBuf[b];
     if (lo !== lo) {
       pen = false;
       continue;
     }
-    const hi = s.maxBuf[b];
+    const hi = t.maxBuf[b];
     const px = x0 + (b + 0.5) * invDpr;
     let a = bPix - lo * kPix;
     let c = bPix - hi * kPix;
@@ -988,25 +1299,73 @@ function strokeEnvelope(ctx, s, g, bStart, bEnd) {
 }
 
 /**
- * Fill the area under a series' envelope down to the axis floor — the %B context band
- * of §9.3.1, alpha 0.10. Drawn before any stroke so it never sits over data.
+ * Stroke one SP trace as a STAIRCASE — horizontal run, then vertical jump — because a
+ * setpoint is a held value, not a signal. Drawing it as steps also keeps the 5-4 dash
+ * phase proportional to x, which is what lets the append-only blit path re-enter the same
+ * pattern at the live edge instead of jittering the dashes.
  * @param {CanvasRenderingContext2D} ctx Target context.
- * @param {object} s Series with buffers filled.
+ * @param {object} t Trace with buffers filled.
  * @param {object} g Geometry in use.
  * @param {number} bStart First bin, absolute.
  * @param {number} bEnd One past the last bin, absolute.
  * @returns {void}
  */
-function fillEnvelope(ctx, s, g, bStart, bEnd) {
+function strokeStep(ctx, t, g, bStart, bEnd) {
   const invDpr = 1 / g.dpr;
   const x0 = g.px0;
-  const kPix = s.kPix;
-  const bPix = s.bPix;
+  const kPix = t.kPix;
+  const bPix = t.bPix;
+  const yTop = g.py0 - 2;
+  const yBot = g.py1 + 2;
+  const period = SP_DASH[0] + SP_DASH[1];
+  const startX = x0 + (bStart + 0.5) * invDpr;
+  ctx.lineDashOffset = startX % period;
+  let pen = false;
+  let lastY = 0;
+  ctx.beginPath();
+  for (let b = bStart; b < bEnd; b++) {
+    const v = t.maxBuf[b];
+    if (v !== v) {
+      pen = false;
+      continue;
+    }
+    const px = x0 + (b + 0.5) * invDpr;
+    let y = bPix - v * kPix;
+    if (y > yBot) y = yBot;
+    else if (y < yTop) y = yTop;
+    if (!pen) {
+      ctx.moveTo(px, y);
+      pen = true;
+    } else {
+      ctx.lineTo(px, lastY);
+      ctx.lineTo(px, y);
+    }
+    lastY = y;
+  }
+  ctx.stroke();
+  ctx.lineDashOffset = 0;
+}
+
+/**
+ * Fill the area under a trace's envelope down to the axis floor — the %B context band.
+ * Drawn before any stroke so it never sits over data.
+ * @param {CanvasRenderingContext2D} ctx Target context.
+ * @param {object} t Trace with buffers filled.
+ * @param {object} g Geometry in use.
+ * @param {number} bStart First bin, absolute.
+ * @param {number} bEnd One past the last bin, absolute.
+ * @returns {void}
+ */
+function fillEnvelope(ctx, t, g, bStart, bEnd) {
+  const invDpr = 1 / g.dpr;
+  const x0 = g.px0;
+  const kPix = t.kPix;
+  const bPix = t.bPix;
   const base = g.py1;
   let run = -1;
   ctx.beginPath();
   for (let b = bStart; b <= bEnd; b++) {
-    const hi = b < bEnd ? s.maxBuf[b] : NaN;
+    const hi = b < bEnd ? t.maxBuf[b] : NaN;
     if (hi !== hi) {
       if (run >= 0) {
         ctx.lineTo(x0 + (b - 0.5) * invDpr, base);
@@ -1031,25 +1390,25 @@ function fillEnvelope(ctx, s, g, bStart, bEnd) {
 }
 
 /**
- * Draw one series as raw points, used when `samplesPerPixel < 1.5` (§6.26).
+ * Draw one trace as raw points, used when `samplesPerPixel < 1.5`.
  * @param {CanvasRenderingContext2D} ctx Target context.
  * @param {object} chart The chart.
- * @param {object} s Series.
+ * @param {object} t Trace.
  * @param {object} g Geometry in use.
  * @param {number} xa Window start of the drawn range, x-channel unit.
  * @param {number} xb Window end of the drawn range, x-channel unit.
  * @returns {void}
  */
-function strokeRaw(ctx, chart, s, g, xa, xb) {
+function strokeRaw(ctx, chart, t, g, xa, xb) {
   const xcol = column(chart.store, xChannel(chart));
-  const y = column(chart.store, s.channel);
+  const y = column(chart.store, t.channel);
   let n = xcol.length;
   if (y.length < n) n = y.length;
   if (n === 0) return;
   const kx = g.plotW / (chart.x1 - chart.x0);
   const bx = g.px0 - chart.x0 * kx;
-  const kPix = s.kPix;
-  const bPix = s.bPix;
+  const kPix = t.kPix;
+  const bPix = t.bPix;
   const yTop = g.py0 - 2;
   const yBot = g.py1 + 2;
   let i = lowerBoundF32(xcol, n, xa);
@@ -1059,7 +1418,6 @@ function strokeRaw(ctx, chart, s, g, xa, xb) {
   for (; i < n; i++) {
     const xv = xcol[i];
     if (xv > xb) {
-      // draw one trailing sample so the segment leaving the range is closed
       const v0 = y[i];
       if (v0 === v0 && pen) ctx.lineTo(bx + xv * kx, clamp(bPix - v0 * kPix, yTop, yBot));
       break;
@@ -1082,92 +1440,18 @@ function strokeRaw(ctx, chart, s, g, xa, xb) {
 }
 
 /**
- * Configure a context for one series' stroke: colour, width, dash. Set once per series,
- * never per segment (§9.3.5).
- * @param {CanvasRenderingContext2D} ctx Target context.
- * @param {object} chart The chart.
- * @param {object} s Series.
- * @param {object} colors Colour map in use.
- * @returns {void}
- */
-function applyStrokeStyle(ctx, chart, s, colors) {
-  ctx.strokeStyle = colors.series[s.id] || colors.text2;
-  let w = s.width;
-  if (chart.contrastMore && w < 2) w = 2;
-  ctx.lineWidth = w;
-  ctx.globalAlpha = s.dim ? 0.2 : 1;
-  if (s.dash && s.dash.length > 0) ctx.setLineDash(s.dash);
-  else ctx.setLineDash(EMPTY_DASH);
-}
-
-const EMPTY_DASH = [];
-
-/**
- * Paint every visible series over a bin range into a context, decimating first.
- * Draw order is %B fill, then lines in reverse legend order so UV 280 ends up on top
- * (§9.3.5).
- * @param {object} chart The chart.
- * @param {CanvasRenderingContext2D} ctx Target context.
- * @param {object} g Geometry in use.
- * @param {object} colors Colour map in use.
- * @param {number} bStart First bin, absolute.
- * @param {number} bEnd One past the last bin, absolute.
- * @param {Int32Array|null} starts Boundary table covering `[bStart,bEnd]`, or null to
- *   use the chart's cached full-window table.
- * @param {number} off Bin index that `starts[0]` refers to.
- * @returns {void}
- */
-function paintSeriesBins(chart, ctx, g, colors, bStart, bEnd, starts, off) {
-  if (bEnd <= bStart || !chart.store) return;
-  const table = starts || chart.pixelStart;
-  const tOff = starts ? off : 0;
-  const raw = chart.rawMode;
-  const xa = chart.x0 + ((bStart - 0.5) * (chart.x1 - chart.x0)) / g.pixels;
-  const xb = chart.x0 + ((bEnd + 0.5) * (chart.x1 - chart.x0)) / g.pixels;
-
-  for (let i = 0; i < chart.series.length; i++) {
-    const s = chart.series[i];
-    if (!s.visible) continue;
-    const y = column(chart.store, s.channel);
-    if (y.length === 0) continue;
-    if (!raw) decimateBins(y, table, tOff, bStart, bEnd, s.minBuf, s.maxBuf);
-    if (!s.fill) continue;
-    ctx.globalAlpha = s.dim ? s.fill * 0.2 : s.fill;
-    ctx.fillStyle = colors.series[s.id] || colors.text2;
-    if (raw) {
-      fillRaw(ctx, chart, s, g, xa, xb);
-    } else {
-      fillEnvelope(ctx, s, g, bStart, bEnd);
-    }
-  }
-  ctx.globalAlpha = 1;
-
-  for (let i = chart.series.length - 1; i >= 0; i--) {
-    const s = chart.series[i];
-    if (!s.visible) continue;
-    const y = column(chart.store, s.channel);
-    if (y.length === 0) continue;
-    applyStrokeStyle(ctx, chart, s, colors);
-    if (raw) strokeRaw(ctx, chart, s, g, xa, xb);
-    else strokeEnvelope(ctx, s, g, bStart, bEnd);
-  }
-  ctx.globalAlpha = 1;
-  ctx.setLineDash(EMPTY_DASH);
-}
-
-/**
  * Filled area under a raw-mode trace.
  * @param {CanvasRenderingContext2D} ctx Target context.
  * @param {object} chart The chart.
- * @param {object} s Series.
+ * @param {object} t Trace.
  * @param {object} g Geometry in use.
  * @param {number} xa Range start, x-channel unit.
  * @param {number} xb Range end, x-channel unit.
  * @returns {void}
  */
-function fillRaw(ctx, chart, s, g, xa, xb) {
+function fillRaw(ctx, chart, t, g, xa, xb) {
   const xcol = column(chart.store, xChannel(chart));
-  const y = column(chart.store, s.channel);
+  const y = column(chart.store, t.channel);
   let n = xcol.length;
   if (y.length < n) n = y.length;
   if (n === 0) return;
@@ -1183,7 +1467,7 @@ function fillRaw(ctx, chart, s, g, xa, xb) {
     const v = y[i];
     if (v !== v) continue;
     const px = bx + xcol[i] * kx;
-    const py = clamp(s.bPix - v * s.kPix, g.py0, base);
+    const py = clamp(t.bPix - v * t.kPix, g.py0, base);
     if (!started) {
       ctx.moveTo(px, base);
       started = true;
@@ -1199,6 +1483,69 @@ function fillRaw(ctx, chart, s, g, xa, xb) {
 }
 
 /**
+ * Paint every lit trace over a bin range into a context, decimating first. Draw order is:
+ * the %B context fill, then PV pens in reverse rail order so the first pen ends on top,
+ * then SP pens last of all — a setpoint must always be legible against its own PV.
+ * @param {object} chart The chart.
+ * @param {CanvasRenderingContext2D} ctx Target context.
+ * @param {object} g Geometry in use.
+ * @param {object} colors Colour map in use.
+ * @param {number} bStart First bin, absolute.
+ * @param {number} bEnd One past the last bin, absolute.
+ * @param {Int32Array|null} starts Boundary table covering `[bStart,bEnd]`, or null to use
+ *   the chart's cached full-window table.
+ * @param {number} off Bin index that `starts[0]` refers to.
+ * @returns {void}
+ */
+function paintTraceBins(chart, ctx, g, colors, bStart, bEnd, starts, off) {
+  if (bEnd <= bStart || !chart.store) return;
+  const table = starts || chart.pixelStart;
+  const tOff = starts ? off : 0;
+  const raw = chart.rawMode;
+  const span = chart.x1 - chart.x0;
+  const xa = chart.x0 + ((bStart - 0.5) * span) / g.pixels;
+  const xb = chart.x0 + ((bEnd + 0.5) * span) / g.pixels;
+
+  for (let i = 0; i < chart.traces.length; i++) {
+    const t = chart.traces[i];
+    if (!t.pen.visible) continue;
+    const y = column(chart.store, t.channel);
+    if (y.length === 0) continue;
+    if (!raw) decimateBins(y, table, tOff, bStart, bEnd, t.minBuf, t.maxBuf);
+  }
+
+  for (let i = 0; i < chart.traces.length; i++) {
+    const t = chart.traces[i];
+    const fill = t.isSp ? 0 : t.pen.fill;
+    if (!t.pen.visible || !(fill > 0)) continue;
+    if (column(chart.store, t.channel).length === 0) continue;
+    ctx.globalAlpha = t.pen.dim ? fill * 0.25 : fill;
+    ctx.fillStyle = colors.pen[t.pen.id];
+    if (raw) fillRaw(ctx, chart, t, g, xa, xb);
+    else fillEnvelope(ctx, t, g, bStart, bEnd);
+  }
+  ctx.globalAlpha = 1;
+
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = chart.traces.length - 1; i >= 0; i--) {
+      const t = chart.traces[i];
+      if (!t.pen.visible) continue;
+      if ((pass === 0) === t.isSp) continue;
+      if (column(chart.store, t.channel).length === 0) continue;
+      ctx.strokeStyle = colors.pen[t.pen.id];
+      ctx.lineWidth = t.isSp ? SP_WIDTH : chart.contrastMore ? 2 : PV_WIDTH;
+      ctx.globalAlpha = t.pen.dim ? 0.22 : 1;
+      ctx.setLineDash(t.isSp ? SP_DASH : EMPTY_DASH);
+      if (raw) strokeRaw(ctx, chart, t, g, xa, xb);
+      else if (t.isSp) strokeStep(ctx, t, g, bStart, bEnd);
+      else strokeEnvelope(ctx, t, g, bStart, bEnd);
+    }
+  }
+  ctx.globalAlpha = 1;
+  ctx.setLineDash(EMPTY_DASH);
+}
+
+/**
  * Clear the plot rectangle of a dpr-scaled context.
  * @param {CanvasRenderingContext2D} ctx Target context.
  * @param {object} g Geometry in use.
@@ -1206,42 +1553,6 @@ function fillRaw(ctx, chart, s, g, xa, xb) {
  */
 function clearPlot(ctx, g) {
   ctx.clearRect(g.px0 - 1, g.py0 - 1, g.plotW + 2, g.plotH + 2);
-}
-
-/**
- * Full traces repaint over the whole window. When following, the result is painted into
- * the detached blit buffer and composited; otherwise it goes straight to the traces
- * canvas.
- * @param {object} chart The chart.
- * @returns {void}
- */
-function paintTracesFull(chart) {
-  const g = chart.geom;
-  const colors = chart.colors;
-  chart.rawMode = samplesPerPixel(chart, g) < RAW_SPP;
-  if (!chart.rawMode) ensurePixelTable(chart);
-  prepareMapping(chart, g);
-
-  chart.scrollPx = 0; // the buffer is about to be repainted at the CURRENT window
-  const useBuf = chart.follow && !chart.interacting;
-  const ctx = useBuf ? chart.blit.ctx : chart.gTraces;
-  clearPlot(ctx, g);
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(g.px0, g.py0 - 1, g.plotW, g.plotH + 2);
-  ctx.clip();
-  paintSeriesBins(chart, ctx, g, colors, 0, g.pixels, null, 0);
-  ctx.restore();
-
-  chart.blit.valid = useBuf;
-  if (useBuf) {
-    chart.blit.validPx = Math.max(0, liveEdgeBin(chart) - 2);
-    // Everything right of the finalized edge is repainted from live data every frame.
-    clearBufferRight(chart, chart.blit.validPx);
-    compositeAndLive(chart);
-  }
-  chart.lastPaintedN = chart.store ? chart.store.n : 0;
-  chart.dirty.traces = false;
 }
 
 /**
@@ -1272,9 +1583,9 @@ function clearBufferRight(chart, fromBin) {
 }
 
 /**
- * Composite the finalized buffer onto the traces canvas and paint the newest <=3 px
- * column live. The buffer is blitted with an identity transform so the copy is an exact
- * integer device-pixel move with no resampling (§6.26, §11 C-38).
+ * Composite the finalized buffer onto the traces canvas and paint the newest columns live.
+ * The buffer is blitted with an identity transform so the copy is an exact integer
+ * device-pixel move with no resampling.
  * @param {object} chart The chart.
  * @returns {void}
  */
@@ -1299,14 +1610,49 @@ function compositeAndLive(chart) {
     const cx = g.px0 + chart.blit.validPx / g.dpr;
     ctx.rect(cx, g.py0 - 1, g.px1 - cx + 1, g.plotH + 2);
     ctx.clip();
-    paintSeriesBins(chart, ctx, g, chart.colors, from, edge, starts, from);
+    paintTraceBins(chart, ctx, g, chart.colors, from, edge, starts, from);
     ctx.restore();
   }
 }
 
 /**
- * The append-only fast path: shift the buffer by whole device pixels, finalize any
- * columns that have fallen more than 2 px behind the live edge, then composite.
+ * Full traces repaint over the whole window. When following, the result is painted into
+ * the detached blit buffer and composited; otherwise it goes straight to the traces canvas.
+ * @param {object} chart The chart.
+ * @returns {void}
+ */
+function paintTracesFull(chart) {
+  const g = chart.geom;
+  const colors = chart.colors;
+  chart.rawMode = samplesPerPixel(chart, g) < RAW_SPP;
+  if (!chart.rawMode) ensurePixelTable(chart);
+  prepareMapping(chart, g);
+
+  chart.scrollPx = 0; // the buffer is about to be repainted at the CURRENT window
+  const useBuf = chart.follow && !chart.interacting;
+  const ctx = useBuf ? chart.blit.ctx : chart.gTraces;
+  clearPlot(ctx, g);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(g.px0, g.py0 - 1, g.plotW, g.plotH + 2);
+  ctx.clip();
+  paintTraceBins(chart, ctx, g, colors, 0, g.pixels, null, 0);
+  ctx.restore();
+
+  chart.blit.valid = useBuf;
+  if (useBuf) {
+    chart.blit.validPx = Math.max(0, liveEdgeBin(chart) - 2);
+    // Everything right of the finalized edge is repainted from live data every frame.
+    clearBufferRight(chart, chart.blit.validPx);
+    compositeAndLive(chart);
+  }
+  chart.lastPaintedN = chart.store ? chart.store.n : 0;
+  chart.dirty.traces = false;
+}
+
+/**
+ * The append-only fast path: shift the buffer by whole device pixels, finalize any columns
+ * that have fallen more than 2 px behind the live edge, then composite.
  * @param {object} chart The chart.
  * @returns {boolean} True when the fast path ran; false when a full repaint is required.
  */
@@ -1342,7 +1688,7 @@ function paintTracesAppend(chart) {
     const cx = g.px0 + b.validPx / g.dpr;
     ctx.rect(cx, g.py0 - 1, (newValid - b.validPx) / g.dpr + 1, g.plotH + 2);
     ctx.clip();
-    paintSeriesBins(chart, ctx, g, chart.colors, from, newValid, starts, from);
+    paintTraceBins(chart, ctx, g, chart.colors, from, newValid, starts, from);
     ctx.restore();
     b.validPx = newValid;
   }
@@ -1353,12 +1699,12 @@ function paintTracesAppend(chart) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* 8. STATIC LAYER — axes, bands, ticks, annotations                          */
+/* 10. STATIC LAYER — well, graticule, bands, ticks, annotations               */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Compute the x tick positions for the current window, in display units.
- * Nice-number spacing targeting 60–110 px (§9.3.2).
+ * Compute the x tick positions for the current window, in display units. Nice-number
+ * spacing targeting 60–110 px.
  * @param {object} chart The chart.
  * @param {object} g Geometry in use.
  * @returns {{first:number, step:number, count:number, decimals:number}} Tick plan.
@@ -1382,7 +1728,7 @@ function xTickPlan(chart, g) {
  */
 function yTickPlan(a, g) {
   const span = a.aMax - a.aMin;
-  const target = clamp(Math.round(g.plotH / 48), 2, 12);
+  const target = clamp(Math.round(g.plotH / 44), 2, 12);
   const step = niceStep(span / target);
   const first = Math.ceil(a.aMin / step - 1e-9) * step;
   const count = Math.max(0, Math.floor((a.aMax - first) / step + 1e-9) + 1);
@@ -1390,7 +1736,7 @@ function yTickPlan(a, g) {
 }
 
 /**
- * Truncate a label to a pixel budget with an ellipsis (§9.3.3).
+ * Truncate a label to a pixel budget with an ellipsis.
  * @param {CanvasRenderingContext2D} ctx Context with the final font set.
  * @param {string} text Source text.
  * @param {number} maxW Budget, css px.
@@ -1410,7 +1756,7 @@ function ellipsize(ctx, text, maxW) {
 }
 
 /**
- * Paint the phase/block shading bands and their labels (§9.3.3).
+ * Paint the phase/block shading bands and their labels.
  * @param {object} chart The chart.
  * @param {CanvasRenderingContext2D} ctx Static context.
  * @param {object} g Geometry in use.
@@ -1419,6 +1765,7 @@ function ellipsize(ctx, text, maxW) {
  */
 function paintBands(chart, ctx, g, colors) {
   const bands = chart.bands;
+  chart.bandLabelSpots.length = 0;
   if (!bands || bands.length === 0) return;
   const span = chart.x1 - chart.x0;
   const kx = g.plotW / span;
@@ -1427,10 +1774,9 @@ function paintBands(chart, ctx, g, colors) {
   ctx.beginPath();
   ctx.rect(g.px0, g.py0 - g.padT, g.plotW, g.plotH + g.padT);
   ctx.clip();
-  ctx.font = '600 10px ' + FONT_UI;
+  ctx.font = '700 9px ' + FONT_UI;
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
-  chart.bandLabelSpots.length = 0;
   for (let i = 0; i < bands.length; i++) {
     const b = bands[i];
     if (b.x1 <= chart.x0 || b.x0 >= chart.x1) continue;
@@ -1438,47 +1784,36 @@ function paintBands(chart, ctx, g, colors) {
     const a1 = Math.min(b.x1, chart.x1) * kx + bx;
     const w = a1 - a0;
     if (!(w > 0)) continue;
-    if (chart.contrastMore) {
-      ctx.strokeStyle = colors.lineStrong;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(Math.round(a0) + 0.5, g.py0);
-      ctx.lineTo(Math.round(a0) + 0.5, g.py1);
-      ctx.stroke();
-    } else {
-      ctx.fillStyle = i % 2 === 0 ? colors.bandA : colors.bandB;
+    ctx.fillStyle = i % 2 === 0 ? BAND_A : BAND_B;
+    ctx.fillRect(a0, g.py0, w, g.plotH);
+    const tint = BAND_TINT[b.kind];
+    if (tint) {
+      ctx.fillStyle = tint;
       ctx.fillRect(a0, g.py0, w, g.plotH);
-      const tint = BAND_TINT[b.kind];
-      if (tint) {
-        ctx.fillStyle = tint;
-        ctx.fillRect(a0, g.py0, w, g.plotH);
-      }
-      ctx.fillStyle = colors.lineSoft;
-      ctx.fillRect(Math.round(a0), g.py0, 1, g.plotH);
     }
+    ctx.fillStyle = colors.plotGrid;
+    ctx.fillRect(Math.round(a0), g.py0, 1, g.plotH);
     const label = b.label ? String(b.label).toUpperCase() : '';
     if (!label) continue;
     if (w < 34) {
       chart.bandLabelSpots.push({ x0: a0, x1: a1, text: label });
       continue;
     }
-    ctx.fillStyle = colors.text3;
-    const fitted = ellipsize(ctx, label, w - 8);
-    if (fitted) ctx.fillText(fitted, a0 + 4, g.py0 - 15);
+    ctx.fillStyle = colors.plotAxis;
+    const fitted = ellipsize(ctx, label, w - 6);
+    if (fitted) ctx.fillText(fitted, a0 + 3, g.py0 - 12);
   }
   ctx.restore();
 }
 
 /**
- * Paint the pooled-fraction region: a translucent accent rect with solid edges and a
- * top drag handle (§9.3.3).
+ * Paint the pooled-fraction region: an amber wash with solid edges and a top drag handle.
  * @param {object} chart The chart.
  * @param {CanvasRenderingContext2D} ctx Static context.
  * @param {object} g Geometry in use.
- * @param {object} colors Colour map in use.
  * @returns {void}
  */
-function paintPool(chart, ctx, g, colors) {
+function paintPool(chart, ctx, g) {
   const p = chart.pool;
   if (!p.on) return;
   const span = chart.x1 - chart.x0;
@@ -1487,24 +1822,24 @@ function paintPool(chart, ctx, g, colors) {
   const a0 = clamp(p.x0 * kx + bx, g.px0, g.px1);
   const a1 = clamp(p.x1 * kx + bx, g.px0, g.px1);
   if (!(a1 > a0)) return;
-  ctx.fillStyle = colors.accentSoft;
+  ctx.fillStyle = POOL_FILL;
   ctx.fillRect(a0, g.py0, a1 - a0, g.plotH);
-  ctx.strokeStyle = colors.accent;
-  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = POOL_EDGE;
+  ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(a0, g.py0);
-  ctx.lineTo(a0, g.py1);
-  ctx.moveTo(a1, g.py0);
-  ctx.lineTo(a1, g.py1);
+  ctx.moveTo(Math.round(a0) + 0.5, g.py0);
+  ctx.lineTo(Math.round(a0) + 0.5, g.py1);
+  ctx.moveTo(Math.round(a1) + 0.5, g.py0);
+  ctx.lineTo(Math.round(a1) + 0.5, g.py1);
   ctx.stroke();
-  ctx.fillStyle = colors.accent;
-  ctx.fillRect(a0, g.py0, a1 - a0, 4);
+  ctx.fillStyle = POOL_EDGE;
+  ctx.fillRect(a0, g.py0, a1 - a0, 3);
 }
 
 /**
- * Paint fraction ticks, event markers and peak flags (§9.3.3). Tick ids are drawn on
- * every fifth mark, or on every mark once they are more than 40 px apart. Peak flags use
- * greedy anti-overlap in 14 px steps, capped at three rows, then a leader line.
+ * Paint fraction ticks, event chevrons and peak flags. Tick ids are drawn on every fifth
+ * mark, or on every mark once they are more than 40 px apart. Peak flags use greedy
+ * anti-overlap in 13 px steps, capped at three rows, then a leader line.
  * @param {object} chart The chart.
  * @param {CanvasRenderingContext2D} ctx Static context.
  * @param {object} g Geometry in use.
@@ -1518,9 +1853,9 @@ function paintMarkers(chart, ctx, g, colors) {
   const kx = g.plotW / span;
   const bx = g.px0 - chart.x0 * kx;
 
-  // --- ticks -------------------------------------------------------------
+  // --- fraction ticks ------------------------------------------------------
   ctx.save();
-  ctx.font = '9px ' + FONT_NUM;
+  ctx.font = '8px ' + FONT_NUM;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   let tickIdx = 0;
@@ -1539,33 +1874,31 @@ function paintMarkers(chart, ctx, g, colors) {
     const px = m.x * kx + bx;
     tickIdx++;
     if (px < g.px0 - 1 || px > g.px1 + 1) continue;
-    ctx.strokeStyle = colors.text3;
+    ctx.strokeStyle = colors.plotAxis;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(Math.round(px) + 0.5, g.py1);
-    ctx.lineTo(Math.round(px) + 0.5, g.py1 + 8);
+    ctx.moveTo(Math.round(px) + 0.5, g.py1 + 1);
+    ctx.lineTo(Math.round(px) + 0.5, g.py1 + 5);
     ctx.stroke();
     if (m.label && (tickIdx - 1) % labelEvery === 0) {
-      ctx.fillStyle = colors.text3;
-      ctx.fillText(String(m.label), px, g.py1 + 9);
+      ctx.fillStyle = colors.plotAxis;
+      ctx.fillText(String(m.label), px, g.py1 + 5);
     }
   }
   ctx.restore();
 
-  // --- full-height lines and axis chevrons -------------------------------
+  // --- full-height event lines --------------------------------------------
   ctx.save();
   ctx.beginPath();
   ctx.rect(g.px0, g.py0 - g.padT, g.plotW, g.plotH + g.padT);
   ctx.clip();
-  ctx.font = '9px ' + FONT_UI;
-  ctx.textBaseline = 'top';
   for (let i = 0; i < ms.length; i++) {
     const m = ms[i];
     if (m.kind !== 'line') continue;
     const px = m.x * kx + bx;
     if (px < g.px0 - 1 || px > g.px1 + 1) continue;
     ctx.strokeStyle = m.severity === 'ALARM' || m.severity === 'CRITICAL' ? colors.alarm
-      : m.severity === 'WARN' ? colors.warn : colors.lineStrong;
+      : m.severity === 'WARN' ? colors.warn : colors.plotAxis;
     ctx.lineWidth = 1;
     ctx.setLineDash(MARKER_DASH);
     ctx.beginPath();
@@ -1573,48 +1906,47 @@ function paintMarkers(chart, ctx, g, colors) {
     ctx.lineTo(Math.round(px) + 0.5, g.py1);
     ctx.stroke();
     ctx.setLineDash(EMPTY_DASH);
-    // chevron at the bottom axis
     ctx.fillStyle = ctx.strokeStyle;
     ctx.beginPath();
-    ctx.moveTo(px - 4, g.py1 + 1);
-    ctx.lineTo(px + 4, g.py1 + 1);
-    ctx.lineTo(px, g.py1 + 7);
+    ctx.moveTo(px - 3, g.py0);
+    ctx.lineTo(px + 3, g.py0);
+    ctx.lineTo(px, g.py0 + 5);
     ctx.closePath();
     ctx.fill();
   }
   ctx.restore();
 
-  // --- peak flags --------------------------------------------------------
+  // --- peak flags ----------------------------------------------------------
   const flags = [];
   for (let i = 0; i < ms.length; i++) {
     const m = ms[i];
     if (m.kind !== 'flag') continue;
     const px = m.x * kx + bx;
     if (px < g.px0 - 40 || px > g.px1 + 40) continue;
-    const s = m.seriesId ? chart.seriesById.get(m.seriesId) : null;
-    const apexY = s && typeof m.y === 'number' && isFinite(m.y)
-      ? clamp(s.bPix - m.y * s.kPix, g.py0, g.py1)
+    const pen = m.seriesId ? chart.penById.get(m.seriesId) : null;
+    const apexY = pen && typeof m.y === 'number' && isFinite(m.y)
+      ? clamp(pen.bPix - m.y * pen.kPix, g.py0, g.py1)
       : g.py0 + 10;
-    flags.push({ m, px, apexY, seriesId: m.seriesId });
+    flags.push({ m, px, apexY, pen });
   }
   flags.sort((a, b) => a.apexY - b.apexY);
   const placed = [];
   ctx.save();
-  ctx.font = '600 10px ' + FONT_UI;
+  ctx.font = '700 9px ' + FONT_NUM;
   ctx.textBaseline = 'bottom';
   ctx.textAlign = 'center';
   for (let i = 0; i < flags.length; i++) {
     const f = flags[i];
     const text = String(f.m.label || '');
-    const w = ctx.measureText(text).width + 8;
+    const w = ctx.measureText(text).width + 6;
     let row = 0;
-    let ly = f.apexY - 8;
+    let ly = f.apexY - 7;
     for (; row < 3; row++) {
-      ly = f.apexY - 8 - row * 14;
+      ly = f.apexY - 7 - row * 13;
       let hit = false;
       for (let k = 0; k < placed.length; k++) {
         const q = placed[k];
-        if (Math.abs(q.y - ly) < 12 && Math.abs(q.x - f.px) < (q.w + w) / 2) {
+        if (Math.abs(q.y - ly) < 11 && Math.abs(q.x - f.px) < (q.w + w) / 2) {
           hit = true;
           break;
         }
@@ -1622,19 +1954,16 @@ function paintMarkers(chart, ctx, g, colors) {
       if (!hit) break;
     }
     const leader = row >= 3;
-    if (leader) ly = f.apexY - 8 - 2 * 14;
-    ly = Math.max(g.py0 + 10, ly);
+    if (leader) ly = f.apexY - 7 - 2 * 13;
+    ly = Math.max(g.py0 + 9, ly);
     placed.push({ x: f.px, y: ly, w });
-    // A flag anchored to a series takes that series' colour; an unanchored event flag
-    // takes its severity colour, so an alarm annotation is never mistaken for a peak.
     const sev = f.m.severity;
-    const col = f.seriesId && chart.colors.series[f.seriesId]
-      ? chart.colors.series[f.seriesId]
+    const col = f.pen && chart.colors.pen[f.pen.id]
+      ? chart.colors.pen[f.pen.id]
       : sev === 'ALARM' || sev === 'CRITICAL' || sev === 'FAULT' ? colors.alarm
-        : sev === 'WARN' ? colors.warn : colors.text2;
-    // drop line at the apex
+        : sev === 'WARN' ? colors.warn : colors.plotAxis;
     ctx.strokeStyle = col;
-    ctx.globalAlpha = 0.7;
+    ctx.globalAlpha = 0.75;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(Math.round(f.px) + 0.5, f.apexY);
@@ -1642,15 +1971,15 @@ function paintMarkers(chart, ctx, g, colors) {
     ctx.stroke();
     ctx.globalAlpha = 1;
     if (leader) {
-      ctx.strokeStyle = colors.text3;
+      ctx.strokeStyle = colors.plotAxis;
       ctx.beginPath();
       ctx.moveTo(f.px, ly + 2);
-      ctx.lineTo(f.px + 10, ly - 4);
+      ctx.lineTo(f.px + 9, ly - 4);
       ctx.stroke();
     }
-    // integration boundaries
     if (typeof f.m.x0 === 'number' && typeof f.m.x1 === 'number') {
-      ctx.strokeStyle = colors.text3;
+      ctx.strokeStyle = colors.plotAxis;
+      ctx.globalAlpha = 0.6;
       ctx.setLineDash(MARKER_DASH);
       ctx.beginPath();
       const b0 = f.m.x0 * kx + bx;
@@ -1661,23 +1990,22 @@ function paintMarkers(chart, ctx, g, colors) {
       ctx.lineTo(b1, f.apexY);
       ctx.stroke();
       ctx.setLineDash(EMPTY_DASH);
+      ctx.globalAlpha = 1;
     }
     if (text) {
-      ctx.fillStyle = colors.text1;
-      ctx.fillText(text, leader ? f.px + 10 + w / 2 : f.px, ly);
+      ctx.fillStyle = col;
+      ctx.fillText(text, leader ? f.px + 9 + w / 2 : f.px, ly);
     }
   }
   ctx.restore();
 }
 
-const MARKER_DASH = [3, 3];
-
 /**
- * Paint the axes, gridlines, band shading, annotations and the empty state.
- * Repainted only on window/zoom/theme/visibility change or when a band, marker or pool
- * set changes — under 5 repaints per second even during a run (§6.26).
+ * Paint the well: black ground, the classic dark-green graticule, phase bands, pooled
+ * region, fraction ticks and every axis. Repainted only on a window, zoom, theme, pen or
+ * annotation change — a handful of times per second even during a run.
  * @param {object} chart The chart.
- * @param {object} rc Render target: `{ ctx, geom, colors, background }`.
+ * @param {object} rc Render target `{ ctx, geom, colors }`.
  * @returns {void}
  */
 function paintStatic(chart, rc) {
@@ -1685,20 +2013,17 @@ function paintStatic(chart, rc) {
   const g = rc.geom;
   const colors = rc.colors;
   ctx.clearRect(0, 0, g.cssW, g.cssH);
-  if (rc.background) {
-    ctx.fillStyle = colors.bg;
-    ctx.fillRect(0, 0, g.cssW, g.cssH);
-  }
+  ctx.fillStyle = colors.plotBg;
+  ctx.fillRect(0, 0, g.cssW, g.cssH);
   prepareMapping(chart, g);
   paintBands(chart, ctx, g, colors);
-  paintPool(chart, ctx, g, colors);
+  paintPool(chart, ctx, g);
 
   const xp = xTickPlan(chart, g);
   const kx = g.plotW / (chart.x1 - chart.x0);
   const bx = g.px0 - chart.x0 * kx;
 
-  // vertical gridlines
-  ctx.strokeStyle = colors.grid;
+  ctx.strokeStyle = colors.plotGrid;
   ctx.lineWidth = 1;
   ctx.beginPath();
   for (let i = 0; i < xp.count; i++) {
@@ -1708,14 +2033,9 @@ function paintStatic(chart, rc) {
     ctx.moveTo(px, g.py0);
     ctx.lineTo(px, g.py1);
   }
-  ctx.stroke();
-
-  // horizontal gridlines from the first visible axis
   const gridAxis = chart.yAxes.find((a) => a.visible) || null;
   if (gridAxis) {
     const yp = yTickPlan(gridAxis, g);
-    ctx.strokeStyle = colors.grid;
-    ctx.beginPath();
     for (let i = 0; i < yp.count; i++) {
       const v = yp.first + i * yp.step;
       const py = Math.round(gridAxis.b - v * gridAxis.k) + 0.5;
@@ -1723,47 +2043,49 @@ function paintStatic(chart, rc) {
       ctx.moveTo(g.px0, py);
       ctx.lineTo(g.px1, py);
     }
-    ctx.stroke();
   }
+  ctx.stroke();
 
   paintMarkers(chart, ctx, g, colors);
 
-  // plot frame
-  ctx.strokeStyle = colors.line;
+  ctx.strokeStyle = colors.plotAxis;
   ctx.lineWidth = 1;
-  ctx.strokeRect(Math.round(g.px0) + 0.5, Math.round(g.py0) + 0.5, Math.round(g.plotW) - 1, Math.round(g.plotH) - 1);
+  ctx.strokeRect(
+    Math.round(g.px0) + 0.5, Math.round(g.py0) + 0.5,
+    Math.max(1, Math.round(g.plotW) - 1), Math.max(1, Math.round(g.plotH) - 1)
+  );
 
-  // x tick labels and title
-  ctx.fillStyle = colors.text2;
-  ctx.font = '10px ' + FONT_NUM;
+  // x tick labels, then the engineering unit hard against the right end
+  ctx.fillStyle = colors.plotAxis;
+  ctx.font = '9px ' + FONT_NUM;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
+  const euGuard = g.px1 - 26;
   for (let i = 0; i < xp.count; i++) {
     const dv = xp.first + i * xp.step;
     const px = fromDisp(chart, dv) * kx + bx;
-    if (px < g.px0 - 1 || px > g.px1 + 1) continue;
-    ctx.fillText(dv.toFixed(xp.decimals), px, g.py1 + 18);
+    if (px < g.px0 - 1 || px > euGuard) continue;
+    ctx.fillText(dv.toFixed(xp.decimals), px, g.py1 + 14);
   }
-  ctx.fillStyle = colors.text3;
-  ctx.font = '10px ' + FONT_UI;
+  ctx.font = '700 9px ' + FONT_UI;
   ctx.textAlign = 'right';
-  ctx.fillText(X_TITLE[chart.xMode], g.px1, g.py1 + 30);
+  ctx.fillText(X_EU[chart.xMode], g.px1, g.py1 + 14);
 
   paintYAxes(chart, ctx, g, colors);
 
   if (!chart.store || chart.store.n === 0) {
-    ctx.fillStyle = colors.text3;
-    ctx.font = '12px ' + FONT_UI;
+    ctx.fillStyle = colors.fldStale;
+    ctx.font = '700 11px ' + FONT_UI;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('No run yet. Load a scenario or press Start.', (g.px0 + g.px1) / 2, (g.py0 + g.py1) / 2);
+    ctx.fillText('NO DATA', (g.px0 + g.px1) / 2, (g.py0 + g.py1) / 2);
   }
 }
 
 /**
- * Paint every visible y axis: the spine, its ticks and its title. R2 additionally draws
- * its `alt` scale in the alt series' colour, which is how pH and %B share one 46 px
- * gutter without either becoming unreadable (§9.3.1).
+ * Paint every visible y axis: the spine, its ticks and its engineering unit. The `pct`
+ * gutter additionally draws its `alt` scale in the alt pen's colour, which is how %B and
+ * pH share one 40 px gutter without either becoming unreadable.
  * @param {object} chart The chart.
  * @param {CanvasRenderingContext2D} ctx Static context.
  * @param {object} g Geometry in use.
@@ -1777,46 +2099,51 @@ function paintYAxes(chart, ctx, g, colors) {
     if (!a.visible) continue;
     const left = a.side === 'left';
     const spineX = Math.round(a.gutterX) + 0.5;
-    ctx.strokeStyle = colors.line;
+    ctx.strokeStyle = colors.plotAxis;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(spineX, g.py0);
     ctx.lineTo(spineX, g.py1);
     ctx.stroke();
 
-    // Does any visible series on this axis use the primary scale?
     let primaryUsed = false;
-    let altSeries = null;
-    for (let j = 0; j < chart.series.length; j++) {
-      const s = chart.series[j];
-      if (!s.visible || s.yAxis !== a.id) continue;
-      if (s.alt && a.alt) altSeries = s;
-      else primaryUsed = true;
+    let altPen = null;
+    let ownPen = null;
+    for (let j = 0; j < chart.pens.length; j++) {
+      const p = chart.pens[j];
+      if (!p.visible || axisOf(chart, p) !== a) continue;
+      if (p.alt && a.alt) altPen = p;
+      else {
+        primaryUsed = true;
+        if (!ownPen) ownPen = p;
+      }
     }
-    const showPrimary = primaryUsed || !altSeries;
+    const showPrimary = primaryUsed || !altPen;
     const yp = yTickPlan(a, g);
-    ctx.font = '10px ' + FONT_NUM;
+    // A gutter serving exactly one pen is tinted with that pen, which is how an operator
+    // finds the right scale without reading anything.
+    const primaryInk = ownPen && !altPen ? colors.pen[ownPen.id] : colors.plotAxis;
+    ctx.font = '9px ' + FONT_NUM;
     ctx.textAlign = left ? 'right' : 'left';
     for (let k = 0; k < yp.count; k++) {
       const v = yp.first + k * yp.step;
       const py = a.b - v * a.k;
       if (py < g.py0 - 1 || py > g.py1 + 1) continue;
-      ctx.strokeStyle = colors.line;
+      ctx.strokeStyle = colors.plotAxis;
       ctx.beginPath();
       ctx.moveTo(spineX, Math.round(py) + 0.5);
-      ctx.lineTo(spineX + (left ? -4 : 4), Math.round(py) + 0.5);
+      ctx.lineTo(spineX + (left ? -3 : 3), Math.round(py) + 0.5);
       ctx.stroke();
       if (!showPrimary) continue;
-      ctx.fillStyle = colors.text2;
-      ctx.fillText(v.toFixed(yp.decimals), spineX + (left ? -7 : 7), py);
+      ctx.fillStyle = primaryInk;
+      ctx.fillText(v.toFixed(yp.decimals), spineX + (left ? -5 : 5), py);
     }
-    if (altSeries && a.alt) {
+    if (altPen && a.alt) {
       const span = a.aMax - a.aMin;
       const aspan = a.alt.max - a.alt.min;
-      ctx.fillStyle = colors.series[altSeries.id] || colors.text3;
-      ctx.font = '9px ' + FONT_NUM;
-      ctx.textAlign = left ? 'right' : 'left';
-      const off = showPrimary ? (left ? -34 : 34) : (left ? -7 : 7);
+      ctx.fillStyle = colors.pen[altPen.id];
+      ctx.font = '8px ' + FONT_NUM;
+      const off = showPrimary ? (left ? -28 : 28) : (left ? -5 : 5);
       for (let k = 0; k < yp.count; k++) {
         const v = yp.first + k * yp.step;
         const py = a.b - v * a.k;
@@ -1826,29 +2153,28 @@ function paintYAxes(chart, ctx, g, colors) {
       }
     }
 
-    // title
-    ctx.save();
-    ctx.translate(spineX + (left ? -40 : 40), (g.py0 + g.py1) / 2);
-    ctx.rotate(left ? -Math.PI / 2 : Math.PI / 2);
-    ctx.textAlign = 'center';
+    // engineering unit, at the top of its own gutter — never a sentence
+    ctx.font = '700 9px ' + FONT_UI;
+    ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
-    ctx.fillStyle = colors.text3;
-    ctx.font = '10px ' + FONT_UI;
-    const unit = a.unit ? ' (' + a.unit + ')' : '';
-    let title = a.label + unit;
-    if (altSeries && a.alt) title += '  ·  ' + a.alt.label;
-    ctx.fillText(ellipsize(ctx, title, g.plotH - 8), 0, left ? 0 : 10);
-    ctx.restore();
+    ctx.fillStyle = primaryInk;
+    const euText = a.eu + (altPen && a.alt && a.alt.eu ? '/' + a.alt.eu : '');
+    const budget = (left ? g.padL : RIGHT_AXIS_STEP) - 3;
+    ctx.fillText(ellipsize(ctx, euText, budget), spineX + (left ? -g.padL + 2 : 2), g.py0 - 3);
+    ctx.textBaseline = 'middle';
   }
 }
 
 /* -------------------------------------------------------------------------- */
-/* 9. OVERLAY LAYER                                                           */
+/* 11. OVERLAY LAYER                                                          */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Paint the crosshair, the drag rectangle, the live-edge marker and the hover ribbon
- * for narrow phase bands. Cleared and repainted every frame; budget 0.2 ms (§6.26).
+ * Paint the alarm limit lines, the live edge, the crosshair, the drag rectangle and the
+ * hover ribbon for narrow phase bands. Cleared and repainted every frame.
+ *
+ * The limit lines live here, above the traces, because a trip threshold that a trace can
+ * hide is worse than no threshold at all.
  * @param {object} chart The chart.
  * @returns {void}
  */
@@ -1863,19 +2189,42 @@ function paintOverlay(chart) {
   const kx = g.plotW / span;
   const bx = g.px0 - chart.x0 * kx;
 
+  // alarm limits: dashed, 1 px, the pen's own hue, captioned with the threshold value
+  ctx.font = '8px ' + FONT_NUM;
+  ctx.textBaseline = 'bottom';
+  ctx.textAlign = 'right';
+  for (let i = 0; i < chart.pens.length; i++) {
+    const p = chart.pens[i];
+    if (!p.visible || !(p.limit === p.limit)) continue;
+    const py = p.bPix - p.limit * p.kPix;
+    if (py < g.py0 || py > g.py1) continue;
+    ctx.strokeStyle = colors.pen[p.id];
+    ctx.lineWidth = SP_WIDTH;
+    ctx.setLineDash(SP_DASH);
+    ctx.lineDashOffset = g.px0 % (SP_DASH[0] + SP_DASH[1]);
+    ctx.beginPath();
+    ctx.moveTo(g.px0, Math.round(py) + 0.5);
+    ctx.lineTo(g.px1, Math.round(py) + 0.5);
+    ctx.stroke();
+    ctx.setLineDash(EMPTY_DASH);
+    ctx.lineDashOffset = 0;
+    ctx.fillStyle = colors.pen[p.id];
+    ctx.fillText(p.limit.toFixed(p.dec), g.px1 - 2, Math.round(py) - 1);
+  }
+
   // live edge
   if (chart.store && chart.store.n > 0) {
     const lx = liveX(chart) * kx + bx;
     if (lx >= g.px0 && lx <= g.px1) {
-      ctx.strokeStyle = colors.accent;
-      ctx.globalAlpha = 0.55;
+      ctx.strokeStyle = colors.plotAxis;
+      ctx.globalAlpha = 0.5;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(Math.round(lx) + 0.5, g.py0);
       ctx.lineTo(Math.round(lx) + 0.5, g.py1);
       ctx.stroke();
       ctx.globalAlpha = 1;
-      ctx.fillStyle = colors.accent;
+      ctx.fillStyle = colors.plotAxis;
       ctx.beginPath();
       ctx.moveTo(lx - 3, g.py0);
       ctx.lineTo(lx + 3, g.py0);
@@ -1885,11 +2234,11 @@ function paintOverlay(chart) {
     }
   }
 
-  // crosshair
+  // crosshair and per-pen dots
   if (chart.cursor.on && chart.cursor.x === chart.cursor.x) {
     const cx = chart.cursor.x * kx + bx;
     if (cx >= g.px0 - 1 && cx <= g.px1 + 1) {
-      ctx.strokeStyle = colors.text3;
+      ctx.strokeStyle = colors.plotAxis;
       ctx.lineWidth = 1;
       ctx.setLineDash(CROSS_DASH);
       ctx.beginPath();
@@ -1897,15 +2246,18 @@ function paintOverlay(chart) {
       ctx.lineTo(Math.round(cx) + 0.5, g.py1);
       ctx.stroke();
       ctx.setLineDash(EMPTY_DASH);
-      for (let i = 0; i < chart.series.length; i++) {
-        const s = chart.series[i];
-        if (!s.visible || !(s.cursorValue === s.cursorValue)) continue;
-        const py = s.bPix - s.cursorValue * s.kPix;
+      for (let i = 0; i < chart.traces.length; i++) {
+        const t = chart.traces[i];
+        if (!t.pen.visible || !(t.cursorValue === t.cursorValue)) continue;
+        const py = t.bPix - t.cursorValue * t.kPix;
         if (py < g.py0 || py > g.py1) continue;
-        ctx.fillStyle = colors.series[s.id] || colors.text2;
-        ctx.beginPath();
-        ctx.arc(cx, py, 2.5, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.fillStyle = colors.pen[t.pen.id];
+        if (t.isSp) ctx.fillRect(cx - 2.5, py - 2.5, 5, 5);
+        else {
+          ctx.beginPath();
+          ctx.arc(cx, py, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     }
   }
@@ -1917,60 +2269,56 @@ function paintOverlay(chart) {
     const a1 = Math.max(d.px0, d.pxNow);
     const b0 = d.mode === 'zoomXY' ? Math.min(d.py0, d.pyNow) : g.py0;
     const b1 = d.mode === 'zoomXY' ? Math.max(d.py0, d.pyNow) : g.py1;
-    ctx.fillStyle = colors.accentSoft;
+    ctx.fillStyle = POOL_FILL;
     ctx.fillRect(a0, b0, a1 - a0, b1 - b0);
-    ctx.strokeStyle = colors.accent;
+    ctx.strokeStyle = POOL_EDGE;
     ctx.lineWidth = 1;
     ctx.strokeRect(Math.round(a0) + 0.5, Math.round(b0) + 0.5, Math.round(a1 - a0), Math.round(b1 - b0));
   }
 
-  // hover ribbon for narrow bands
+  // hover ribbon for a band too narrow to carry its own label
   if (chart.hoverPx >= 0 && chart.bandLabelSpots.length > 0) {
     for (let i = 0; i < chart.bandLabelSpots.length; i++) {
       const sp = chart.bandLabelSpots[i];
       if (chart.hoverPx < sp.x0 || chart.hoverPx > sp.x1) continue;
-      ctx.font = '600 10px ' + FONT_UI;
+      ctx.font = '700 9px ' + FONT_UI;
       ctx.textBaseline = 'middle';
       ctx.textAlign = 'left';
-      const w = ctx.measureText(sp.text).width + 10;
-      const rx = clamp(sp.x0, g.px0, g.px1 - w);
-      ctx.fillStyle = colors.surface2;
-      ctx.fillRect(rx, g.py0 - 20, w, 16);
-      ctx.strokeStyle = colors.line;
+      const w = ctx.measureText(sp.text).width + 8;
+      const rx = clamp(sp.x0, g.px0, Math.max(g.px0, g.px1 - w));
+      ctx.fillStyle = colors.face;
+      ctx.fillRect(rx, g.py0 - 15, w, 14);
+      ctx.strokeStyle = colors.bevDk;
       ctx.lineWidth = 1;
-      ctx.strokeRect(Math.round(rx) + 0.5, Math.round(g.py0 - 20) + 0.5, Math.round(w), 16);
-      ctx.fillStyle = colors.text2;
-      ctx.fillText(sp.text, rx + 5, g.py0 - 12);
+      ctx.strokeRect(Math.round(rx) + 0.5, Math.round(g.py0 - 15) + 0.5, Math.round(w), 14);
+      ctx.fillStyle = colors.ink;
+      ctx.fillText(sp.text, rx + 4, g.py0 - 8);
       break;
     }
   }
 }
 
-const CROSS_DASH = [2, 3];
-
 /* -------------------------------------------------------------------------- */
-/* 10. OVERVIEW STRIP                                                         */
+/* 12. HISTORY STRIP                                                          */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Repaint the 36 px overview strip: the whole run decimated with
- * `log.decimateMinMax`, plus the draggable window brush (§9.3.4). Throttled to 4 Hz.
+ * Repaint the history strip: the whole run decimated with `log.decimateMinMax`, plus the
+ * draggable window brush. Throttled to 4 Hz.
  * @param {object} chart The chart.
  * @returns {void}
  */
 function paintOverview(chart) {
   if (!chart.ovCanvas) return;
-  const g = chart.geom;
   const ctx = chart.gOv;
   const colors = chart.colors;
-  const w = g.cssW;
-  const hgt = OVERVIEW_H;
+  const w = chart.ovW;
+  const hgt = chart.ovH;
+  const dpr = chart.geom.dpr;
   ctx.clearRect(0, 0, w, hgt);
-  ctx.fillStyle = colors.panel;
+  ctx.fillStyle = colors.plotBg;
   ctx.fillRect(0, 0, w, hgt);
-  ctx.strokeStyle = colors.lineSoft;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(0.5, 0.5, w - 1, hgt - 1);
+  chart.ovDirty = false;
   if (!chart.store || chart.store.n === 0) return;
 
   const xName = xChannel(chart);
@@ -1978,18 +2326,18 @@ function paintOverview(chart) {
   const full1 = xcol.length > 0 ? xcol[xcol.length - 1] : 1;
   const full0 = 0;
   const span = full1 - full0 > 0 ? full1 - full0 : 1;
-  const px0 = 2;
-  const px1 = w - 2;
-  const pix = Math.max(1, Math.round((px1 - px0) * g.dpr));
+  const px0 = 1;
+  const px1 = Math.max(px0 + 1, w - 1);
+  const pix = Math.max(1, Math.round((px1 - px0) * dpr));
   if (!chart.ovMin || chart.ovMin.length < pix) {
     chart.ovMin = new Float32Array(pix);
     chart.ovMax = new Float32Array(pix);
   }
-  const invDpr = 1 / g.dpr;
-  for (let i = chart.series.length - 1; i >= 0; i--) {
-    const s = chart.series[i];
-    if (!s.visible) continue;
-    decimateMinMax(chart.store, xName, s.channel, full0, full1, pix, chart.ovMin, chart.ovMax);
+  const invDpr = 1 / dpr;
+  for (let i = chart.traces.length - 1; i >= 0; i--) {
+    const t = chart.traces[i];
+    if (!t.pen.visible || t.isSp) continue;
+    decimateMinMax(chart.store, xName, t.channel, full0, full1, pix, chart.ovMin, chart.ovMax);
     let lo = Infinity;
     let hi = -Infinity;
     for (let b = 0; b < pix; b++) {
@@ -2001,9 +2349,9 @@ function paintOverview(chart) {
     }
     if (!(lo <= hi)) continue;
     if (hi === lo) hi = lo + 1;
-    const k = (hgt - 6) / (hi - lo);
-    const base = hgt - 3 + lo * k;
-    ctx.strokeStyle = colors.series[s.id] || colors.text3;
+    const k = (hgt - 4) / (hi - lo);
+    const base = hgt - 2 + lo * k;
+    ctx.strokeStyle = colors.pen[t.pen.id];
     ctx.lineWidth = 1;
     ctx.globalAlpha = 0.85;
     ctx.beginPath();
@@ -2029,80 +2377,196 @@ function paintOverview(chart) {
     ctx.globalAlpha = 1;
   }
 
-  // brush
   const kx = (px1 - px0) / span;
   const a0 = clamp(px0 + (chart.x0 - full0) * kx, px0, px1);
   const a1 = clamp(px0 + (chart.x1 - full0) * kx, px0, px1);
-  ctx.fillStyle = colors.accentSoft;
-  ctx.fillRect(a0, 1, Math.max(2, a1 - a0), hgt - 2);
-  ctx.strokeStyle = colors.accent;
+  ctx.fillStyle = POOL_FILL;
+  ctx.fillRect(a0, 0, Math.max(2, a1 - a0), hgt);
+  ctx.strokeStyle = POOL_EDGE;
   ctx.lineWidth = 1;
-  ctx.strokeRect(Math.round(a0) + 0.5, 1.5, Math.max(2, Math.round(a1 - a0)), hgt - 3);
+  ctx.strokeRect(Math.round(a0) + 0.5, 0.5, Math.max(2, Math.round(a1 - a0)), hgt - 1);
   chart.ovGeom = { px0, px1, full0, full1, kx };
-  chart.ovDirty = false;
 }
 
 /* -------------------------------------------------------------------------- */
-/* 11. CURSOR READOUT (DOM)                                                   */
+/* 13. THE LEGEND RAIL                                                        */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Rebuild the cursor card's rows when the visible series set changes. Rendered in DOM,
- * not canvas, so the text is selectable and reachable by assistive technology (§9.3.4).
- * @param {object} chart The chart.
- * @returns {void}
+ * Build one sunken label box: an optional caption, the digits, an optional EU suffix.
+ * @param {string} kind Digit class suffix — `'pv'`, `'sp'` or `'x'`.
+ * @param {string} caption Caption inside the box, uppercase, or `''`.
+ * @param {string} eu Engineering unit suffix, or `''`.
+ * @returns {{el:Element, val:Element, eu:Element, cap:Element|null}} The box.
  */
-function rebuildCursorRows(chart) {
-  let key = '';
-  for (let i = 0; i < chart.series.length; i++) {
-    if (chart.series[i].visible) key += chart.series[i].id + '|';
-  }
-  if (key === chart.cursorRowsKey) return;
-  chart.cursorRowsKey = key;
-  while (chart.cardBody.firstChild) chart.cardBody.removeChild(chart.cardBody.firstChild);
-  chart.cardRows.length = 0;
-  for (let i = 0; i < chart.series.length; i++) {
-    const s = chart.series[i];
-    if (!s.visible) continue;
-    const sw = h('span', { class: 'chart__sw' });
-    const lab = h('span', { class: 'chart__card-lab' }, s.label);
-    const val = h('span', { class: 'chart__card-val' }, '—');
-    const unit = h('span', { class: 'chart__card-unit' }, s.unit || '');
-    const row = h('div', { class: 'chart__card-row' }, sw, lab, val, unit);
-    chart.cardBody.appendChild(row);
-    chart.cardRows.push({ id: s.id, sw, val });
-  }
-  styleSwatches(chart);
+function labelBox(kind, caption, eu) {
+  const cap = caption ? h('em', {}, caption) : null;
+  const val = h('b', {}, '----');
+  const euEl = h('u', {}, eu || '');
+  const el = h('span', { class: 'ftx__fld ftx__fld--' + kind });
+  if (cap) el.appendChild(cap);
+  el.appendChild(val);
+  el.appendChild(euEl);
+  return { el, val, eu: euEl, cap };
 }
 
 /**
- * Paint each cursor-card swatch as the series' actual stroke sample — colour plus dash
- * signature — so colour is never the sole encoder (§9.3.1).
+ * The tooltip for one pen, taken verbatim from `data/glossary.js`. The screen carries no
+ * prose; every word of explanation lives here.
+ * @param {object} pen Pen.
+ * @returns {string} Title text, possibly empty.
+ */
+function penTitle(pen) {
+  const ids = [pen.gloss, pen.tag, pen.channel];
+  for (let i = 0; i < ids.length; i++) {
+    if (!ids[i]) continue;
+    const e = glossaryFor(ids[i]);
+    if (e) return e.term + '\n' + e.short;
+  }
+  return pen.tag + (pen.eu ? ' (' + pen.eu + ')' : '');
+}
+
+/**
+ * Build the legend rail: one row per pen — colour chip, ISA tag, a live PV label box, an
+ * SP or LIM box where one exists, the EU, and the pen's on/off checkbox. This rail is how
+ * the operator reads the trend.
  * @param {object} chart The chart.
  * @returns {void}
  */
-function styleSwatches(chart) {
-  for (let i = 0; i < chart.cardRows.length; i++) {
-    const r = chart.cardRows[i];
-    const s = chart.seriesById.get(r.id);
-    if (!s) continue;
-    const col = chart.colors.series[s.id] || chart.colors.text2;
-    if (s.dash && s.dash.length > 0) {
-      const on = s.dash[0];
-      const off = s.dash[1] === undefined ? on : s.dash[1];
-      r.sw.style.borderTopStyle = 'none';
-      r.sw.style.height = '2px';
-      r.sw.style.background =
-        'repeating-linear-gradient(90deg,' + col + ' 0 ' + on + 'px,transparent ' + on + 'px ' + (on + off) + 'px)';
-    } else {
-      r.sw.style.background = 'none';
-      r.sw.style.height = '0';
-      r.sw.style.borderTopStyle = 'solid';
-      r.sw.style.borderTopColor = col;
-      r.sw.style.borderTopWidth = Math.max(2, s.width) + 'px';
+function buildRail(chart) {
+  const rows = chart.railRows;
+  // Drop the previous pass' row listeners before their elements go, so a rail rebuilt
+  // twenty times over a session does not leave twenty dead entries behind.
+  for (let i = 0; i < chart.railListeners.length; i++) {
+    const rec = chart.railListeners[i];
+    try {
+      rec[0].removeEventListener(rec[1], rec[2]);
+    } catch (err) {
+      /* element already gone */
     }
+    const at = chart.listeners.indexOf(rec);
+    if (at >= 0) chart.listeners.splice(at, 1);
+  }
+  chart.railListeners.length = 0;
+  while (rows.firstChild) rows.removeChild(rows.firstChild);
+  for (let i = 0; i < chart.pens.length; i++) {
+    const pen = chart.pens[i];
+    const chip = h('span', { class: 'ftx__chip' }, h('i', { class: 'pv' }));
+    if (pen.spChannel || pen.limitSignal) chip.appendChild(h('i', { class: 'sp' }));
+    const tagEl = h('span', { class: 'ftx__tag', title: penTitle(pen) }, pen.tag);
+    const cb = h('input', {
+      class: 'ftx__cb',
+      type: 'checkbox',
+      'aria-label': pen.tag + ' pen on trend',
+      title: pen.tag + ' pen on trend',
+    });
+    cb.checked = pen.visible;
+    const pv = labelBox('pv', '', pen.eu);
+    const flds = h('div', { class: 'ftx__flds' }, pv.el);
+    let sp = null;
+    if (pen.spChannel) sp = labelBox('sp', 'SP', '');
+    else if (pen.limitSignal) sp = labelBox('sp', 'LIM', '');
+    if (sp) flds.appendChild(sp.el);
+    const row = h('div', { class: 'ftx__row' }, chip, tagEl, cb, flds);
+    row.style.color = chart.colors.pen[pen.id];
+    rows.appendChild(row);
+
+    const onToggle = () => {
+      setPenVisible(chart, pen.id, cb.checked);
+    };
+    cb.addEventListener('change', onToggle);
+    const onFocus = () => {
+      setPenFocus(chart, chart.focusPen === pen.id ? null : pen.id);
+    };
+    tagEl.addEventListener('click', onFocus);
+    const recA = [cb, 'change', onToggle];
+    const recB = [tagEl, 'click', onFocus];
+    chart.listeners.push(recA, recB);
+    chart.railListeners.push(recA, recB);
+
+    pen.row = { el: row, chip, tagEl, cb, pv, sp };
+  }
+  chart.railKey = railKey(chart);
+  paintRailChips(chart);
+}
+
+/**
+ * A cheap signature of the rail's structure, so it is rebuilt only when it must be.
+ * @param {object} chart The chart.
+ * @returns {string} Signature.
+ */
+function railKey(chart) {
+  let k = '';
+  for (let i = 0; i < chart.pens.length; i++) {
+    const p = chart.pens[i];
+    k += p.id + ',' + p.tag + ',' + p.eu + ',' + (p.spChannel || '') + ',' + (p.limitSignal || '') + '|';
+  }
+  return k;
+}
+
+/**
+ * Re-tint every rail row after a theme change: `currentColor` carries the pen hue into the
+ * chip, the checkbox tick and nothing else.
+ * @param {object} chart The chart.
+ * @returns {void}
+ */
+function paintRailChips(chart) {
+  for (let i = 0; i < chart.pens.length; i++) {
+    const pen = chart.pens[i];
+    if (pen.row) pen.row.el.style.color = chart.colors.pen[pen.id];
   }
 }
+
+/**
+ * The newest logged value of a channel.
+ * @param {object} chart The chart.
+ * @param {string} name Channel name.
+ * @returns {number} Value, or `NaN`.
+ */
+function lastValue(chart, name) {
+  if (!chart.store) return NaN;
+  const y = column(chart.store, name);
+  return y.length > 0 ? y[y.length - 1] : NaN;
+}
+
+/**
+ * Refresh every label box in the rail. Shows the value AT THE CURSOR while the crosshair
+ * is down and the live value otherwise, which is the classic trend behaviour. Throttled to
+ * 10 Hz; the DOM is never rebuilt here.
+ * @param {object} chart The chart.
+ * @returns {void}
+ */
+function updateRail(chart) {
+  const atCursor = chart.cursor.on;
+  for (let i = 0; i < chart.pens.length; i++) {
+    const pen = chart.pens[i];
+    const r = pen.row;
+    if (!r) continue;
+    cls(r.el, 'ftx__row--off', !pen.visible);
+    cls(r.el, 'ftx__row--focus', chart.focusPen === pen.id);
+    if (r.cb.checked !== pen.visible) r.cb.checked = pen.visible;
+
+    const pv = atCursor && pen.pvTrace ? pen.pvTrace.cursorValue : lastValue(chart, pen.channel);
+    setText(r.pv.val, fmtBox(pv, pen.dec));
+    const overLimit = pen.limit === pen.limit && pv === pv && pv > pen.limit;
+    cls(r.pv.el, 'ftx__fld--alarm', overLimit);
+    cls(r.pv.el, 'ftx__fld--stale', !(pv === pv));
+
+    if (!r.sp) continue;
+    let sv = NaN;
+    if (pen.spChannel) {
+      sv = atCursor && pen.spTrace ? pen.spTrace.cursorValue : lastValue(chart, pen.spChannel);
+    } else {
+      sv = pen.limit;
+    }
+    setText(r.sp.val, fmtBox(sv, pen.dec));
+    cls(r.sp.el, 'ftx__fld--stale', !(sv === sv));
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 14. CURSOR READOUT                                                         */
+/* -------------------------------------------------------------------------- */
 
 /**
  * Nearest logged row to an x position, and the x values of that row in all three units.
@@ -2131,19 +2595,21 @@ function sampleAt(chart, x) {
 }
 
 /**
- * Update the cursor card's text and position, and cache each series' value at the
- * cursor for the overlay dots and for `hitTest`.
+ * Update the cursor card — three label boxes carrying the x position in volume, time and
+ * column volumes — and cache every trace's value at the cursor for the rail, the overlay
+ * dots and {@link hitTest}.
  * @param {object} chart The chart.
- * @param {number} pxCss Pointer x in plot-local css px, or NaN to hide.
- * @param {number} pyCss Pointer y in plot-local css px.
+ * @param {number} pxCss Pointer x in host-local css px, or `NaN` to hide.
+ * @param {number} pyCss Pointer y in host-local css px.
  * @returns {void}
  */
 function updateCursor(chart, pxCss, pyCss) {
   const g = chart.geom;
   if (!(pxCss === pxCss) || !chart.store || chart.store.n === 0) {
     chart.cursor.on = false;
-    cls(chart.card, 'chart__card--on', false);
-    for (let i = 0; i < chart.series.length; i++) chart.series[i].cursorValue = NaN;
+    cls(chart.card, 'ftx__card--on', false);
+    for (let i = 0; i < chart.traces.length; i++) chart.traces[i].cursorValue = NaN;
+    chart.railDue = 0;
     if (chart.handlers.onCursor) chart.handlers.onCursor(null);
     return;
   }
@@ -2155,47 +2621,41 @@ function updateCursor(chart, pxCss, pyCss) {
   chart.cursor.x = smp.x;
   chart.cursor.index = smp.index;
 
-  rebuildCursorRows(chart);
-  const volTxt = smp.volume === smp.volume ? smp.volume.toFixed(1) + ' mL' : '— mL';
-  const timeTxt = smp.time === smp.time ? (smp.time / 60).toFixed(2) + ' min' : '— min';
-  const cvTxt = smp.cv === smp.cv ? smp.cv.toFixed(3) + ' CV' : '— CV';
-  setText(chart.cardX, volTxt + '  ·  ' + timeTxt + '  ·  ' + cvTxt);
-
+  // Every trace is read, lit or not: an extinguished pen still owes the operator its
+  // number in the rail. Only the overlay dots and the strokes honour visibility.
   const values = Object.create(null);
-  for (let i = 0; i < chart.series.length; i++) {
-    const s = chart.series[i];
-    if (!s.visible) {
-      s.cursorValue = NaN;
-      continue;
-    }
-    const y = column(chart.store, s.channel);
+  for (let i = 0; i < chart.traces.length; i++) {
+    const t = chart.traces[i];
+    const y = column(chart.store, t.channel);
     const v = smp.index < y.length ? y[smp.index] : NaN;
-    s.cursorValue = v;
-    values[s.id] = v;
-  }
-  for (let i = 0; i < chart.cardRows.length; i++) {
-    const r = chart.cardRows[i];
-    const s = chart.seriesById.get(r.id);
-    const v = s ? s.cursorValue : NaN;
-    setText(r.val, v === v ? v.toFixed(s.decimals) : '—');
+    t.cursorValue = v;
+    if (!t.isSp) values[t.pen.id] = v;
   }
 
-  // place the card on the side with more room
+  setText(chart.cardV.val, fmtBox(smp.volume, 1));
+  setText(chart.cardT.val, fmtBox(smp.time === smp.time ? smp.time / 60 : NaN, 2));
+  setText(chart.cardC.val, fmtBox(smp.cv, 3));
+
+  const cardW = 200;
   const rightRoom = g.px1 - pxCss;
-  const cardW = 190;
-  const left = rightRoom < cardW + 16 ? pxCss - cardW - 14 : pxCss + 14;
-  const top = clamp(pyCss - 10, g.py0, Math.max(g.py0, g.py1 - 120));
-  chart.card.style.transform = 'translate(' + Math.round(clamp(left, 2, Math.max(2, g.cssW - cardW - 2))) + 'px,' + Math.round(top) + 'px)';
-  cls(chart.card, 'chart__card--on', true);
+  const left = rightRoom < cardW + 12 ? pxCss - cardW - 10 : pxCss + 10;
+  const top = clamp(pyCss - 8, g.py0, Math.max(g.py0, g.py1 - 24));
+  chart.card.style.transform =
+    'translate(' + Math.round(clamp(left, 1, Math.max(1, g.cssW - cardW - 1))) + 'px,' +
+    Math.round(top) + 'px)';
+  cls(chart.card, 'ftx__card--on', true);
   chart.dirty.overlay = true;
+  chart.railDue = 0;
   if (chart.handlers.onCursor) {
-    chart.handlers.onCursor({ x: smp.x, index: smp.index, volume: smp.volume, time: smp.time, cv: smp.cv, values });
+    chart.handlers.onCursor({
+      x: smp.x, index: smp.index, volume: smp.volume, time: smp.time, cv: smp.cv, values,
+    });
   }
 }
 
 /**
- * Announce the readout cursor into the polite live region, throttled to one
- * announcement per 400 ms (§9.7).
+ * Announce the readout cursor into the polite live region, throttled to one announcement
+ * per 400 ms. Screen-reader text is the one place a full sentence belongs.
  * @param {object} chart The chart.
  * @param {number} now_ms Frame or event timestamp.
  * @returns {void}
@@ -2204,17 +2664,18 @@ function announceCursor(chart, now_ms) {
   if (now_ms - chart.lastAria_ms < ARIA_PERIOD_MS) return;
   chart.lastAria_ms = now_ms;
   if (!chart.cursor.on) return;
-  let msg = 'At ' + toDisp(chart, chart.cursor.x).toFixed(2) + ' ' + X_UNIT[chart.xMode] + '. ';
-  for (let i = 0; i < chart.series.length; i++) {
-    const s = chart.series[i];
-    if (!s.visible || !(s.cursorValue === s.cursorValue)) continue;
-    msg += s.label + ' ' + s.cursorValue.toFixed(s.decimals) + ' ' + (s.unit || '') + '. ';
+  let msg = 'At ' + toDisp(chart, chart.cursor.x).toFixed(2) + ' ' + X_EU[chart.xMode] + '. ';
+  for (let i = 0; i < chart.traces.length; i++) {
+    const t = chart.traces[i];
+    if (!t.pen.visible || !(t.cursorValue === t.cursorValue)) continue;
+    msg += t.pen.tag + (t.isSp ? ' setpoint ' : ' ') +
+      t.cursorValue.toFixed(t.pen.dec) + ' ' + (t.pen.eu || '') + '. ';
   }
   setText(chart.srLive, msg);
 }
 
 /**
- * Refresh the traces canvas' `aria-label` summary, at most once per second (§9.7).
+ * Refresh the traces canvas' `aria-label` summary, at most once per second.
  * @param {object} chart The chart.
  * @param {number} now_ms Frame timestamp.
  * @returns {void}
@@ -2224,30 +2685,30 @@ function updateAriaLabel(chart, now_ms) {
   chart.lastLabel_ms = now_ms;
   let n = 0;
   let latest = '';
-  for (let i = 0; i < chart.series.length; i++) {
-    const s = chart.series[i];
-    if (!s.visible) continue;
+  for (let i = 0; i < chart.pens.length; i++) {
+    const p = chart.pens[i];
+    if (!p.visible) continue;
     n++;
-    if (chart.store && chart.store.n > 0 && latest.length < 120) {
-      const y = column(chart.store, s.channel);
-      const v = y.length > 0 ? y[y.length - 1] : NaN;
-      if (v === v) latest += s.label + ' ' + v.toFixed(s.decimals) + ' ' + (s.unit || '') + '; ';
+    if (chart.store && chart.store.n > 0 && latest.length < 140) {
+      const v = lastValue(chart, p.channel);
+      if (v === v) latest += p.tag + ' ' + v.toFixed(p.dec) + ' ' + (p.eu || '') + '; ';
     }
   }
   const label =
-    'Chromatogram. X axis ' + chart.xMode + ', ' + toDisp(chart, chart.x0).toFixed(1) + ' to ' +
-    toDisp(chart, chart.x1).toFixed(1) + ' ' + X_UNIT[chart.xMode] + '. ' + n + ' channels shown. ' +
-    (latest ? 'Latest ' + latest : 'No data yet.');
+    'Process trend. X axis ' + chart.xMode + ', ' + toDisp(chart, chart.x0).toFixed(1) +
+    ' to ' + toDisp(chart, chart.x1).toFixed(1) + ' ' + X_EU[chart.xMode] + '. ' + n +
+    ' pens shown. ' + (latest ? 'Latest ' + latest : 'No data yet.');
   chart.cvTraces.setAttribute('aria-label', label);
 }
 
 /* -------------------------------------------------------------------------- */
-/* 12. ACCESSIBLE DATA TABLE                                                  */
+/* 15. ACCESSIBLE DATA TABLE                                                  */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Rebuild the accessible data table: the run decimated to every 1 % of its x range.
- * This is the accessible alternative to the canvas, not an afterthought (§9.7).
+ * Rebuild the accessible data table: the run sampled at every 1 % of its x range. This is
+ * the accessible alternative to the canvas, not an afterthought. Column headers are the
+ * ISA tag with its engineering unit underneath — never a phrase.
  * @param {object} chart The chart.
  * @returns {void}
  */
@@ -2256,15 +2717,22 @@ function rebuildTable(chart) {
   while (wrap.firstChild) wrap.removeChild(wrap.firstChild);
   chart.tableCells = null;
   if (!chart.store || chart.store.n === 0) {
-    wrap.appendChild(h('table', {}, h('caption', {}, 'Chromatogram data — no samples yet')));
+    wrap.appendChild(h('table', {}, h('caption', { class: 'ftx__sr' }, 'Trend data: no samples yet')));
     return;
   }
-  const vis = chart.series.filter((s) => s.visible);
-  const head = [h('th', { scope: 'col' }, X_TITLE[chart.xMode])];
-  for (let i = 0; i < vis.length; i++) {
-    head.push(h('th', { scope: 'col' }, vis[i].label + (vis[i].unit ? ' (' + vis[i].unit + ')' : '')));
+  const vis = [];
+  for (let i = 0; i < chart.traces.length; i++) {
+    if (chart.traces[i].pen.visible) vis.push(chart.traces[i]);
   }
-  const thead = h('thead', {}, h('tr', {}, ...head));
+  const head = [h('th', { scope: 'col' }, X_EU[chart.xMode])];
+  for (let i = 0; i < vis.length; i++) {
+    const t = vis[i];
+    head.push(h(
+      'th', { scope: 'col' },
+      t.pen.tag + (t.isSp ? ' SP' : ''),
+      h('small', {}, t.pen.eu || '')
+    ));
+  }
   const rows = [];
   const cells = [];
   for (let k = 0; k <= 100; k++) {
@@ -2278,12 +2746,14 @@ function rebuildTable(chart) {
     cells.push({ x: tds[0], vals: rowCells });
     rows.push(h('tr', {}, ...tds));
   }
-  const tbody = h('tbody', {}, ...rows);
-  wrap.appendChild(
-    h('table', {}, h('caption', {}, 'Chromatogram data, sampled every 1 % of the run'), thead, tbody)
-  );
+  wrap.appendChild(h(
+    'table', {},
+    h('caption', { class: 'ftx__sr' }, 'Trend data, sampled every 1 % of the run'),
+    h('thead', {}, h('tr', {}, ...head)),
+    h('tbody', {}, ...rows)
+  ));
   chart.tableCells = cells;
-  chart.tableSeries = vis;
+  chart.tableTraces = vis;
   fillTable(chart);
 }
 
@@ -2294,12 +2764,11 @@ function rebuildTable(chart) {
  */
 function fillTable(chart) {
   if (!chart.tableCells || !chart.store || chart.store.n === 0) return;
-  const xName = xChannel(chart);
-  const xc = column(chart.store, xName);
+  const xc = column(chart.store, xChannel(chart));
   const n = xc.length;
   if (n === 0) return;
   const x1 = xc[n - 1];
-  const vis = chart.tableSeries;
+  const vis = chart.tableTraces;
   const cols = new Array(vis.length);
   for (let i = 0; i < vis.length; i++) cols[i] = column(chart.store, vis[i].channel);
   for (let k = 0; k <= 100; k++) {
@@ -2310,13 +2779,13 @@ function fillTable(chart) {
     setText(cell.x, toDisp(chart, xc[idx]).toFixed(2));
     for (let i = 0; i < vis.length; i++) {
       const v = idx < cols[i].length ? cols[i][idx] : NaN;
-      setText(cell.vals[i], v === v ? v.toFixed(vis[i].decimals) : '');
+      setText(cell.vals[i], v === v ? v.toFixed(vis[i].pen.dec) : '');
     }
   }
 }
 
 /* -------------------------------------------------------------------------- */
-/* 13. INTERACTION                                                            */
+/* 16. INTERACTION                                                            */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -2324,8 +2793,8 @@ function fillTable(chart) {
  * @param {object} chart The chart.
  * @param {number} x0 New start, x-channel unit.
  * @param {number} x1 New end, x-channel unit.
- * @param {boolean} manual True when the change came from the operator, which drops
- *   follow and auto-fit (§9.3.4).
+ * @param {boolean} manual True when the change came from the operator, which drops follow
+ *   and auto-fit.
  * @returns {void}
  */
 function applyWindow(chart, x0, x1, manual) {
@@ -2345,13 +2814,14 @@ function applyWindow(chart, x0, x1, manual) {
   }
   chart.x0 = a;
   chart.x1 = b;
-  if (manual) {
+  if (manual && (chart.follow || chart.autoFit)) {
     chart.follow = false;
     chart.autoFit = false;
-    cls(chart.livePill, 'chart__live--on', true);
+    syncToolbar(chart);
   }
   chart.blit.valid = false;
   chart.tableValid = false;
+  chart.ovDirty = true;
   chart.dirty.static = true;
   chart.dirty.traces = true;
   chart.dirty.overlay = true;
@@ -2359,14 +2829,13 @@ function applyWindow(chart, x0, x1, manual) {
 }
 
 /**
- * Reset to the whole run: auto-fit plus live follow (double-click, §9.3.4).
+ * Reset to the whole run: auto-fit plus live follow, and every y axis back to autoscale.
  * @param {object} chart The chart.
  * @returns {void}
  */
 function resetView(chart) {
   chart.autoFit = true;
   chart.follow = true;
-  cls(chart.livePill, 'chart__live--on', false);
   for (let i = 0; i < chart.yAxes.length; i++) {
     const a = chart.yAxes[i];
     if (a.userManual) {
@@ -2377,14 +2846,65 @@ function resetView(chart) {
   chart.blit.valid = false;
   chart.dirty.static = true;
   chart.dirty.traces = true;
+  chart.ovDirty = true;
   updateFollowWindow(chart);
+  syncToolbar(chart);
   if (chart.handlers.onZoom) chart.handlers.onZoom({ x0: chart.x0, x1: chart.x1, mode: chart.xMode });
+}
+
+/**
+ * True when at least one axis is under a manual y override.
+ * @param {object} chart The chart.
+ * @returns {boolean} Manual override state.
+ */
+function anyManualY(chart) {
+  for (let i = 0; i < chart.yAxes.length; i++) {
+    if (chart.yAxes[i].userManual) return true;
+  }
+  return false;
+}
+
+/**
+ * Return every autoscaled axis to autoscale, dropping a manual y override.
+ * @param {object} chart The chart.
+ * @returns {void}
+ */
+function releaseManualY(chart) {
+  for (let i = 0; i < chart.yAxes.length; i++) {
+    const a = chart.yAxes[i];
+    if (!a.userManual) continue;
+    a.mode = a.baseMode;
+    a.userManual = false;
+    a.easeT0 = 0;
+    a.targetMax = a.aMax;
+  }
+  chart.blit.valid = false;
+  chart.dirty.static = true;
+  chart.dirty.traces = true;
+  syncToolbar(chart);
+}
+
+/**
+ * Push chart state back onto the toolbar's pressed states. Icon buttons carry no text, so
+ * `aria-pressed` and the sunken bevel are the entire status vocabulary.
+ * @param {object} chart The chart.
+ * @returns {void}
+ */
+function syncToolbar(chart) {
+  const b = chart.btn;
+  if (!b) return;
+  b.xVol.setAttribute('aria-pressed', chart.xMode === 'volume' ? 'true' : 'false');
+  b.xTime.setAttribute('aria-pressed', chart.xMode === 'time' ? 'true' : 'false');
+  b.xCV.setAttribute('aria-pressed', chart.xMode === 'cv' ? 'true' : 'false');
+  b.live.setAttribute('aria-pressed', chart.follow ? 'true' : 'false');
+  b.yAuto.setAttribute('aria-pressed', anyManualY(chart) ? 'false' : 'true');
+  b.table.setAttribute('aria-pressed', chart.tableOpen ? 'true' : 'false');
 }
 
 /**
  * Pixel x -> x-channel value.
  * @param {object} chart The chart.
- * @param {number} px Plot-local css px.
+ * @param {number} px Host-local css px.
  * @returns {number} x value.
  */
 function pxToX(chart, px) {
@@ -2395,8 +2915,8 @@ function pxToX(chart, px) {
 /**
  * Which pool handle, if any, is under a pointer position.
  * @param {object} chart The chart.
- * @param {number} px Plot-local css px.
- * @param {number} py Plot-local css px.
+ * @param {number} px Host-local css px.
+ * @param {number} py Host-local css px.
  * @returns {'left'|'right'|'move'|null} Handle identity.
  */
 function poolHandleAt(chart, px, py) {
@@ -2415,7 +2935,78 @@ function poolHandleAt(chart, px, py) {
 }
 
 /**
- * Wire pointer, wheel and keyboard interaction on the plot and the overview strip.
+ * Scale every autoscaled axis about a pixel anchor (ctrl+wheel). Axes move to manual so
+ * the operator's choice is not immediately overwritten by the autoscaler.
+ * @param {object} chart The chart.
+ * @param {number} py Anchor, host-local css px.
+ * @param {number} factor Zoom factor > 0.
+ * @returns {void}
+ */
+function zoomYAbout(chart, py, factor) {
+  for (let i = 0; i < chart.yAxes.length; i++) {
+    const a = chart.yAxes[i];
+    if (!a.visible) continue;
+    const anchor = (a.b - py) / (a.k || 1);
+    const lo = anchor - (anchor - a.aMin) * factor;
+    const hi = anchor + (a.aMax - anchor) * factor;
+    if (!(hi > lo)) continue;
+    a.mode = 'manual';
+    a.userManual = true;
+    a.min = lo;
+    a.max = hi;
+  }
+  chart.blit.valid = false;
+  chart.dirty.static = true;
+  chart.dirty.traces = true;
+  syncToolbar(chart);
+}
+
+/**
+ * Zoom the y axes to a pixel band (shift-drag box zoom).
+ * @param {object} chart The chart.
+ * @param {number} pyTop Top of the band, css px.
+ * @param {number} pyBot Bottom of the band, css px.
+ * @returns {void}
+ */
+function zoomYToRect(chart, pyTop, pyBot) {
+  if (pyBot - pyTop < 6) return;
+  for (let i = 0; i < chart.yAxes.length; i++) {
+    const a = chart.yAxes[i];
+    if (!a.visible || !(a.k > 0)) continue;
+    const hi = (a.b - pyTop) / a.k;
+    const lo = (a.b - pyBot) / a.k;
+    if (!(hi > lo)) continue;
+    a.mode = 'manual';
+    a.userManual = true;
+    a.min = lo;
+    a.max = hi;
+  }
+  syncToolbar(chart);
+}
+
+/**
+ * Step the accessible readout cursor by whole samples and announce it.
+ * @param {object} chart The chart.
+ * @param {number} dir -1, 0 or +1 samples.
+ * @returns {void}
+ */
+function moveReadout(chart, dir) {
+  if (!chart.store || chart.store.n === 0) return;
+  const g = chart.geom;
+  let i = chart.cursor.index + dir;
+  i = clamp(i, 0, chart.store.n - 1);
+  const xc = column(chart.store, xChannel(chart));
+  if (i >= xc.length) i = xc.length - 1;
+  const xv = xc[i];
+  const px = g.px0 + ((xv - chart.x0) / (chart.x1 - chart.x0)) * g.plotW;
+  updateCursor(chart, clamp(px, g.px0, g.px1), (g.py0 + g.py1) / 2);
+  chart.cursor.index = i;
+  announceCursor(chart, performance.now());
+  chart.dirty.overlay = true;
+}
+
+/**
+ * Wire pointer, wheel and keyboard interaction on the plot well.
  * @param {object} chart The chart.
  * @returns {void}
  */
@@ -2427,7 +3018,7 @@ function bindInteractions(chart) {
     const px = e.offsetX;
     const py = e.offsetY;
     const g = chart.geom;
-    chart.plotEl.focus({ preventScroll: true });
+    chart.wellEl.focus({ preventScroll: true });
     const handle = poolHandleAt(chart, px, py);
     if (handle && e.button === 0) {
       chart.drag.active = true;
@@ -2452,7 +3043,7 @@ function bindInteractions(chart) {
     chart.drag.winX1 = chart.x1;
     chart.interacting = true;
     chart.blit.valid = false;
-    cls(chart.plotEl, 'chart__plot--panning', pan);
+    cls(chart.wellEl, 'ftx__well--panning', pan);
     el.setPointerCapture(e.pointerId);
     e.preventDefault();
   };
@@ -2467,8 +3058,8 @@ function bindInteractions(chart) {
       updateCursor(chart, px, py);
       chart.dirty.overlay = true;
       const hh = poolHandleAt(chart, px, py);
-      cls(chart.plotEl, 'chart__plot--pool', hh !== null);
-      cls(chart.plotEl, 'chart__plot--pan', chart.spaceDown);
+      cls(chart.wellEl, 'ftx__well--pool', hh !== null);
+      cls(chart.wellEl, 'ftx__well--pan', chart.spaceDown);
       return;
     }
     d.pxNow = px;
@@ -2498,7 +3089,7 @@ function bindInteractions(chart) {
     if (!d.active) return;
     d.active = false;
     chart.interacting = false;
-    cls(chart.plotEl, 'chart__plot--panning', false);
+    cls(chart.wellEl, 'ftx__well--panning', false);
     try {
       el.releasePointerCapture(e.pointerId);
     } catch (err) {
@@ -2552,7 +3143,7 @@ function bindInteractions(chart) {
     const k = e.key;
     if (k === ' ') {
       chart.spaceDown = true;
-      cls(chart.plotEl, 'chart__plot--pan', true);
+      cls(chart.wellEl, 'ftx__well--pan', true);
       e.preventDefault();
       return;
     }
@@ -2568,8 +3159,7 @@ function bindInteractions(chart) {
     if (k === 'Enter') {
       chart.readoutMode = !chart.readoutMode;
       if (chart.readoutMode) {
-        const idx = chart.store && chart.store.n > 0 ? chart.store.n - 1 : -1;
-        chart.cursor.index = idx;
+        chart.cursor.index = chart.store && chart.store.n > 0 ? chart.store.n - 1 : -1;
         moveReadout(chart, 0);
       } else {
         updateCursor(chart, NaN, NaN);
@@ -2578,15 +3168,8 @@ function bindInteractions(chart) {
       return;
     }
     if (k === 'Home' || k === 'End') {
-      const span = chart.x1 - chart.x0;
-      if (k === 'Home') applyWindow(chart, 0, span, true);
-      else {
-        chart.follow = true;
-        chart.autoFit = false;
-        cls(chart.livePill, 'chart__live--on', false);
-        chart.blit.valid = false;
-        chart.dirty.traces = true;
-      }
+      if (k === 'Home') applyWindow(chart, 0, chart.x1 - chart.x0, true);
+      else setFollow(chart, true);
       e.preventDefault();
       return;
     }
@@ -2605,7 +3188,7 @@ function bindInteractions(chart) {
   const onKeyUp = (e) => {
     if (e.key === ' ') {
       chart.spaceDown = false;
-      cls(chart.plotEl, 'chart__plot--pan', false);
+      cls(chart.wellEl, 'ftx__well--pan', false);
     }
   };
 
@@ -2616,94 +3199,25 @@ function bindInteractions(chart) {
   el.addEventListener('pointerleave', onLeave);
   el.addEventListener('wheel', onWheel, { passive: false });
   el.addEventListener('dblclick', onDbl);
-  chart.plotEl.addEventListener('keydown', onKeyDown);
-  chart.plotEl.addEventListener('keyup', onKeyUp);
+  chart.wellEl.addEventListener('keydown', onKeyDown);
+  chart.wellEl.addEventListener('keyup', onKeyUp);
   chart.listeners.push(
     [el, 'pointerdown', onDown], [el, 'pointermove', onMove], [el, 'pointerup', onUp],
     [el, 'pointercancel', onUp], [el, 'pointerleave', onLeave], [el, 'wheel', onWheel],
-    [el, 'dblclick', onDbl], [chart.plotEl, 'keydown', onKeyDown], [chart.plotEl, 'keyup', onKeyUp]
+    [el, 'dblclick', onDbl], [chart.wellEl, 'keydown', onKeyDown], [chart.wellEl, 'keyup', onKeyUp]
   );
 
   if (chart.ovCanvas) bindOverview(chart);
 }
 
 /**
- * Step the accessible readout cursor by whole samples and announce it (§9.7).
- * @param {object} chart The chart.
- * @param {number} dir -1, 0 or +1 samples.
- * @returns {void}
- */
-function moveReadout(chart, dir) {
-  if (!chart.store || chart.store.n === 0) return;
-  const g = chart.geom;
-  let i = chart.cursor.index + dir;
-  i = clamp(i, 0, chart.store.n - 1);
-  const xc = column(chart.store, xChannel(chart));
-  if (i >= xc.length) i = xc.length - 1;
-  const xv = xc[i];
-  const px = g.px0 + ((xv - chart.x0) / (chart.x1 - chart.x0)) * g.plotW;
-  updateCursor(chart, clamp(px, g.px0, g.px1), (g.py0 + g.py1) / 2);
-  chart.cursor.index = i;
-  announceCursor(chart, performance.now());
-  chart.dirty.overlay = true;
-}
-
-/**
- * Scale every autoscaled axis about a pixel anchor (ctrl+wheel, §9.3.4). Axes move to
- * manual so the operator's choice is not immediately overwritten by the autoscaler.
- * @param {object} chart The chart.
- * @param {number} py Anchor, plot-local css px.
- * @param {number} factor Zoom factor > 0.
- * @returns {void}
- */
-function zoomYAbout(chart, py, factor) {
-  for (let i = 0; i < chart.yAxes.length; i++) {
-    const a = chart.yAxes[i];
-    if (!a.visible) continue;
-    const anchor = (a.b - py) / (a.k || 1);
-    const lo = anchor - (anchor - a.aMin) * factor;
-    const hi = anchor + (a.aMax - anchor) * factor;
-    if (!(hi > lo)) continue;
-    a.mode = 'manual';
-    a.userManual = true;
-    a.min = lo;
-    a.max = hi;
-  }
-  chart.blit.valid = false;
-  chart.dirty.static = true;
-  chart.dirty.traces = true;
-}
-
-/**
- * Zoom the y axes to a pixel band (shift-drag box zoom).
- * @param {object} chart The chart.
- * @param {number} pyTop Top of the band, css px.
- * @param {number} pyBot Bottom of the band, css px.
- * @returns {void}
- */
-function zoomYToRect(chart, pyTop, pyBot) {
-  if (pyBot - pyTop < 6) return;
-  for (let i = 0; i < chart.yAxes.length; i++) {
-    const a = chart.yAxes[i];
-    if (!a.visible || !(a.k > 0)) continue;
-    const hi = (a.b - pyTop) / a.k;
-    const lo = (a.b - pyBot) / a.k;
-    if (!(hi > lo)) continue;
-    a.mode = 'manual';
-    a.userManual = true;
-    a.min = lo;
-    a.max = hi;
-  }
-}
-
-/**
- * Wire the overview strip's window brush (§9.3.4).
+ * Wire the history strip's window brush.
  * @param {object} chart The chart.
  * @returns {void}
  */
 function bindOverview(chart) {
   const el = chart.ovCanvas;
-  const state = { active: false, mode: 'move', x0: 0, w0: 0 };
+  const state = { active: false, mode: 'move', w0: 0 };
 
   const xAt = (px) => {
     const og = chart.ovGeom;
@@ -2756,60 +3270,76 @@ function bindOverview(chart) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* 14. CONSTRUCTION                                                           */
+/* 17. CONSTRUCTION                                                           */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Normalise one series descriptor, filling the unit and the fixed decimal count from
- * the log channel table (§5.1) unless the caller overrode them.
+ * Normalise one pen descriptor. The engineering unit and the fixed decimal count come from
+ * the log channel table unless the caller overrode them.
+ *
+ * The PV stroke is ALWAYS solid 1.5 px and the SP stroke ALWAYS the same hue dashed 5-4 at
+ * 1 px: a caller-supplied `dash` or `width` is accepted for compatibility and ignored, so
+ * the pairing an operator reads the screen by can never be broken from outside.
  * @param {object} src Caller descriptor.
- * @returns {object} A live series record.
+ * @param {number} idx Rail position, for the fallback pen colour.
+ * @returns {object} A live pen record.
  */
-function makeSeries(src) {
-  const meta = CHANNEL_META.get(src.channel);
+function makePen(src, idx) {
+  const channel = src.channel || 'UV_280_mAU';
+  const meta = CHANNEL_META.get(channel);
+  const spChannel = src.sp || src.spChannel || null;
+  const id = src.id !== undefined ? String(src.id) : 'pen' + idx;
+  // The log writes '-' for a dimensionless channel; a label box shows nothing at all.
+  const metaEu = meta && meta.unit !== '-' ? meta.unit : '';
   return {
-    id: src.id,
-    label: src.label || src.id,
-    channel: src.channel,
-    yAxis: src.yAxis,
+    id,
+    tag: src.tag || src.label || id.toUpperCase(),
+    channel,
+    spChannel,
+    limitSignal: src.limitSignal || null,
+    limit: typeof src.limit === 'number' ? src.limit : NaN,
+    eu: src.eu !== undefined ? src.eu : src.unit !== undefined ? src.unit : metaEu,
+    dec: typeof src.dec === 'number' ? src.dec
+      : typeof src.decimals === 'number' ? src.decimals : meta ? meta.decimals : 2,
+    axis: src.axis || src.yAxis || '',
     alt: src.alt === true,
     fill: typeof src.fill === 'number' ? src.fill : 0,
-    colorVar: src.colorVar || '--text-2',
-    dash: Array.isArray(src.dash) ? src.dash.slice() : [],
-    width: typeof src.width === 'number' ? src.width : 1.5,
+    penVar: src.penVar || src.colorVar || '--pen-uv',
+    gloss: src.gloss || src.glossary || '',
     visible: src.visible !== false,
-    unit: src.unit !== undefined ? src.unit : meta ? meta.unit : '',
-    decimals: typeof src.decimals === 'number' ? src.decimals : meta ? meta.decimals : 2,
     dim: false,
-    minBuf: null,
-    maxBuf: null,
-    hasData: false,
-    dataMin: NaN,
-    dataMax: NaN,
-    cursorValue: NaN,
     kPix: 0,
     bPix: 0,
+    pvTrace: null,
+    spTrace: null,
+    row: null,
   };
 }
 
 /**
- * Normalise one y-axis descriptor.
+ * Normalise one y-axis descriptor. Axes carry an ENGINEERING UNIT, never a title.
  * @param {object} src Caller descriptor.
  * @returns {object} A live axis record.
  */
 function makeAxis(src) {
   const mode = src.mode || 'auto-sticky';
+  const eu = src.eu !== undefined ? src.eu : src.unit !== undefined ? src.unit : '';
   return {
     id: src.id,
-    label: src.label || src.id,
-    unit: src.unit === undefined ? '' : src.unit,
+    eu,
     side: src.side === 'left' ? 'left' : 'right',
     mode,
     baseMode: mode,
     userManual: false,
     min: typeof src.min === 'number' ? src.min : 0,
     max: typeof src.max === 'number' ? src.max : 1,
-    alt: src.alt ? { label: src.alt.label, unit: src.alt.unit || '', min: src.alt.min, max: src.alt.max } : null,
+    alt: src.alt
+      ? {
+        eu: src.alt.eu !== undefined ? src.alt.eu : src.alt.unit || '',
+        min: src.alt.min,
+        max: src.alt.max,
+      }
+      : null,
     aMin: typeof src.min === 'number' ? src.min : 0,
     aMax: typeof src.max === 'number' ? src.max : 1,
     targetMax: typeof src.max === 'number' ? src.max : 1,
@@ -2825,81 +3355,191 @@ function makeAxis(src) {
 }
 
 /**
- * Create the chart. Builds the three stacked canvases, the DOM cursor card, the
- * optional overview strip and the accessible data-table toggle, then wires the
- * `ResizeObserver`, `IntersectionObserver` and theme observer that keep the chart from
- * ever reading layout inside `frame` (§6.24, §6.26).
+ * Rebuild the flat trace list: one PV trace per pen, plus one SP trace for every pen that
+ * has a setpoint channel. Painting and decimation iterate traces; the rail iterates pens.
+ * @param {object} chart The chart.
+ * @returns {void}
+ */
+function rebuildTraces(chart) {
+  const out = [];
+  for (let i = 0; i < chart.pens.length; i++) {
+    const pen = chart.pens[i];
+    const pv = {
+      pen, isSp: false, channel: pen.channel,
+      minBuf: null, maxBuf: null, kPix: 0, bPix: 0,
+      hasData: false, dataMin: NaN, dataMax: NaN, cursorValue: NaN,
+    };
+    pen.pvTrace = pv;
+    out.push(pv);
+    if (pen.spChannel) {
+      const sp = {
+        pen, isSp: true, channel: pen.spChannel,
+        minBuf: null, maxBuf: null, kPix: 0, bPix: 0,
+        hasData: false, dataMin: NaN, dataMax: NaN, cursorValue: NaN,
+      };
+      pen.spTrace = sp;
+      out.push(sp);
+    } else {
+      pen.spTrace = null;
+    }
+  }
+  chart.traces = out;
+  ensureBuffers(chart);
+}
+
+/**
+ * Build one beveled icon button.
+ * @param {string} label Accessible name; also the tooltip.
+ * @param {Array<object>} icon Icon descriptor for {@link svgIcon}.
+ * @param {boolean} toggle Whether the button reports an `aria-pressed` state.
+ * @returns {HTMLButtonElement} The button.
+ */
+function iconButton(label, icon, toggle) {
+  const attrs = { class: 'ftx__btn', type: 'button', 'aria-label': label, title: label };
+  if (toggle) attrs['aria-pressed'] = 'false';
+  const b = h('button', attrs);
+  b.appendChild(svgIcon(icon));
+  return b;
+}
+
+/**
+ * Build the toolbar: icon-only buttons in beveled groups separated by sunken rules. No
+ * button ever carries a word on its face.
+ * @param {object} chart The chart.
+ * @returns {Element} The toolbar element.
+ */
+function buildToolbar(chart) {
+  const b = {
+    xVol: iconButton('X axis: volume, mL', ICON_VOL, true),
+    xTime: iconButton('X axis: time, min', ICON_TIME, true),
+    xCV: iconButton('X axis: column volumes, CV', ICON_CV, true),
+    yAuto: iconButton('Y axes: autoscale', ICON_YAUTO, true),
+    fit: iconButton('Reset the view to the whole run', ICON_FIT, false),
+    live: iconButton('Follow the live edge', ICON_LIVE, true),
+    table: iconButton('Data table', ICON_TABLE, true),
+  };
+  chart.btn = b;
+
+  const wire = (el, fn) => {
+    el.addEventListener('click', fn);
+    chart.listeners.push([el, 'click', fn]);
+  };
+  wire(b.xVol, () => setXMode(chart, 'volume'));
+  wire(b.xTime, () => setXMode(chart, 'time'));
+  wire(b.xCV, () => setXMode(chart, 'cv'));
+  wire(b.yAuto, () => {
+    if (anyManualY(chart)) releaseManualY(chart);
+    else zoomYAbout(chart, (chart.geom.py0 + chart.geom.py1) / 2, 1);
+  });
+  wire(b.fit, () => resetView(chart));
+  wire(b.live, () => setFollow(chart, !chart.follow));
+  wire(b.table, () => {
+    chart.tableOpen = !chart.tableOpen;
+    cls(chart.tableWrap, 'ftx__table--on', chart.tableOpen);
+    if (chart.tableOpen) rebuildTable(chart);
+    syncToolbar(chart);
+    measureNow(chart);
+  });
+
+  return h(
+    'div', { class: 'ftx__bar', role: 'toolbar', 'aria-label': 'Trend controls' },
+    h('div', { class: 'ftx__grp' }, b.xVol, b.xTime, b.xCV),
+    h('span', { class: 'ftx__sep' }),
+    h('div', { class: 'ftx__grp' }, b.yAuto, b.fit),
+    h('span', { class: 'ftx__sep' }),
+    h('div', { class: 'ftx__grp' }, b.live),
+    h('span', { class: 'ftx__sp' }),
+    h('div', { class: 'ftx__grp' }, b.table)
+  );
+}
+
+/**
+ * Create the trend. Builds the toolbar, the sunken plot well with its three stacked
+ * canvases, the legend rail, the history strip and the accessible data table, then wires
+ * the `ResizeObserver`, `IntersectionObserver`, theme observer and visibility listener
+ * that keep the chart from ever reading layout inside {@link frame}.
  *
  * @param {Element} rootEl Host element; the chart appends one wrapper to it.
  * @param {object} [opts] Options.
- * @param {{mode:'volume'|'time'|'cv'}} [opts.xAxis] Initial x-axis mode.
- * @param {Array<{id:string,label:string,unit:string,side:'left'|'right',
- *   mode:'auto-sticky'|'auto'|'manual',min:number,max:number,
- *   alt?:{label:string,unit:string,min:number,max:number}}>} [opts.yAxes] Axis stack;
- *   defaults to L1/R1/R2/R3 of §9.3.1.
- * @param {Array<{id:string,label:string,channel:string,yAxis:string,colorVar:string,
- *   dash:number[],width:number,visible:boolean,alt?:boolean,fill?:number}>} [opts.series]
- *   Series list in legend order; defaults to the eight channels of §9.3.1.
- * @param {boolean} [opts.overview] Draw the 36 px overview strip. Default true.
+ * @param {{mode:'volume'|'time'|'cv'}} [opts.xAxis] Initial x-axis mode. Default volume.
+ * @param {Array<object>} [opts.yAxes] Axis stack `{id, eu, side, mode, min, max, alt}`;
+ *   `mode` is `'auto-sticky'` (zero-anchored, eased shrink), `'auto'`, `'auto-band'`
+ *   (fits the data band without anchoring at zero — for a closed loop) or `'manual'`.
+ *   Defaults to the six-gutter FT stack.
+ * @param {Array<object>} [opts.series] Pens in rail order
+ *   `{id, tag, channel, sp, limitSignal, eu, dec, axis, alt, fill, penVar, gloss, visible}`;
+ *   defaults to the eight ISA-tagged pens. `label`/`unit`/`decimals`/`yAxis`/`colorVar`
+ *   are accepted as aliases.
+ * @param {Array<object>} [opts.pens] Alias of `opts.series`.
+ * @param {boolean} [opts.overview] Draw the history strip. Default true.
+ * @param {Array<object>} [opts.alarms] `config.alarms` rows, so PT-101 and PDT-101 can
+ *   draw their limit lines immediately.
  * @returns {object} The Chart handle, passed back into every other export.
  */
 export function createChart(rootEl, opts) {
   ensureStyles();
   const o = opts || {};
-  const wrap = h('div', { class: 'chart' });
-  const plot = h('div', {
-    class: 'chart__plot',
+
+  const wrap = h('div', { class: 'ftx' });
+  const wellEl = h('div', {
+    class: 'ftx__well',
     tabindex: '0',
     role: 'group',
-    'aria-label': 'Chromatogram, interactive',
+    'aria-label': 'Process trend, interactive',
   });
-  const cvStatic = h('canvas', { class: 'chart__layer chart__layer--static', 'aria-hidden': 'true' });
+  const hostEl = h('div', { class: 'ftx__host' });
+  const cvStatic = h('canvas', { class: 'ftx__layer ftx__layer--s', 'aria-hidden': 'true' });
   const cvTraces = h('canvas', {
-    class: 'chart__layer chart__layer--traces',
+    class: 'ftx__layer ftx__layer--t',
     role: 'img',
-    'aria-label': 'Chromatogram. No data yet.',
+    'aria-label': 'Process trend. No data yet.',
   });
-  const cvOverlay = h('canvas', { class: 'chart__layer chart__layer--overlay', 'aria-hidden': 'true' });
-  const cardX = h('div', { class: 'chart__card-x' }, '');
-  const cardBody = h('div', {});
-  const card = h('div', { class: 'chart__card' }, cardX, cardBody);
-  const livePill = h('button', { class: 'chart__live', type: 'button' }, 'Jump to live');
-  const tableBtn = h(
-    'button',
-    { class: 'chart__btn', type: 'button', 'aria-pressed': 'false', 'aria-label': 'Toggle the accessible data table' },
-    'Data table'
+  const cvOverlay = h('canvas', { class: 'ftx__layer ftx__layer--o', 'aria-hidden': 'true' });
+  const cardV = labelBox('x', 'V', 'mL');
+  const cardT = labelBox('x', 'T', 'min');
+  const cardC = labelBox('x', 'CV', '');
+  const card = h('div', { class: 'ftx__card' }, cardV.el, cardT.el, cardC.el);
+  const srLive = h('div', { class: 'ftx__sr', 'aria-live': 'polite', 'aria-atomic': 'true' });
+  hostEl.appendChild(cvStatic);
+  hostEl.appendChild(cvTraces);
+  hostEl.appendChild(cvOverlay);
+  hostEl.appendChild(card);
+  wellEl.appendChild(hostEl);
+  wellEl.appendChild(srLive);
+
+  const railRows = h('div', { class: 'ftx__rows' });
+  const rail = h(
+    'div', { class: 'ftx__rail' },
+    h(
+      'div', { class: 'ftx__railhd' },
+      h('b', {}, 'TAG'),
+      h('i', {}, h('span', {}, 'PV'), h('span', {}, 'SP'))
+    ),
+    railRows
   );
-  const tools = h('div', { class: 'chart__tools' }, tableBtn);
-  const srLive = h('div', { class: 'chart__sr', 'aria-live': 'polite', 'aria-atomic': 'true' });
-  plot.appendChild(cvStatic);
-  plot.appendChild(cvTraces);
-  plot.appendChild(cvOverlay);
-  plot.appendChild(card);
-  plot.appendChild(livePill);
-  plot.appendChild(tools);
-  plot.appendChild(srLive);
-  wrap.appendChild(plot);
+  const body = h('div', { class: 'ftx__body' }, wellEl, rail);
 
   const wantOverview = o.overview !== false;
   let ovEl = null;
+  let ovHostEl = null;
   let ovCanvas = null;
   if (wantOverview) {
     ovCanvas = h('canvas', { 'aria-hidden': 'true' });
-    ovEl = h('div', { class: 'chart__ov' }, ovCanvas);
-    wrap.appendChild(ovEl);
+    ovHostEl = h('div', { class: 'ftx__ovhost' }, ovCanvas);
+    ovEl = h('div', { class: 'ftx__ov' }, ovHostEl);
   }
-  const tableWrap = h('div', { class: 'chart__table' });
-  wrap.appendChild(tableWrap);
-  rootEl.appendChild(wrap);
+  const tableWrap = h('div', { class: 'ftx__table' });
 
   const blitCanvas = document.createElement('canvas');
-  const series = (o.series || DEFAULT_SERIES).map(makeSeries);
+  const penSrc = o.pens || o.series || DEFAULT_PENS;
+  const pens = penSrc.map(makePen);
   const yAxes = (o.yAxes || DEFAULT_Y_AXES).map(makeAxis);
 
   const chart = {
     root: rootEl,
     el: wrap,
-    plotEl: plot,
+    wellEl,
+    hostEl,
     cvStatic,
     cvTraces,
     cvOverlay,
@@ -2907,24 +3547,31 @@ export function createChart(rootEl, opts) {
     gTraces: cvTraces.getContext('2d'),
     gOverlay: cvOverlay.getContext('2d'),
     card,
-    cardX,
-    cardBody,
-    cardRows: [],
-    cursorRowsKey: '',
-    livePill,
-    tableBtn,
+    cardV,
+    cardT,
+    cardC,
+    rail,
+    railRows,
+    railKey: '',
+    railDue: 0,
+    railListeners: [],
+    focusPen: null,
+    srLive,
+    btn: null,
     tableWrap,
     tableCells: null,
-    tableSeries: [],
+    tableTraces: [],
     tableOpen: false,
-    srLive,
     ovEl,
+    ovHostEl,
     ovCanvas,
     gOv: ovCanvas ? ovCanvas.getContext('2d') : null,
     ovMin: null,
     ovMax: null,
     ovGeom: null,
     ovDirty: true,
+    ovW: 1,
+    ovH: OVERVIEW_H - 6,
     blit: { canvas: blitCanvas, ctx: blitCanvas.getContext('2d'), w: 0, h: 0, valid: false, validPx: 0 },
 
     store: null,
@@ -2936,8 +3583,9 @@ export function createChart(rootEl, opts) {
     follow: true,
     scrollPx: 0,
 
-    series,
-    seriesById: new Map(series.map((s) => [s.id, s])),
+    pens,
+    penById: new Map(pens.map((p) => [p.id, p])),
+    traces: [],
     yAxes,
     axisById: new Map(yAxes.map((a) => [a.id, a])),
 
@@ -2954,14 +3602,13 @@ export function createChart(rootEl, opts) {
     tablePixels: 0,
     tableN: -1,
     tableCh: '',
-    dataBinsValid: false,
     rawMode: false,
     lastPaintedN: -1,
 
     geom: {
       cssW: 0, cssH: 0, dpr: window.devicePixelRatio || 1,
-      padL: 56, padR: 60, padT: 22, padB: 42,
-      px0: 56, py0: 22, px1: 100, py1: 100, plotW: 44, plotH: 78, pixels: 1,
+      padL: 42, padR: 48, padT: 16, padB: 26,
+      px0: 42, py0: 16, px1: 100, py1: 100, plotW: 58, plotH: 84, pixels: 1,
     },
     colors: null,
     visible: true,
@@ -2970,12 +3617,16 @@ export function createChart(rootEl, opts) {
     hoverPx: -1,
     readoutMode: false,
     cursor: { on: false, x: NaN, index: -1 },
-    drag: { active: false, mode: '', px0: 0, py0: 0, pxNow: 0, pyNow: 0, winX0: 0, winX1: 0, handle: '', poolX0: 0, poolX1: 0 },
+    drag: {
+      active: false, mode: '', px0: 0, py0: 0, pxNow: 0, pyNow: 0,
+      winX0: 0, winX1: 0, handle: '', poolX0: 0, poolX1: 0,
+    },
     handlers: { onZoom: null, onCursor: null, onSelect: null, onPoolDrag: null },
     listeners: [],
     dirty: { static: true, traces: true, overlay: true },
     frameCount: 0,
     lastMeasure_ms: -1e9,
+    lastRemeasure_ms: -1e9,
     lastAria_ms: -1e9,
     lastLabel_ms: -1e9,
     lastOverview_ms: -1e9,
@@ -2989,7 +3640,17 @@ export function createChart(rootEl, opts) {
     mqContrast: null,
   };
 
-  chart.colors = resolveColors('current', chart.series);
+  chart.colors = resolveColors('current', chart.pens);
+  rebuildTraces(chart);
+
+  wrap.appendChild(buildToolbar(chart));
+  wrap.appendChild(body);
+  if (ovEl) wrap.appendChild(ovEl);
+  wrap.appendChild(tableWrap);
+  rootEl.appendChild(wrap);
+
+  buildRail(chart);
+  if (Array.isArray(o.alarms)) setLimitsFromAlarms(chart, o.alarms);
 
   if (window.matchMedia) {
     chart.mqMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -3007,20 +3668,28 @@ export function createChart(rootEl, opts) {
   }
 
   chart.ro = new ResizeObserver((entries) => {
-    const r = entries[0].contentRect;
-    const hOv = wantOverview ? OVERVIEW_H + 4 : 0;
-    const hTable = chart.tableOpen ? tableWrap.offsetHeight + 6 : 0;
-    chart.geom.cssW = Math.max(1, Math.round(r.width));
-    chart.geom.cssH = Math.max(1, Math.round(r.height - hOv - hTable));
-    chart.geom.dpr = window.devicePixelRatio || 1;
-    layout(chart);
-    resizeCanvases(chart);
-    invalidate(chart, 'all');
+    if (chart.destroyed) return;
+    for (let i = 0; i < entries.length; i++) {
+      const en = entries[i];
+      const r = en.contentRect;
+      if (en.target === chart.hostEl) {
+        if (r.width > 0 && r.height > 0) applySize(chart, r.width, r.height);
+      } else if (r.width > 0 && r.height > 0) {
+        chart.ovW = Math.max(1, Math.round(r.width));
+        chart.ovH = Math.max(1, Math.round(r.height));
+        resizeOverview(chart);
+      }
+    }
   });
-  chart.ro.observe(wrap);
+  chart.ro.observe(hostEl);
+  if (ovHostEl) chart.ro.observe(ovHostEl);
 
   chart.io = new IntersectionObserver((entries) => {
-    chart.visible = entries[0].isIntersecting;
+    const on = entries[0].isIntersecting;
+    const was = chart.visible;
+    chart.visible = on;
+    // Becoming visible is one of the paths a ResizeObserver never reports.
+    if (on && !was) measureNow(chart);
   }, { threshold: 0 });
   chart.io.observe(wrap);
 
@@ -3029,49 +3698,44 @@ export function createChart(rootEl, opts) {
   });
   chart.mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-  const onLive = () => {
-    chart.follow = true;
-    cls(chart.livePill, 'chart__live--on', false);
-    chart.blit.valid = false;
-    chart.dirty.traces = true;
-    chart.dirty.static = true;
+  const onVis = () => {
+    if (!document.hidden) measureNow(chart);
   };
-  livePill.addEventListener('click', onLive);
-  chart.listeners.push([livePill, 'click', onLive]);
-
-  const onTable = () => {
-    chart.tableOpen = !chart.tableOpen;
-    cls(tableWrap, 'chart__table--on', chart.tableOpen);
-    tableBtn.setAttribute('aria-pressed', chart.tableOpen ? 'true' : 'false');
-    if (chart.tableOpen) rebuildTable(chart);
-  };
-  tableBtn.addEventListener('click', onTable);
-  chart.listeners.push([tableBtn, 'click', onTable]);
+  document.addEventListener('visibilitychange', onVis);
+  chart.listeners.push([document, 'visibilitychange', onVis]);
+  const onWinResize = () => measureNow(chart);
+  window.addEventListener('resize', onWinResize);
+  chart.listeners.push([window, 'resize', onWinResize]);
 
   bindInteractions(chart);
   layout(chart);
   resizeCanvases(chart);
+  syncToolbar(chart);
+  // Explicit measurement on mount. A ResizeObserver does not fire in a background tab, so
+  // this is the only thing standing between a hidden page load and a 1x1 backing store.
+  measureNow(chart);
   return chart;
 }
 
 /* -------------------------------------------------------------------------- */
-/* 15. PUBLIC API                                                             */
+/* 18. PUBLIC API                                                             */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Point the chart at a channel store. The store's column views are never cached across
- * frames — `pushRow` invalidates them on growth (§6.2) — only the store object is held.
+ * Point the trend at a channel store. Column views are never cached across frames —
+ * `pushRow` invalidates them on growth — only the store object is held.
  * @param {object} chart The chart.
  * @param {object} store A `core/log.js` ChannelStore, or null to clear.
  * @param {{volume:string, time:string, cv:string}} [xChannels] Monotone x channel names
  *   per x-mode. Defaults to `{volume:'V_mL', time:'t_s', cv:'V_CV'}`.
+ * @param {object} [config] The frozen config. When present its `alarms` rows set the
+ *   PT-101 and PDT-101 limit lines, so the caller need not do it separately.
  * @returns {void}
  */
-export function setSource(chart, store, xChannels) {
+export function setSource(chart, store, xChannels, config) {
   chart.store = store || null;
   if (xChannels) chart.xChannels = Object.assign({}, XCH_DEFAULT, xChannels);
   chart.tableValid = false;
-  chart.dataBinsValid = false;
   chart.lastPaintedN = -1;
   chart.blit.valid = false;
   chart.cursor.on = false;
@@ -3081,54 +3745,158 @@ export function setSource(chart, store, xChannels) {
     a.easeT0 = 0;
     a.targetMax = a.mode === 'manual' ? a.max : Math.max(1, a.max);
   }
+  if (config && Array.isArray(config.alarms)) setLimitsFromAlarms(chart, config.alarms);
   if (chart.tableOpen) rebuildTable(chart);
   invalidate(chart, 'all');
 }
 
 /**
- * Re-point one series at a different log channel, taking its unit and fixed decimal
- * count from the channel table (§5.1).
+ * Re-point one pen at a different log channel, taking its unit and fixed decimal count
+ * from the channel table.
  * @param {object} chart The chart.
- * @param {string} seriesId Series id.
+ * @param {string} penId Pen id.
  * @param {string} channelName Numeric log channel name.
  * @returns {void}
  */
-export function setSeriesChannel(chart, seriesId, channelName) {
-  const s = chart.seriesById.get(seriesId);
-  if (!s) return;
-  s.channel = channelName;
+export function setSeriesChannel(chart, penId, channelName) {
+  const p = chart.penById.get(penId);
+  if (!p || p.channel === channelName) return;
+  p.channel = channelName;
   const meta = CHANNEL_META.get(channelName);
   if (meta) {
-    s.unit = meta.unit;
-    s.decimals = meta.decimals;
+    p.eu = meta.unit === '-' ? '' : meta.unit;
+    p.dec = meta.decimals;
   }
-  chart.cursorRowsKey = '';
+  rebuildTraces(chart);
+  buildRail(chart);
   if (chart.tableOpen) rebuildTable(chart);
   invalidate(chart, 'all');
 }
 
 /**
- * Show or hide one series. A channel toggle forces a full repaint (§6.26) and may add
- * or remove a y-axis gutter, so the plot rectangle is recomputed.
+ * Light or extinguish one pen. Both its PV and its SP go with it, because a setpoint
+ * without its process variable is not a reading an operator can act on.
  * @param {object} chart The chart.
- * @param {string} seriesId Series id.
- * @param {boolean} visible Desired visibility.
+ * @param {string} penId Pen id.
+ * @param {boolean} visible Desired state.
  * @returns {void}
  */
-export function setSeriesVisible(chart, seriesId, visible) {
-  const s = chart.seriesById.get(seriesId);
-  if (!s || s.visible === !!visible) return;
-  s.visible = !!visible;
+export function setPenVisible(chart, penId, visible) {
+  const p = chart.penById.get(penId);
+  if (!p || p.visible === !!visible) return;
+  p.visible = !!visible;
+  if (p.row && p.row.cb.checked !== p.visible) p.row.cb.checked = p.visible;
   layout(chart);
   ensureBuffers(chart);
-  chart.cursorRowsKey = '';
   if (chart.tableOpen) rebuildTable(chart);
   invalidate(chart, 'all');
 }
 
 /**
- * Set the visible x window explicitly, in the current x-mode's channel unit. Passing a
- * non-finite pair restores auto-fit plus live follow.
+ * Light or extinguish one pen. Compatibility alias of {@link setPenVisible}.
+ * @param {object} chart The chart.
+ * @param {string} penId Pen id.
+ * @param {boolean} visible Desired state.
+ * @returns {void}
+ */
+export function setSeriesVisible(chart, penId, visible) {
+  setPenVisible(chart, penId, visible);
+}
+
+/**
+ * Focus one pen: every other lit pen dims to 22 % so a single loop can be read out of a
+ * crowded trend. Pass null to clear.
+ * @param {object} chart The chart.
+ * @param {string|null} penId Pen id, or null.
+ * @returns {void}
+ */
+export function setPenFocus(chart, penId) {
+  const want = penId || null;
+  if (chart.focusPen === want) return;
+  chart.focusPen = want;
+  for (let i = 0; i < chart.pens.length; i++) {
+    const p = chart.pens[i];
+    p.dim = want !== null && p.id !== want;
+  }
+  chart.railDue = 0;
+  invalidate(chart, 'traces');
+}
+
+/**
+ * Focus one pen. Compatibility alias of {@link setPenFocus}.
+ * @param {object} chart The chart.
+ * @param {string|null} penId Pen id, or null.
+ * @returns {void}
+ */
+export function setSeriesFocus(chart, penId) {
+  setPenFocus(chart, penId);
+}
+
+/**
+ * Dim or undim one pen directly.
+ * @param {object} chart The chart.
+ * @param {string} penId Pen id.
+ * @param {number} alpha 1 for full strength, anything less to dim.
+ * @returns {void}
+ */
+export function setSeriesAlpha(chart, penId, alpha) {
+  const p = chart.penById.get(penId);
+  if (!p) return;
+  const dim = !(alpha >= 1);
+  if (p.dim === dim) return;
+  p.dim = dim;
+  invalidate(chart, 'traces');
+}
+
+/**
+ * Set one pen's alarm limit line explicitly, in the pen's own engineering unit.
+ * @param {object} chart The chart.
+ * @param {string} penId Pen id.
+ * @param {number|null} value Limit, or null to remove the line.
+ * @returns {void}
+ */
+export function setSeriesLimit(chart, penId, value) {
+  const p = chart.penById.get(penId);
+  if (!p) return;
+  const v = typeof value === 'number' && isFinite(value) ? value : NaN;
+  if ((p.limit === v) || (p.limit !== p.limit && v !== v)) return;
+  p.limit = v;
+  chart.railDue = 0;
+  chart.dirty.overlay = true;
+}
+
+/**
+ * Derive every pen's limit line from `config.alarms`. A pen declares which ALARM_TABLE
+ * `signal` it watches; the LOWEST rising threshold at severity ALARM wins, falling back to
+ * the lowest rising threshold of any severity, because the first line an operator must not
+ * cross is the one that matters.
+ * @param {object} chart The chart.
+ * @param {Array<object>} alarms `config.alarms` rows.
+ * @returns {void}
+ */
+export function setLimitsFromAlarms(chart, alarms) {
+  if (!Array.isArray(alarms)) return;
+  for (let i = 0; i < chart.pens.length; i++) {
+    const p = chart.pens[i];
+    if (!p.limitSignal) continue;
+    let best = NaN;
+    let bestAny = NaN;
+    for (let k = 0; k < alarms.length; k++) {
+      const row = alarms[k];
+      if (!row || row.signal !== p.limitSignal || row.op !== '>') continue;
+      const th = row.threshold;
+      if (typeof th !== 'number' || !isFinite(th)) continue;
+      if (!(bestAny === bestAny) || th < bestAny) bestAny = th;
+      if (row.severity !== 'ALARM') continue;
+      if (!(best === best) || th < best) best = th;
+    }
+    setSeriesLimit(chart, p.id, best === best ? best : bestAny === bestAny ? bestAny : null);
+  }
+}
+
+/**
+ * Set the visible x window explicitly, in the current x-mode's channel unit. A non-finite
+ * pair restores auto-fit plus live follow.
  * @param {object} chart The chart.
  * @param {number} x0 Window start, x-channel unit (mL, s or CV).
  * @param {number} x1 Window end, same unit.
@@ -3143,8 +3911,8 @@ export function setWindow(chart, x0, x1) {
 }
 
 /**
- * Switch the x axis between volume, time and CV, preserving the visible window by
- * mapping its bounds through the row index (§9.3.2).
+ * Switch the x axis between volume, time and CV, preserving the visible window by mapping
+ * its bounds through the row index.
  * @param {object} chart The chart.
  * @param {'volume'|'time'|'cv'} mode New x-mode.
  * @returns {void}
@@ -3158,13 +3926,15 @@ export function setXMode(chart, mode) {
   if (!chart.autoFit) remapWindow(chart, from, to);
   chart.tableValid = false;
   chart.blit.valid = false;
+  chart.ovDirty = true;
   if (chart.tableOpen) rebuildTable(chart);
+  syncToolbar(chart);
   invalidate(chart, 'all');
 }
 
 /**
- * Enable or disable live follow. Enabling keeps the current span and scrolls the live
- * edge to 85 % width; disabling freezes the window and reveals the "Jump to live" pill.
+ * Enable or disable live follow. Enabling keeps the current span and scrolls the live edge
+ * to 85 % width; disabling freezes the window.
  * @param {object} chart The chart.
  * @param {boolean} on Desired follow state.
  * @returns {void}
@@ -3173,29 +3943,30 @@ export function setFollow(chart, on) {
   const want = !!on;
   if (chart.follow === want) return;
   chart.follow = want;
-  cls(chart.livePill, 'chart__live--on', !want);
   chart.blit.valid = false;
   chart.dirty.traces = true;
   chart.dirty.static = true;
+  syncToolbar(chart);
 }
 
 /**
- * Mark a layer dirty. `'all'` also re-reads the theme tokens, which is what a theme
- * change requires (§6.26).
+ * Mark a layer dirty. `'all'` also re-reads the theme tokens, which is what a theme change
+ * requires.
  * @param {object} chart The chart.
  * @param {'static'|'traces'|'overlay'|'all'} layer Layer to invalidate.
  * @returns {void}
  */
 export function invalidate(chart, layer) {
   if (layer === 'all') {
-    chart.colors = resolveColors('current', chart.series);
-    styleSwatches(chart);
+    chart.colors = resolveColors('current', chart.pens);
+    paintRailChips(chart);
     chart.dirty.static = true;
     chart.dirty.traces = true;
     chart.dirty.overlay = true;
     chart.blit.valid = false;
     chart.tableValid = false;
     chart.ovDirty = true;
+    chart.railDue = 0;
     return;
   }
   if (layer === 'static') chart.dirty.static = true;
@@ -3206,7 +3977,7 @@ export function invalidate(chart, layer) {
 }
 
 /**
- * Set the phase/block shading bands (§9.3.3).
+ * Set the phase/block shading bands.
  * @param {object} chart The chart.
  * @param {Array<{x0:number, x1:number, label:string, kind:string}>} bands Bands in the
  *   current x-channel unit; `kind` is the block type, which selects the tint.
@@ -3218,7 +3989,7 @@ export function setBands(chart, bands) {
 }
 
 /**
- * Set the marker set: fraction ticks, event chevrons and peak flags (§9.3.3).
+ * Set the marker set: fraction ticks, event chevrons and peak flags.
  * @param {object} chart The chart.
  * @param {Array<{x:number, label:string, kind:'line'|'flag'|'tick', y?:number,
  *   seriesId?:string, x0?:number, x1?:number, severity?:string}>} markers Markers in the
@@ -3232,7 +4003,7 @@ export function setMarkers(chart, markers) {
 }
 
 /**
- * Set or clear the shaded pooled region (§9.3.3).
+ * Set or clear the shaded pooled region.
  * @param {object} chart The chart.
  * @param {number|null} x0 Pool start in the current x-channel unit, or null to clear.
  * @param {number|null} x1 Pool end, or null to clear.
@@ -3250,12 +4021,12 @@ export function setPoolWindow(chart, x0, x1) {
 }
 
 /**
- * Find the nearest visible sample to a point.
+ * Find the nearest lit PV trace to a point.
  * @param {object} chart The chart.
- * @param {number} px Pointer x in css px, relative to the chart element.
- * @param {number} py Pointer y in css px, relative to the chart element.
- * @returns {{seriesId:string, index:number, x:number, y:number}|null} The hit, or null
- *   when no visible trace passes within 12 px.
+ * @param {number} px Pointer x in css px, relative to the plot host.
+ * @param {number} py Pointer y in css px, relative to the plot host.
+ * @returns {{seriesId:string, index:number, x:number, y:number}|null} The hit, or null when
+ *   no lit trace passes within 12 px.
  */
 export function hitTest(chart, px, py) {
   if (!chart.store || chart.store.n === 0) return null;
@@ -3266,16 +4037,16 @@ export function hitTest(chart, px, py) {
   prepareMapping(chart, g);
   let best = null;
   let bestD = 12;
-  for (let i = 0; i < chart.series.length; i++) {
-    const s = chart.series[i];
-    if (!s.visible) continue;
-    const y = column(chart.store, s.channel);
+  for (let i = 0; i < chart.pens.length; i++) {
+    const p = chart.pens[i];
+    if (!p.visible) continue;
+    const y = column(chart.store, p.channel);
     const v = smp.index < y.length ? y[smp.index] : NaN;
     if (v !== v) continue;
-    const d = Math.abs(s.bPix - v * s.kPix - py);
+    const d = Math.abs(p.bPix - v * p.kPix - py);
     if (d < bestD) {
       bestD = d;
-      best = { seriesId: s.id, index: smp.index, x: smp.x, y: v };
+      best = { seriesId: p.id, index: smp.index, x: smp.x, y: v };
     }
   }
   return best;
@@ -3300,12 +4071,12 @@ export function attachInteractions(chart, handlers) {
 }
 
 /**
- * Render one frame. Called at most once per rAF frame by `ui/app.js`; the chart never
- * owns a rAF loop of its own and never calls `sim.advanceWall` (§6.24, §0).
+ * Render one frame. Called at most once per rAF frame by `ui/app.js`; the trend never owns
+ * a rAF loop of its own and never calls `sim.advanceWall`.
  *
- * Order: follow-window update, the 4 Hz measure pass, axis easing, then the three
- * layers. A chart that is scrolled out of view or in a hidden tab returns immediately,
- * so a hidden panel costs nothing per frame.
+ * Order: re-measure if the plot is degenerate, follow-window update, the 4 Hz decimate and
+ * autoscale pass, axis easing, then the three layers and the 10 Hz rail refresh. A trend
+ * scrolled out of view or in a hidden tab returns immediately.
  *
  * @param {object} chart The chart.
  * @param {number} now_ms Frame timestamp, `performance.now()` domain.
@@ -3313,8 +4084,19 @@ export function attachInteractions(chart, handlers) {
  */
 export function frame(chart, now_ms) {
   if (chart.destroyed || !chart.visible) return;
+  if (typeof document !== 'undefined' && document.hidden) return;
   const g = chart.geom;
-  if (g.plotW <= 2 || g.plotH <= 2) return;
+  // The backing store is degenerate when the host was never measured at a real size: the
+  // panel was built hidden, or laid out after mount. Test the HOST box, not just the plot
+  // rectangle — an unmeasured host still yields a nominally positive plot rectangle out of
+  // the padding alone, which is exactly how the old build sat at 1x1 forever.
+  if (g.cssW <= 16 || g.cssH <= 16 || g.plotW <= 2 || g.plotH <= 2) {
+    if (now_ms - chart.lastRemeasure_ms >= REMEASURE_PERIOD_MS) {
+      chart.lastRemeasure_ms = now_ms;
+      measureNow(chart);
+    }
+    if (g.cssW <= 16 || g.cssH <= 16 || g.plotW <= 2 || g.plotH <= 2) return;
+  }
   chart.frameCount++;
 
   const measureDue = now_ms - chart.lastMeasure_ms >= MEASURE_PERIOD_MS;
@@ -3324,6 +4106,7 @@ export function frame(chart, now_ms) {
       g.dpr = dpr;
       layout(chart);
       resizeCanvases(chart);
+      resizeOverview(chart);
       chart.dirty.static = true;
       chart.dirty.traces = true;
     }
@@ -3348,8 +4131,8 @@ export function frame(chart, now_ms) {
   }
 
   if (applyAxisBounds(chart, now_ms)) {
-    // MANDATORY full repaint: the y mapping moved, so blitted history would be drawn
-    // at a stale scale and the trace would step against its own axis (§6.26).
+    // MANDATORY full repaint: the y mapping moved, so blitted history would be drawn at a
+    // stale scale and the trace would step against its own axis.
     chart.dirty.static = true;
     chart.dirty.traces = true;
     chart.blit.valid = false;
@@ -3361,7 +4144,7 @@ export function frame(chart, now_ms) {
   }
 
   if (chart.dirty.static) {
-    paintStatic(chart, { ctx: chart.gStatic, geom: g, colors: chart.colors, background: false });
+    paintStatic(chart, { ctx: chart.gStatic, geom: g, colors: chart.colors });
     chart.dirty.static = false;
   }
 
@@ -3379,14 +4162,18 @@ export function frame(chart, now_ms) {
     chart.lastOverview_ms = now_ms;
     paintOverview(chart);
   }
+
+  if (now_ms >= chart.railDue) {
+    chart.railDue = now_ms + RAIL_PERIOD_MS;
+    if (railKey(chart) !== chart.railKey) buildRail(chart);
+    updateRail(chart);
+  }
   updateAriaLabel(chart, now_ms);
 }
 
 /**
- * Render the current view into a standalone PNG at an arbitrary size and theme.
- * The theme comes from `format.readThemeTokens(theme)`, which serves a cached map for
- * both themes, so exporting a light-theme figure from a dark session never flips
- * `data-theme` on the live document (§6.25).
+ * Render the current view into a standalone PNG at an arbitrary size and theme. The plot
+ * well is black in both themes, so only the surrounding furniture changes.
  *
  * @param {object} chart The chart.
  * @param {object} [opts] Export options.
@@ -3403,24 +4190,24 @@ export function exportPNG(chart, opts) {
   const height = Math.max(240, Math.round(o.height || 900));
   const title = o.title || '';
   const footer = o.footer || '';
-  const colors = resolveColors(o.theme || 'current', chart.series);
+  const colors = resolveColors(o.theme || 'current', chart.pens);
 
   const cv = document.createElement('canvas');
   cv.width = width;
   cv.height = height;
   const ctx = cv.getContext('2d');
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = colors.bg;
+  ctx.fillStyle = colors.face;
   ctx.fillRect(0, 0, width, height);
 
-  const titleH = title ? 34 : 8;
-  const footerH = footer ? 26 : 8;
+  const titleH = title ? 30 : 20;
+  const footerH = footer ? 24 : 8;
   const geom = {
     cssW: width,
     cssH: height - titleH - footerH,
     dpr: 1,
-    padL: 56, padR: 60, padT: 22, padB: 42,
-    px0: 56, py0: 22, px1: width - 60, py1: height - titleH - footerH - 42,
+    padL: 42, padR: 48, padT: 16, padB: 26,
+    px0: 42, py0: 16, px1: width - 48, py1: height - titleH - footerH - 26,
     plotW: 1, plotH: 1, pixels: 1,
   };
 
@@ -3434,76 +4221,99 @@ export function exportPNG(chart, opts) {
   layout(chart);
   geom.pixels = Math.max(1, Math.round(geom.plotW));
   chart.stripStart = new Int32Array(geom.pixels + 1);
-  for (let i = 0; i < chart.series.length; i++) {
-    const s = chart.series[i];
-    savedBufs.push([s.minBuf, s.maxBuf]);
-    s.minBuf = new Float32Array(geom.pixels);
-    s.maxBuf = new Float32Array(geom.pixels);
+  for (let i = 0; i < chart.traces.length; i++) {
+    const t = chart.traces[i];
+    savedBufs.push([t.minBuf, t.maxBuf]);
+    t.minBuf = new Float32Array(geom.pixels);
+    t.maxBuf = new Float32Array(geom.pixels);
   }
 
   try {
     ctx.save();
     ctx.translate(0, titleH);
-    paintStatic(chart, { ctx, geom, colors, background: false });
+    paintStatic(chart, { ctx, geom, colors });
     chart.rawMode = samplesPerPixel(chart, geom) < RAW_SPP;
     prepareMapping(chart, geom);
     if (chart.store && chart.store.n > 0) {
       const starts = buildStripTable(chart, 0, geom.pixels);
+      ctx.save();
       ctx.beginPath();
       ctx.rect(geom.px0, geom.py0 - 1, geom.plotW, geom.plotH + 2);
-      ctx.save();
       ctx.clip();
-      paintSeriesBins(chart, ctx, geom, colors, 0, geom.pixels, starts, 0);
+      paintTraceBins(chart, ctx, geom, colors, 0, geom.pixels, starts, 0);
       ctx.restore();
+    }
+    // limit lines, exactly as the operator sees them
+    for (let i = 0; i < chart.pens.length; i++) {
+      const p = chart.pens[i];
+      if (!p.visible || !(p.limit === p.limit)) continue;
+      const py = p.bPix - p.limit * p.kPix;
+      if (py < geom.py0 || py > geom.py1) continue;
+      ctx.strokeStyle = colors.pen[p.id];
+      ctx.lineWidth = SP_WIDTH;
+      ctx.setLineDash(SP_DASH);
+      ctx.beginPath();
+      ctx.moveTo(geom.px0, Math.round(py) + 0.5);
+      ctx.lineTo(geom.px1, Math.round(py) + 0.5);
+      ctx.stroke();
+      ctx.setLineDash(EMPTY_DASH);
     }
     ctx.restore();
 
     if (title) {
-      ctx.fillStyle = colors.text1;
-      ctx.font = '600 18px ' + FONT_UI;
+      ctx.fillStyle = colors.ink;
+      ctx.font = '700 14px ' + FONT_UI;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText(title, 16, titleH / 2 + 2);
+      ctx.fillText(title, 12, titleH / 2);
     }
     if (footer) {
-      ctx.fillStyle = colors.text3;
-      ctx.font = '11px ' + FONT_UI;
+      ctx.fillStyle = colors.ink2;
+      ctx.font = '10px ' + FONT_UI;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText(footer, 16, height - footerH / 2);
+      ctx.fillText(footer, 12, height - footerH / 2);
     }
-    // legend strip, so the exported figure stands alone
-    let lx = width - 16;
+    // pen strip: tag plus EU, the same vocabulary as the rail
+    let lx = width - 12;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.font = '11px ' + FONT_UI;
-    for (let i = chart.series.length - 1; i >= 0; i--) {
-      const s = chart.series[i];
-      if (!s.visible) continue;
-      const label = s.label + (s.unit ? ' (' + s.unit + ')' : '');
+    ctx.font = '700 10px ' + FONT_UI;
+    const ty = titleH / 2;
+    for (let i = chart.pens.length - 1; i >= 0; i--) {
+      const p = chart.pens[i];
+      if (!p.visible) continue;
+      const label = p.tag + (p.eu ? ' ' + p.eu : '');
       const w = ctx.measureText(label).width;
-      ctx.fillStyle = colors.text2;
-      ctx.fillText(label, lx, titleH / 2 + 2);
-      lx -= w + 8;
-      ctx.strokeStyle = colors.series[s.id] || colors.text2;
-      ctx.lineWidth = Math.max(2, s.width);
-      ctx.setLineDash(s.dash && s.dash.length ? s.dash : EMPTY_DASH);
+      ctx.fillStyle = colors.ink;
+      ctx.fillText(label, lx, ty);
+      lx -= w + 6;
+      ctx.strokeStyle = colors.pen[p.id];
+      ctx.lineWidth = PV_WIDTH;
       ctx.beginPath();
-      ctx.moveTo(lx - 16, titleH / 2 + 2);
-      ctx.lineTo(lx, titleH / 2 + 2);
+      ctx.moveTo(lx - 14, ty - 2);
+      ctx.lineTo(lx, ty - 2);
       ctx.stroke();
-      ctx.setLineDash(EMPTY_DASH);
-      lx -= 16 + 14;
-      if (lx < 240) break;
+      if (p.spChannel || p.limit === p.limit) {
+        ctx.lineWidth = SP_WIDTH;
+        ctx.setLineDash(SP_DASH);
+        ctx.beginPath();
+        ctx.moveTo(lx - 14, ty + 3);
+        ctx.lineTo(lx, ty + 3);
+        ctx.stroke();
+        ctx.setLineDash(EMPTY_DASH);
+      }
+      lx -= 14 + 12;
+      if (lx < 220) break;
     }
   } finally {
     chart.geom = savedGeom;
     chart.colors = savedColors;
     chart.stripStart = savedStrip;
     chart.rawMode = savedRaw;
-    for (let i = 0; i < chart.series.length; i++) {
-      chart.series[i].minBuf = savedBufs[i][0];
-      chart.series[i].maxBuf = savedBufs[i][1];
+    for (let i = 0; i < chart.traces.length; i++) {
+      chart.traces[i].minBuf = savedBufs[i][0];
+      chart.traces[i].maxBuf = savedBufs[i][1];
     }
     layout(chart);
     prepareMapping(chart, chart.geom);
@@ -3521,7 +4331,7 @@ export function exportPNG(chart, opts) {
 }
 
 /**
- * Tear the chart down: disconnect every observer, remove every listener and detach the
+ * Tear the trend down: disconnect every observer, remove every listener and detach the
  * wrapper. Safe to call twice.
  * @param {object} chart The chart.
  * @returns {void}
@@ -3533,7 +4343,9 @@ export function destroyChart(chart) {
   if (chart.io) chart.io.disconnect();
   if (chart.mo) chart.mo.disconnect();
   for (let i = 0; i < chart.listeners.length; i++) {
-    const [target, type, fn] = chart.listeners[i];
+    const target = chart.listeners[i][0];
+    const type = chart.listeners[i][1];
+    const fn = chart.listeners[i][2];
     try {
       target.removeEventListener(type, fn);
     } catch (err) {

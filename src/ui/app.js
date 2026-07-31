@@ -1,60 +1,78 @@
 /**
- * @file src/ui/app.js — the composition root and the program's ONLY `requestAnimationFrame` loop.
+ * @file src/ui/app.js — the composition root, the FT-CLASSIC shell, and the program's ONLY
+ * `requestAnimationFrame` loop.
  *
- * Contract: architecture-v2 §6.32 (this module), §2.4 (the one `ctx` shape and the rebuild
- * protocol), §3.1–§3.2 (loop ownership), §9.1.1 (shell bands), §9.4.3 (the run control bar),
- * §9.5 (the keymap), §9.6 (onboarding is mounted at boot step 4a), §9.7 (accessibility).
+ * THE SCREEN. A classic Rockwell FactoryTalk View SE / Wonderware InTouch operator screen: beveled
+ * grey chrome, sunken near-black label boxes, icon-only controls, square corners. Five bands:
+ *
+ *   1. TITLE STRIP  26 px — unit name (the SIMULATED honesty note lives behind it), the block
+ *                           counter, the sim clock with the method-progress bar, and the
+ *                           alarm-summary lamps with the active-alarm count.
+ *   2. TOOLBAR      40 px — 34×34 beveled icon buttons in groups split by 2 px sunken grooves:
+ *                           [run][hold][continue][skip][stop][reset] ‖ [estop] ‖
+ *                           speed chips 1× … 1000× + [pause] + LIMITED lamp + SPD box ‖
+ *                           [P&ID][TREND][METHOD][RESULTS][CONFIG] ‖
+ *                           [ack][manual][scenarios][help][theme]
+ *   3. ALARM BANNER 24 px — present only while an alarm is active or a shell error is showing:
+ *                           blinking lamp, severity code, ISA tag, alarm code, trip condition,
+ *                           acknowledge and silence. Carries the two `aria-live` regions.
+ *   4. WORKSPACE          — one `.view` per screen, stacked and shown one at a time. The MAIN
+ *                           screen is `ui/view_run.js`, which holds the P&ID panel over the trend
+ *                           panel with the draggable splitter between them: the P&ID and TREND nav
+ *                           buttons therefore select the SAME screen and only hint which pane to
+ *                           favour, because the co-visibility of schematic and trend is the
+ *                           requirement and no navigation may take it away.
+ *   5. STATUS STRIP 24 px — sunken label boxes FLOW %B P1 dP UV COND pH CV, then the run-state
+ *                           lamp with its STATE box and the data-quality lamp with its QUAL box.
+ *
+ * NO PROSE ON A NORMAL SCREEN. Every control is an icon with `title` + `aria-label`; every number
+ * sits in a label box carrying its tag and its engineering unit. Sentences live in tooltips, in the
+ * `data/glossary.js` popovers, in help, and on failure surfaces — nowhere else.
  *
  * RESPONSIBILITIES
- *   - Build the ONE `ctx = { config, run, bus, sim, fmt, overrides }` (§2.4). `skid.createSkid` is
+ *   - Build the ONE `ctx = { config, run, bus, sim, fmt, overrides }`. `skid.createSkid` is
  *     REQUIRED after every `createRunState`, or `run.topo/bed/col` stay null and the first
  *     `physicsTick` throws.
  *   - Own the single rAF loop: `sim.advanceWall(ctx, wallDt_s)` once per frame, then `update()` on
- *     the VISIBLE view only. A hidden tab costs nothing.
- *   - Own the persistent chrome: title bar, run control bar, alarm banner stack, tab strip, status
- *     strip, the perf overlay and the theme toggle.
+ *     the VISIBLE screen only. A hidden screen costs nothing.
+ *   - Own the persistent chrome and every global keyboard shortcut.
  *   - Route every `sim.*` action's `{ ok, reason }` to a toast when `ok` is false — never a silent
- *     refusal (§9.4.4).
- *   - Surface `run.speedDeficit` honestly as `1000× (limited to N×)` (§2.1.1, §9.4.3).
+ *     refusal.
+ *   - Surface `run.speedDeficit` honestly: a LIMITED lamp beside the speed chips plus the achieved
+ *     multiplier in the SPD label box.
  *
  * THE UI IS READ-ONLY OVER `run` AND `config`. Nothing in this file assigns to either; every
  * mutation goes through `core/sim.js`.
  *
  * FRAME SAFETY. `sim.advanceWall` and every panel `update()` are guarded: a throwing panel is
- * reported in the chrome and, after three consecutive failures, taken out of the loop — but the
+ * reported in the alarm band and, after three consecutive failures, taken out of the loop — but the
  * loop itself never dies and the shell never freezes.
  *
  * DOM DISCIPLINE. `boot` empties `#app` and builds the shell once. After that this module writes
- * only text and attributes onto cached node references: there is no `innerHTML` anywhere in this
- * file, and no layout read (`getBoundingClientRect`, `offsetWidth`) inside a frame (§6.24).
+ * only text, classes and attributes onto cached node references: there is no `innerHTML` anywhere
+ * in this file, and no layout read inside a frame.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * CSS CONTRACT — the class vocabulary this module emits, styled in `styles/app.css`:
- *   .shell .skip-link .sr-only
- *   .titlebar .titlebar__title .titlebar__sub .titlebar__spacer .titlebar__actions
- *   .chip .chip--sim
- *   .runbar .runbar__group .runbar__stack .runbar__label .runbar__value .runbar__rule
- *   .runbar__speed-note (.is-limited) .runbar__progress .runbar__progress-fill
- *   .pill .pill--lg .pill--ok|warn|alarm|info|neutral
- *   .btn .btn--primary .btn--ghost .btn--danger .btn--icon .btn--sm .btn--estop
- *   .segmented .segmented__opt (.is-selected)
- *   .holdring .holdring__track .holdring__fill
- *   .alarm-stack .alarm-stack__list .banner .banner--info|warn|alarm|critical|fault
- *   .banner__bar .banner__icon .banner__text .banner__sev .banner__msg .banner__detail
- *   .banner__actions .banner__count .info-dot
- *   .tabstrip .tab (.is-active) .workspace .view .view--run|method|results|system
- *   .statusstrip .statchip .statchip__label .statchip__value (.is-warn|.is-invalid|.is-off)
- *   .perf-overlay .perf-overlay__row .perf-overlay__k .perf-overlay__v
- *   .shell-error .shell-error__msg .shell-error__actions .shell-narrow-note
- *   .glossary .glossary__typical .empty .empty__title .table-wrap .field__hint .btn-row
- * The `.shell` grid has exactly six rows, so every extra surface it owns is out of flow: the skip
- * link is absolute, the narrow note and the perf overlay are fixed, and the error bar lives inside
- * the alarm band rather than adding a seventh band.
+ * CSS CONTRACT — the class vocabulary this module emits, all of it styled in `styles/app.css`:
+ *   .shell (.is-manual .is-narrow) .skip-link .sr-only
+ *   .titlebar .titlebar__brand .titlebar__name .titlebar__spacer .titlebar__meta .titlebar__actions
+ *   .toolbar .toolbar__group (.toolbar__group--estop) .toolbar__sep .toolbar__spacer
+ *   .iconbtn (.is-active .iconbtn--sm .btn--estop) .holdring .holdring__track .holdring__fill
+ *   .segmented .speedchip (.is-active)
+ *   .lamp .lamp--off|run|warn|alarm (.is-blink)
+ *   .tagblk .tagblk__lbl .lbox (.lbox--wide .lbox--narrow .is-alarm .is-warn .is-stale)
+ *   .lbox__v .lbox__eu
+ *   .progress .progress__fill
+ *   .alarmbar .banner__sev .alarmbar__tag .alarmbar__code .banner__detail .banner__actions
+ *   .banner__count
+ *   .workspace .view .view--main|method|results|config
+ *   .statusstrip .statusstrip__spacer
+ *   .perf .perf__row .perf__key .perf__value
+ * Buttons and glyphs come from `ui/hmi.js` (`iconButton`, `icon`); the label boxes, lamps and bands
+ * are built here against the classes above. Every icon name used is one of `hmi.ICON_NAMES`.
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  *
- * Layer L10. Imports the sim surface, the two physics helpers the startup benchmark needs, the four
- * views, the overlay host and onboarding, plus three pure read-only helpers from the skid layer
- * (`blockProgress`, `methodDemand`, `sensorQuality`).
+ * Layer L10.
  */
 
 import * as sim from '../core/sim.js';
@@ -70,6 +88,7 @@ import * as presets from '../data/presets.js';
 import { GLOSSARY, glossaryFor } from '../data/glossary.js';
 import { exportMethodJSON, importMethodJSON, downloadText } from '../io/export.js';
 import * as fmt from './format.js';
+import * as hmi from './hmi.js';
 import * as overlay from './overlay.js';
 import * as onboarding from './onboarding.js';
 import { createRunView } from './view_run.js';
@@ -84,59 +103,107 @@ import { createSystemView } from './view_system.js';
 /** The preset the shell boots into. */
 const DEFAULT_PRESET_ID = 'cex-capture-igg1-pilot';
 
-/** The four tabs of §9.1.1, in DOM and `Alt+N` order. */
-const TABS = [
-  { id: 'run', label: 'Run', key: 'Alt+1', create: createRunView },
-  { id: 'method', label: 'Method', key: 'Alt+2', create: createMethodView },
-  { id: 'results', label: 'Results', key: 'Alt+3', create: createResultsView },
-  { id: 'system', label: 'System', key: 'Alt+4', create: createSystemView },
+/**
+ * The four screens of the workspace, in DOM order. `main` is `ui/view_run.js`: the P&ID panel over
+ * the trend panel, splitter between, both always visible.
+ */
+const SCREENS = [
+  { id: 'main', create: createRunView },
+  { id: 'method', create: createMethodView },
+  { id: 'results', create: createResultsView },
+  { id: 'config', create: createSystemView },
 ];
 
-/** Allowed axial grid sizes for the startup benchmark (§2.4 D5). Downgrade only. */
+/**
+ * The five navigation buttons. `pid` and `trend` select the SAME screen and differ only in the
+ * `request-pane` hint they publish, because that screen shows both panes at once.
+ */
+const NAV = [
+  { id: 'pid', screen: 'main', pane: 'pid', icon: 'pid', label: 'Process schematic (P&ID)', key: 'Alt+1' },
+  { id: 'trend', screen: 'main', pane: 'trend', icon: 'trend', label: 'Trend', key: 'Alt+2' },
+  { id: 'method', screen: 'method', pane: null, icon: 'method', label: 'Method editor', key: 'Alt+3' },
+  { id: 'results', screen: 'results', pane: null, icon: 'results', label: 'Results', key: 'Alt+4' },
+  { id: 'config', screen: 'config', pane: null, icon: 'config', label: 'Configuration', key: 'Alt+5' },
+];
+
+/** Legacy tab ids other modules still emit on `request-tab`, mapped onto the nav ids. */
+const LEGACY_NAV = {
+  run: 'pid', pid: 'pid', trend: 'trend', chart: 'trend',
+  method: 'method', results: 'results', system: 'config', config: 'config',
+};
+
+/**
+ * The status strip, left to right.
+ *
+ * `signals` are the `AlarmDef.signal` names and `evals` the `AlarmDef.evalKey` names that turn the
+ * digits red — an alarm table row watches a tag through one or the other, never both, so a box that
+ * only matched `signal` would stay lime while its own custom-evaluator alarm was standing.
+ * `sensor` is the `sensorQuality` channel that turns the digits stale.
+ */
+const STATUS_FIELDS = [
+  { key: 'flow', tag: 'FLOW', isa: 'FIC-101', kind: 'flow', gloss: 'FT-101', sensor: null,
+    signals: ['FLOW'], evals: ['flowDeviation', 'dryRun', 'cavitation'] },
+  { key: 'pctb', tag: '%B', isa: 'AIC-101', kind: 'pct', gloss: 'pctB', sensor: null,
+    signals: [], evals: [] },
+  { key: 'p1', tag: 'P1', isa: 'PT-101', kind: 'pressure', gloss: 'PT-101', sensor: 'PRESS',
+    signals: ['P1'], evals: [] },
+  { key: 'dp', tag: 'dP', isa: 'PDT-101', kind: 'pressure', gloss: 'PDT-101', sensor: 'PRESS',
+    signals: ['DP'], evals: [] },
+  { key: 'uv', tag: 'UV', isa: 'UV-101', kind: 'abs', gloss: 'UV-101', sensor: 'UV',
+    signals: ['UV'], evals: ['uvOverrange', 'uvLampFault', 'azUnstable'] },
+  { key: 'cond', tag: 'COND', isa: 'CE-101', kind: 'cond', gloss: 'CE-101', sensor: 'COND',
+    signals: ['COND'], evals: ['condRange'] },
+  { key: 'ph', tag: 'pH', isa: 'AE-101', kind: 'ph', gloss: 'AE-101', sensor: 'PH',
+    signals: ['PH'], evals: ['phRange', 'phDegraded'] },
+  { key: 'cv', tag: 'CV', isa: '', kind: 'cv', gloss: 'cv', sensor: null,
+    signals: [], evals: ['cvMismatch'] },
+];
+
+/** Allowed axial grid sizes for the startup benchmark. Downgrade only. */
 const NZ_LADDER = [100, 200, 400, 800];
 
 /**
  * Column-solver budget in milliseconds per SIMULATED second, used to pick `nz` at boot.
- * The reference machine of §2.1.1 measures ~5 ms/sim-s at `nz = 400` (0.25 ms per 0.05 s tick), so
- * 8.0 keeps the shipped grid on a reference-class machine and downgrades on one ~1.6× slower.
+ * The reference machine measures ~5 ms/sim-s at `nz = 400`, so 8.0 keeps the shipped grid on a
+ * reference-class machine and downgrades on one ~1.6× slower.
  */
 const NZ_BUDGET_MS_PER_SIM_S = 8.0;
 
-/** Simulated seconds the startup benchmark covers. Long enough to be stable, short enough to hide. */
+/** Simulated seconds the startup benchmark covers. */
 const BENCH_SIM_SECONDS = 3.0;
 
-/** Wall-clock clamp per frame, seconds — mirrors `sim.advanceWall`'s own clamp (§3.2). */
+/** Wall-clock clamp per frame, seconds — mirrors `sim.advanceWall`'s own clamp. */
 const WALL_CLAMP_S = 0.25;
 
-/** Press-and-hold duration for Skip Block, ms (§9.4.3). */
+/** Press-and-hold duration for Skip Block, ms. */
 const SKIP_HOLD_MS = 400;
 
-/** Two `Shift+Esc` presses inside this window fire the emergency stop (§9.5). */
+/** Two `Shift+Esc` presses inside this window fire the emergency stop. */
 const ESTOP_DOUBLE_MS = 1000;
 
-/** Consecutive `update()` throws before a view is taken out of the frame loop. */
-const VIEW_FAIL_LIMIT = 3;
+/** Consecutive `update()` throws before a screen is taken out of the frame loop. */
+const PANEL_FAIL_LIMIT = 3;
 
-/** Radius of the Skip Block progress ring, SVG user units. */
-const RING_R = 9;
+/** Radius of the Skip Block hold ring, SVG user units on a 24×24 viewBox. */
+const RING_R = 10;
 
-/** Severity ladder used to rank the alarm banner stack (§5.6). */
+/** Severity ladder used to rank the alarm banner. */
 const SEVERITY_RANK = { INFO: 0, WARN: 1, ALARM: 2, CRITICAL: 3, FAULT: 4 };
 
-/** Glyph per severity. Severity is ALWAYS also given as text — never colour alone (§9.7). */
-const SEVERITY_GLYPH = { INFO: 'i', WARN: '!', ALARM: '!', CRITICAL: '×', FAULT: '×' };
+/** Four-character severity codes — the banner has 24 px, not a sentence. */
+const SEVERITY_CODE = { INFO: 'INFO', WARN: 'WARN', ALARM: 'ALRM', CRITICAL: 'CRIT', FAULT: 'FLT' };
 
-/** Maximum banners drawn before the "+N more" row takes over (§9.1.1). */
-const MAX_BANNERS = 3;
+/** Lamp colour per severity. */
+const SEVERITY_LAMP = { INFO: 'run', WARN: 'warn', ALARM: 'alarm', CRITICAL: 'alarm', FAULT: 'alarm' };
 
-/** Event types that change list content and therefore demand a `structural` frame (§6.24). */
+/** Event types that change list content and therefore demand a `structural` frame. */
 const STRUCTURAL_EVENT_TYPES = {
   BLOCK_START: 1, BLOCK_END: 1, FRACTION_START: 1, FRACTION_END: 1,
   ALARM_RAISED: 1, ALARM_CLEARED: 1, ALARM_ACK: 1, RUN_START: 1, RUN_END: 1,
   STATE_CHANGE: 1, PACKING_TEST_RESULT: 1, SCENARIO_APPLIED: 1,
 };
 
-/** Human names for the `run.qualityFlags` bits (§5.3), for the status strip's Quality chip. */
+/** Human names for the `run.qualityFlags` bits, for the quality lamp's tooltip and popover. */
 const QF_LABELS = [
   [QF.UV_OVERRANGE, 'UV over-range'],
   [QF.UV_SATURATED, 'UV saturated'],
@@ -156,32 +223,21 @@ const QF_LABELS = [
   [QF.BED_COLLAPSED, 'Bed collapsed'],
 ];
 
-/**
- * The status strip of §9.1.1: key, visible label, glossary id, and the sensor whose
- * `sensorQuality` verdict tints the value (§5.3). `null` means the chip has no sensor of its own.
- */
-const STATUS_CHIPS = [
-  { key: 'p1', label: 'P1', gloss: 'PT-101', sensor: 'PRESS' },
-  { key: 'dp', label: 'ΔP', gloss: 'PDT-101', sensor: 'PRESS' },
-  { key: 'flow', label: 'Flow', gloss: 'FT-101', sensor: null },
-  { key: 'pctb', label: '%B', gloss: 'pctB', sensor: null },
-  { key: 'uv', label: 'UV280', gloss: 'UV-101', sensor: 'UV' },
-  { key: 'cond', label: 'Cond', gloss: 'CE-101', sensor: 'COND' },
-  { key: 'ph', label: 'pH', gloss: 'AE-101', sensor: 'PH' },
-  { key: 'cv', label: 'Total', gloss: 'cv', sensor: null },
-  { key: 'clock', label: 'Sim', gloss: 'run-state', sensor: null },
-  { key: 'quality', label: 'Quality', gloss: 'quality-flags', sensor: null },
-];
+/** Three-letter quality codes for the QUAL box. */
+const QUALITY_CODE = { OK: 'OK', SUSPECT: 'SUS', INVALID: 'INV', BYPASSED: 'BYP' };
+
+/** The inline reset an interactive label box needs, since `.tagblk` is not a button class. */
+const BARE_BUTTON = { appearance: 'none', background: 'none', border: '0', padding: '0', cursor: 'pointer' };
 
 /**
- * The global keyboard registry of §9.5.
+ * The global keyboard registry.
  *
  * Keys are normalised combos (`normaliseCombo`): modifiers in the fixed order `Ctrl+Alt+Shift+`,
  * then the key name with single characters upper-cased. `Shift` is dropped for punctuation so `?`,
  * `+` and `-` are reachable on every layout.
  *
- * Shell-scoped actions execute here. View-scoped actions (chart, legend, pooling) are emitted on
- * `ctx.bus` as `('key-action', { action, combo, event })`, so whichever view owns them reacts
+ * Shell-scoped actions execute here. Panel-scoped actions (trend, legend, pooling) are emitted on
+ * `ctx.bus` as `('key-action', { action, combo, event })`, so whichever panel owns them reacts
  * without a second document-level key listener existing anywhere in the program.
  *
  * @type {{[combo:string]: {action:string, label:string, group:string}}}
@@ -204,20 +260,21 @@ export const KEYMAP = {
   'P': { action: 'pause-toggle', label: 'Pause / resume the simulation', group: 'Simulation speed' },
   '[': { action: 'speed-down', label: 'Sim speed down one step', group: 'Simulation speed' },
   ']': { action: 'speed-up', label: 'Sim speed up one step', group: 'Simulation speed' },
-  'Alt+1': { action: 'tab:run', label: 'Run tab', group: 'Navigation' },
-  'Alt+2': { action: 'tab:method', label: 'Method tab', group: 'Navigation' },
-  'Alt+3': { action: 'tab:results', label: 'Results tab', group: 'Navigation' },
-  'Alt+4': { action: 'tab:system', label: 'System tab', group: 'Navigation' },
-  'X': { action: 'x-axis-cycle', label: 'Cycle the x axis: volume / CV / time', group: 'Chromatogram' },
-  'A': { action: 'autoscale', label: 'Autoscale — fit all', group: 'Chromatogram' },
-  'F': { action: 'follow-toggle', label: 'Toggle follow-live', group: 'Chromatogram' },
-  '+': { action: 'zoom-in', label: 'Zoom in about the cursor', group: 'Chromatogram' },
-  '-': { action: 'zoom-out', label: 'Zoom out about the cursor', group: 'Chromatogram' },
-  'ArrowLeft': { action: 'pan-left', label: 'Pan left', group: 'Chromatogram' },
-  'ArrowRight': { action: 'pan-right', label: 'Pan right', group: 'Chromatogram' },
-  'Shift+ArrowLeft': { action: 'pan-left-fast', label: 'Pan left, 5×', group: 'Chromatogram' },
-  'Shift+ArrowRight': { action: 'pan-right-fast', label: 'Pan right, 5×', group: 'Chromatogram' },
-  'L': { action: 'legend-focus', label: 'Legend channel focus mode', group: 'Chromatogram' },
+  'Alt+1': { action: 'nav:pid', label: 'Main screen, favour the P&ID pane', group: 'Navigation' },
+  'Alt+2': { action: 'nav:trend', label: 'Main screen, favour the trend pane', group: 'Navigation' },
+  'Alt+3': { action: 'nav:method', label: 'Method screen', group: 'Navigation' },
+  'Alt+4': { action: 'nav:results', label: 'Results screen', group: 'Navigation' },
+  'Alt+5': { action: 'nav:config', label: 'Configuration screen', group: 'Navigation' },
+  'X': { action: 'x-axis-cycle', label: 'Cycle the x axis: volume / CV / time', group: 'Trend' },
+  'A': { action: 'autoscale', label: 'Autoscale — fit all', group: 'Trend' },
+  'F': { action: 'follow-toggle', label: 'Toggle follow-live', group: 'Trend' },
+  '+': { action: 'zoom-in', label: 'Zoom in about the cursor', group: 'Trend' },
+  '-': { action: 'zoom-out', label: 'Zoom out about the cursor', group: 'Trend' },
+  'ArrowLeft': { action: 'pan-left', label: 'Pan left', group: 'Trend' },
+  'ArrowRight': { action: 'pan-right', label: 'Pan right', group: 'Trend' },
+  'Shift+ArrowLeft': { action: 'pan-left-fast', label: 'Pan left, 5×', group: 'Trend' },
+  'Shift+ArrowRight': { action: 'pan-right-fast', label: 'Pan right, 5×', group: 'Trend' },
+  'L': { action: 'legend-focus', label: 'Pen rail focus mode', group: 'Trend' },
   'M': { action: 'mark-fraction', label: 'Mark a fraction manually', group: 'Fractions' },
   'Shift+P': { action: 'pool-selection', label: 'Pool the selected fraction range', group: 'Fractions' },
   '?': { action: 'cheat-sheet', label: 'This shortcut list', group: 'General' },
@@ -238,7 +295,8 @@ export const KEYMAP = {
 let app = null;
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * SMALL DOM HELPERS
+ * WIDGETS — icon buttons and glyphs come from ui/hmi.js; label boxes and lamps are built here
+ * against the FT-CLASSIC classes styles/app.css defines.
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
@@ -253,7 +311,8 @@ function h(tag, attrs, ...children) {
 }
 
 /**
- * Create a `<button>` with a click handler already attached.
+ * Create a `<button>` with a click handler already attached. Used for the few text controls the
+ * design allows — the speed numerals — and for the buttons inside modals.
  * @param {string} className the full class attribute
  * @param {string} label visible text
  * @param {function(MouseEvent):void} onClick click handler
@@ -268,7 +327,129 @@ function button(className, label, onClick, attrs) {
 }
 
 /**
- * Set `disabled` plus a `title` that explains WHY when the control is unavailable (§9.7).
+ * Build one 34×34 beveled icon button through `hmi.iconButton`, carrying the shell's own `.iconbtn`
+ * class so `styles/app.css` and the kit's own rules agree on its geometry.
+ *
+ * The face never carries a word: the meaning is in `title` (hover) and `aria-label` (assistive
+ * technology), exactly as an FT-CLASSIC toolbar does it.
+ *
+ * @param {{icon:string, label:string, title?:string, cls?:string, danger?:boolean, sm?:boolean,
+ *          pressed?:boolean, onClick?:function(MouseEvent):void}} spec the button
+ * @returns {HTMLButtonElement} the button
+ */
+function iconButton(spec) {
+  const size = spec.sm ? 26 : 34;
+  const btn = hmi.iconButton(spec.icon, {
+    title: spec.title || spec.label,
+    ariaLabel: spec.label,
+    onClick: spec.onClick,
+    className: `iconbtn${spec.sm ? ' iconbtn--sm' : ''}${spec.cls ? ` ${spec.cls}` : ''}`,
+    size,
+    iconSize: spec.sm ? 14 : 20,
+    danger: !!spec.danger,
+    pressed: spec.pressed,
+  });
+  return btn;
+}
+
+/**
+ * Build a round status lamp. Colour alone never carries meaning: every lamp has an accessible name
+ * and a tooltip that states the condition it is showing.
+ * @param {string} label the initial accessible name
+ * @returns {HTMLElement} the lamp
+ */
+function lamp(label) {
+  return /** @type {HTMLElement} */ (h('span', {
+    class: 'lamp lamp--off', role: 'img', 'aria-label': label, title: label,
+  }));
+}
+
+/**
+ * Drive a lamp built by {@link lamp}.
+ * @param {Element} el the lamp
+ * @param {'off'|'run'|'warn'|'alarm'} tone the lamp colour
+ * @param {string} label the accessible name, which must state the current condition
+ * @param {boolean} [blink] true to blink (CSS stands this down under `prefers-reduced-motion`)
+ * @returns {void}
+ */
+function setLamp(el, tone, label, blink) {
+  if (!el) return;
+  fmt.cls(el, 'lamp--off', tone === 'off');
+  fmt.cls(el, 'lamp--run', tone === 'run');
+  fmt.cls(el, 'lamp--warn', tone === 'warn');
+  fmt.cls(el, 'lamp--alarm', tone === 'alarm');
+  fmt.cls(el, 'is-blink', !!blink);
+  fmt.setAttr(el, 'aria-label', label);
+  fmt.setAttr(el, 'title', label);
+}
+
+/**
+ * Build a label box: a 10 px uppercase tag beside a sunken near-black field holding right-aligned
+ * tabular digits and a smaller, dimmer engineering unit. This is the workhorse of the design —
+ * every number in the chrome lives in one.
+ *
+ * The box becomes a real button when there is something behind it (a glossary entry, or an explicit
+ * handler), so the explanation is reachable from the keyboard. A box with nothing behind it stays a
+ * span: a dead button is worse than a label.
+ *
+ * @param {{tag:string, eu?:string, title?:string, wide?:boolean, narrow?:boolean, gloss?:string,
+ *          onClick?:function(MouseEvent):void}} spec the box
+ * @returns {{el:HTMLElement, val:Element, eu:Element, box:Element}} the box and its live nodes
+ */
+function labelBox(spec) {
+  const val = h('span', { class: 'lbox__v' }, fmt.NO_VALUE);
+  const eu = h('span', { class: 'lbox__eu' }, spec.eu || '');
+  const box = h('span', {
+    class: `lbox${spec.wide ? ' lbox--wide' : ''}${spec.narrow ? ' lbox--narrow' : ''}`,
+  }, val, eu);
+  const tag = h('span', { class: 'tagblk__lbl' }, spec.tag);
+
+  const entry = spec.gloss ? glossaryFor(spec.gloss) : null;
+  const interactive = !!(spec.onClick || entry);
+  const el = /** @type {HTMLElement} */ (h(interactive ? 'button' : 'span', {
+    class: 'tagblk',
+    type: interactive ? 'button' : null,
+    style: interactive ? BARE_BUTTON : null,
+    title: spec.title || spec.tag,
+    'data-tag': spec.tag,
+  }, tag, box));
+  if (interactive) {
+    el.addEventListener('click', (ev) => {
+      if (spec.onClick) spec.onClick(ev);
+      else if (app) showGlossary(app, el, spec.gloss);
+    });
+  }
+  return { el, val, eu, box };
+}
+
+/**
+ * Write a value into a label box, skipping unchanged text.
+ * @param {{val:Element, eu:Element}} rec a {@link labelBox} record
+ * @param {string} text the formatted value
+ * @param {string} [euText] the engineering unit
+ * @returns {void}
+ */
+function setBox(rec, text, euText) {
+  if (!rec) return;
+  fmt.setText(rec.val, text);
+  if (euText !== undefined) fmt.setText(rec.eu, euText);
+}
+
+/**
+ * Colour a label box's digits: alarm red beats stale grey-green beats the normal PV lime.
+ * @param {{box:Element}} rec a {@link labelBox} record
+ * @param {boolean} inAlarm true when the tag is in alarm
+ * @param {boolean} stale true when the sensor quality is SUSPECT, INVALID or BYPASSED
+ * @returns {void}
+ */
+function setBoxState(rec, inAlarm, stale) {
+  if (!rec) return;
+  fmt.cls(rec.box, 'is-alarm', inAlarm);
+  fmt.cls(rec.box, 'is-stale', !inAlarm && stale);
+}
+
+/**
+ * Set `disabled` plus a `title` that explains WHY when the control is unavailable.
  * @param {HTMLButtonElement} el the control
  * @param {boolean} enabled true to enable
  * @param {string} whyDisabled the tooltip shown while disabled
@@ -281,8 +462,15 @@ function setEnabled(el, enabled, whyDisabled, whenEnabled) {
   fmt.setAttr(el, 'title', enabled ? whenEnabled : whyDisabled);
 }
 
+/** @returns {Element} a 2 px sunken groove between two toolbar groups */
+function toolbarSep() {
+  return h('span', {
+    class: 'toolbar__sep', role: 'separator', 'aria-orientation': 'vertical',
+  });
+}
+
 /**
- * True when a text-entry element has focus, in which case bare keys are the user's typing (§9.5).
+ * True when a text-entry element has focus, in which case bare keys are the user's typing.
  * @returns {boolean} whether keyboard shortcuts must stand down
  */
 function typingInField() {
@@ -323,18 +511,18 @@ function normaliseCombo(e) {
 /**
  * Build the whole application inside `rootEl` and start the frame loop.
  *
- * Boot order is §6.32, exactly:
+ * Boot order:
  *   1. warm both theme-token maps, adopt the theme `index.html` stamped, build the shell chrome;
  *   2. build `ctx` (`normalizePreset` → `createRunState` → **`createSkid`**, which is required);
  *   3. benchmark a throwaway column, pick `nz` (downgrade only), `sim.rebuild(ctx, {column:{nz}})`;
- *   4. mount the four views, only the active one updating;
- *   4a. mount `ui/onboarding.js` — after the views, because its coach marks measure them, and
- *       before the loop, because its tour may auto-load `textbook-clean` at 60×;
+ *   4. mount the four screens, only the visible one updating;
+ *   4a. mount `ui/onboarding.js` — after the screens, because its coach marks measure them, and
+ *       before the loop, because its tour may auto-load a scenario;
  *   5. start the single `requestAnimationFrame` loop.
  *
  * @param {Element} rootEl `#app` from `index.html`; its placeholder content is removed
  * @returns {{config:object, run:object, bus:object, sim:object, fmt:object, overrides:object}}
- *   the one long-lived `ctx` of §2.4
+ *   the one long-lived `ctx`
  */
 export function boot(rootEl) {
   if (app && app.rafId) cancelAnimationFrame(app.rafId);
@@ -360,11 +548,14 @@ export function boot(rootEl) {
     ctx,
     root: rootEl,
     el: {},                       // cached shell nodes
-    views: new Map(),             // tabId -> { panel, host, failCount, disabled }
-    activeTab: 'run',
+    screens: new Map(),           // screenId -> { panel, host, failCount, disabled }
+    activeScreen: 'main',
+    activeNav: 'pid',
     overlayHost: null,
+    glossaryHandle: null,         // the ONE open glossary popover, or null — see showGlossary
     onboarding: null,
-    theme: document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark',
+    // FT-CLASSIC is a light design; index.html stamps light before first paint.
+    theme: document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light',
     rafId: 0,
     tPrev: 0,
     structural: true,
@@ -373,10 +564,15 @@ export function boot(rootEl) {
     demandCache: null,            // { config, total_mL, startById }
     progressPct: -1,
     // `null`, never `''`: an EMPTY alarm set has the signature `''`, so a `''` sentinel would make
-    // "some alarms" -> "no alarms" compare equal and leave the banners on screen forever.
+    // "some alarms" -> "no alarms" compare equal and leave the banner on screen forever.
     alarmSig: null,
+    alarm: {
+      active: [], signals: new Set(), evals: new Set(),
+      count: 0, crit: 0, alarms: 0, warns: 0, worst: '', ackable: null,
+    },
     silenced: new Set(),          // alarm ids the operator muted for this session
     liveAlarmId: null,
+    shellError: null,             // { source, message, detail } — the failure surface of the band
     skipHold: { active: false, start_ms: 0 },
     estopArm_ms: 0,
     perfOn: false,
@@ -393,26 +589,28 @@ export function boot(rootEl) {
     buildShell(app);
     applyTheme(app, app.theme, false);
 
-    // ---- 3. startup grid benchmark (D5) ------------------------------------------------------
+    // ---- 3. startup grid benchmark -----------------------------------------------------------
     runStartupBenchmark(app);
 
-    // ---- 4. the four views -------------------------------------------------------------------
-    mountViews(app);
+    // ---- 4. the four screens -----------------------------------------------------------------
+    mountScreens(app);
 
     // ---- 4a. onboarding ----------------------------------------------------------------------
     try {
       app.onboarding = onboarding.createOnboarding(app.el.shell, ctx, app.overlayHost);
-      app.onboarding.mount();
+      if (app.onboarding && typeof app.onboarding.mount === 'function') app.onboarding.mount();
     } catch (err) {
+      app.onboarding = null;
       reportError(app, 'onboarding', err);
     }
 
     // ---- input wiring ------------------------------------------------------------------------
     wireBus(app);
     wireKeyboard(app);
-    wireResponsiveNote(app);
+    wireResponsive(app);
     document.addEventListener('visibilitychange', () => { app.tPrev = 0; });
 
+    refreshNav(app);
     refreshShell(app, true);
   } catch (err) {
     showBootError(err);
@@ -439,8 +637,8 @@ function showBootError(err) {
 }
 
 /**
- * Warm both theme-token maps once at boot (§6.25). `readThemeTokens` owns the hidden probes and the
- * cache; calling it here pays that cost before the first paint instead of inside a frame.
+ * Warm both theme-token maps once at boot. `readThemeTokens` owns the hidden probes and the cache;
+ * calling it here pays that cost before the first paint instead of inside a frame.
  * @returns {void}
  */
 function warmThemeTokens() {
@@ -454,7 +652,7 @@ function warmThemeTokens() {
 }
 
 /**
- * Time a throwaway column and pick the axial grid size, downgrading only (§2.4 D5).
+ * Time a throwaway column and pick the axial grid size, downgrading only.
  *
  * Cost scales close to `nz²` — the cell count rises linearly and the Courant-limited substep count
  * rises with it — so one measurement at the preset's own `nz` predicts every rung of the ladder.
@@ -495,45 +693,38 @@ function runStartupBenchmark(a) {
 }
 
 /**
- * Create the four view containers, construct each view into its own, and hide all but the active.
- * A view that throws at construction shows a written empty state instead of taking the shell down.
+ * Construct the four screens into their hosts and hide all but the active one. A screen that throws
+ * at construction is reported in the alarm band instead of taking the shell down.
  * @param {object} a the application instance
  * @returns {void}
  */
-function mountViews(a) {
-  for (const tab of TABS) {
+function mountScreens(a) {
+  for (const scr of SCREENS) {
     const host = h('section', {
-      class: `view view--${tab.id}`,
-      id: `view-${tab.id}`,
-      role: 'tabpanel',
-      tabindex: '0',
-      'aria-labelledby': `tab-${tab.id}`,
+      class: `view view--${scr.id}`, id: `screen-${scr.id}`, 'data-screen': scr.id, tabindex: '0',
     });
-    if (tab.id !== a.activeTab) host.hidden = true;
+    if (scr.id !== a.activeScreen) host.hidden = true;
     a.el.workspace.appendChild(host);
 
     let panel = null;
     try {
-      panel = tab.create(host, a.ctx);
+      panel = scr.create(host, a.ctx);
       if (panel && typeof panel.mount === 'function') panel.mount();
     } catch (err) {
       panel = null;
-      host.appendChild(h('div', { class: 'empty' },
-        h('p', { class: 'empty__title' }, `The ${tab.label} view failed to load`),
-        h('p', {}, errText(err))));
-      reportError(a, `${tab.id} view`, err);
+      reportError(a, `${scr.id} screen`, err);
     }
-    a.views.set(tab.id, { panel, host, failCount: 0, disabled: !panel });
+    a.screens.set(scr.id, { panel, host, failCount: 0, disabled: !panel });
   }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * SHELL CONSTRUCTION — the six bands of §9.1.1, built once
+ * SHELL CONSTRUCTION — the five FT-CLASSIC bands, built once
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Empty `#app` and build the shell: title bar 44 px, run bar 56 px, alarm stack, tab strip 36 px,
- * workspace, status strip 28 px — plus the out-of-flow skip link, narrow note and perf overlay.
+ * Empty `#app` and build the shell: title strip 26 px, toolbar 40 px, alarm banner 24 px,
+ * workspace, status strip 24 px — plus the out-of-flow skip link and perf overlay.
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -543,13 +734,10 @@ function buildShell(a) {
   const shell = h('div', { class: 'shell' });
   a.el.shell = shell;
 
-  // Out of flow, so the six-row grid keeps exactly six children.
-  shell.appendChild(h('a', { class: 'skip-link', href: '#runbar' }, 'Skip to run controls'));
-
+  shell.appendChild(h('a', { class: 'skip-link', href: '#toolbar' }, 'Skip to the run controls'));
   shell.appendChild(buildTitleBar(a));
-  shell.appendChild(buildRunBar(a));
-  shell.appendChild(buildAlarmStack(a));
-  shell.appendChild(buildTabStrip(a));
+  shell.appendChild(buildToolbar(a));
+  shell.appendChild(buildAlarmBar(a));
 
   const workspace = h('main', { class: 'workspace' });
   a.el.workspace = workspace;
@@ -557,226 +745,235 @@ function buildShell(a) {
 
   shell.appendChild(buildStatusStrip(a));
 
-  const narrow = h('div', { class: 'shell-narrow-note' },
-    'Best viewed at 1280 px or wider. Everything still works here; the Run view stacks.');
-  narrow.hidden = true;
-  a.el.narrowNote = narrow;
-  shell.appendChild(narrow);
-
-  const perf = h('div', { class: 'perf-overlay', role: 'status', 'aria-label': 'Performance' });
+  const perf = h('div', { class: 'perf', role: 'status', 'aria-label': 'Performance' });
   perf.hidden = true;
   a.el.perf = perf;
   shell.appendChild(perf);
 
   a.root.appendChild(shell);
 
-  // One host for the whole app (§6.33). It is handed the mount root, because that is the subtree
-  // it marks `inert` + `aria-hidden` while a modal is up; its own layer goes on <body>.
+  // One host for the whole app. It is handed the mount root, because that is the subtree it marks
+  // `inert` + `aria-hidden` while a modal is up; its own layer goes on <body>.
   a.overlayHost = overlay.createOverlayHost(a.root);
 
-  // Publish it on ctx BEFORE mountViews() runs. Every view resolves its host as
-  // `ctx.overlayHost || ctx.overlay || createOverlayHost(...)`, so without this line each of the
-  // four views builds a host of its own — four .ov-root layers, four Esc handlers and four focus
-  // traps competing over one modal stack. overlay.js requires exactly one host per document.
+  // Publish it on ctx BEFORE mountScreens() runs. Every panel resolves its host as
+  // `ctx.overlayHost || ctx.overlay || createOverlayHost(...)`, so without this line each panel
+  // builds a host of its own — competing Esc handlers and focus traps over one modal stack.
   a.ctx.overlayHost = a.overlayHost;
 }
 
 /**
- * The 44 px title bar: product identity, the active preset, the `SIMULATED` honesty chip, and the
- * global entry points.
+ * Band 1 — the 26 px title strip: unit name (the honesty note is behind it), the block counter, the
+ * sim clock with the method-progress bar, and the alarm-summary lamps.
  * @param {object} a the application instance
- * @returns {Element} the title bar
+ * @returns {Element} the title strip
  */
 function buildTitleBar(a) {
   const bar = h('header', { class: 'titlebar' });
 
-  bar.appendChild(h('span', { class: 'titlebar__title' }, 'Process Skid Simulator'));
-  const sub = h('span', { class: 'titlebar__sub' }, '');
-  a.el.presetName = sub;
-  bar.appendChild(sub);
-
-  // The physics-honesty chip of §9.6: a real button, so the assumptions are keyboard-reachable.
-  const simChip = button('chip chip--sim', 'SIMULATED', (e) => {
+  const brand = h('div', { class: 'titlebar__brand' });
+  const unit = button('titlebar__name', '', (e) => {
     overlay.showPopover(a.overlayHost, {
       anchorEl: /** @type {Element} */ (e.currentTarget),
       content: honestyContent(a),
       placement: 'bottom',
-      maxWidth: 340,
+      maxWidth: 360,
     });
-  }, { title: 'What this model does, and what it deliberately does not' });
-  bar.appendChild(simChip);
+  }, {
+    style: BARE_BUTTON,
+    title: 'SIMULATED — what this model does, and what it deliberately does not',
+    'aria-label': 'This is a simulation. Press for what the model does and does not do.',
+  });
+  a.el.unitName = unit;
+  brand.appendChild(unit);
+  a.el.blkBox = labelBox({ tag: 'BLK', gloss: 'block.type', title: 'Method block', narrow: true });
+  brand.appendChild(a.el.blkBox.el);
+  bar.appendChild(brand);
+
+  bar.appendChild(h('span', { class: 'titlebar__spacer' }));
+
+  const meta = h('div', { class: 'titlebar__meta' });
+  a.el.clkBox = labelBox({ tag: 'CLK', gloss: 'run-state', title: 'Simulated run clock' });
+  meta.appendChild(a.el.clkBox.el);
+  const track = h('div', {
+    class: 'progress', role: 'progressbar',
+    'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0',
+    'aria-label': 'Method progress',
+  });
+  const fill = h('span', { class: 'progress__fill' });
+  track.appendChild(fill);
+  a.el.progressTrack = track;
+  a.el.progressFill = fill;
+  meta.appendChild(track);
+  bar.appendChild(meta);
 
   bar.appendChild(h('span', { class: 'titlebar__spacer' }));
 
   const actions = h('div', { class: 'titlebar__actions' });
-  actions.appendChild(button('btn btn--ghost', 'Scenarios', () => {
-    if (a.onboarding) onboarding.showScenarioPicker(a.onboarding);
-  }, { title: 'Load one of the eight teaching scenarios — each starts in one click' }));
-  actions.appendChild(button('btn btn--ghost', 'Help', () => showHelp(a), {
-    title: 'The tour, the glossary and the shortcuts',
-  }));
-  actions.appendChild(button('btn btn--icon', '?', () => {
-    overlay.showCheatSheet(a.overlayHost, KEYMAP);
-  }, { title: 'Keyboard shortcuts (?)', 'aria-label': 'Keyboard shortcuts' }));
-
-  const themeBtn = button('btn btn--icon', '◐', () => toggleTheme(a), {
-    'aria-label': 'Toggle the light and dark theme',
-    'aria-pressed': 'false',
-  });
-  a.el.themeBtn = themeBtn;
-  actions.appendChild(themeBtn);
-
+  a.el.lampCrit = lamp('Critical alarms: none');
+  a.el.lampAlarm = lamp('Alarms: none');
+  a.el.lampWarn = lamp('Warnings: none');
+  actions.appendChild(a.el.lampCrit);
+  actions.appendChild(a.el.lampAlarm);
+  actions.appendChild(a.el.lampWarn);
+  a.el.almBox = labelBox({ tag: 'ALM', gloss: 'alarm-state', title: 'Active alarms', narrow: true });
+  actions.appendChild(a.el.almBox.el);
   bar.appendChild(actions);
+
   return bar;
 }
 
 /**
- * The 56 px run control bar of §9.4.3, left to right: state · transport · E-stop · speed ·
- * progress · mode. The E-stop and the mode chip are DIRECT children of `.runbar`, which is how
- * `styles/app.css` fixes the E-stop's x and pushes the mode chip to the right edge.
+ * Band 2 — the 40 px icon toolbar. Five groups split by 2 px grooves: transport, emergency stop,
+ * simulation speed, screen navigation, system. Every control is icon-only.
  * @param {object} a the application instance
- * @returns {Element} the run bar
+ * @returns {Element} the toolbar
  */
-function buildRunBar(a) {
+function buildToolbar(a) {
   const bar = h('div', {
-    class: 'runbar', id: 'runbar', role: 'toolbar', 'aria-label': 'Run controls', tabindex: '-1',
+    class: 'toolbar', id: 'toolbar', role: 'toolbar', 'aria-label': 'Run controls', tabindex: '-1',
   });
 
-  // 1 — state pill + method name + block name/index
-  const g1 = h('div', { class: 'runbar__group' });
-  const pill = h('span', {
-    class: 'pill pill--lg pill--neutral', role: 'status', 'aria-live': 'polite',
-  }, 'IDLE');
-  a.el.statePill = pill;
-  g1.appendChild(pill);
-  const stack = h('div', { class: 'runbar__stack' });
-  const methodName = h('span', { class: 'runbar__label' }, '');
-  const blockName = h('span', { class: 'runbar__value' }, '');
-  a.el.methodName = methodName;
-  a.el.blockName = blockName;
-  stack.appendChild(methodName);
-  stack.appendChild(blockName);
-  g1.appendChild(stack);
-  bar.appendChild(g1);
-
-  // 2 — transport
-  const g2 = h('div', { class: 'runbar__group', 'data-tour': 'run-controls' });
-  a.el.startBtn = button('btn btn--primary', 'Start', () => doStartOrContinue(a), {});
-  a.el.holdBtn = button('btn btn--ghost', 'Hold', () => act(a, () => sim.hold(a.ctx)), {});
+  /* -- 1. transport ------------------------------------------------------------------------- */
+  const g1 = h('div', { class: 'toolbar__group', 'data-tour': 'run-controls' });
+  a.el.runBtn = iconButton({ icon: 'run', label: 'Start the run', onClick: () => doStartOrContinue(a) });
+  a.el.holdBtn = iconButton({ icon: 'hold', label: 'Hold', onClick: () => act(a, () => sim.hold(a.ctx)) });
+  a.el.contBtn = iconButton({
+    icon: 'continue', label: 'Continue', onClick: () => act(a, () => sim.resume(a.ctx)),
+  });
   a.el.skipBtn = buildSkipButton(a);
-  a.el.endBtn = button('btn btn--ghost', 'End',
-    (e) => openEndPopover(a, /** @type {Element} */ (e.currentTarget)),
-    { 'aria-haspopup': 'dialog' });
-  a.el.resetBtn = button('btn btn--ghost', 'Reset', () => act(a, () => sim.reset(a.ctx)), {});
-  a.el.resetBtn.hidden = true;
-  g2.appendChild(a.el.startBtn);
-  g2.appendChild(a.el.holdBtn);
-  g2.appendChild(a.el.skipBtn);
-  g2.appendChild(a.el.endBtn);
-  g2.appendChild(a.el.resetBtn);
-  bar.appendChild(g2);
+  a.el.stopBtn = iconButton({
+    icon: 'stop', label: 'End the run',
+    onClick: (e) => openEndPopover(a, /** @type {Element} */ (e.currentTarget)),
+  });
+  fmt.setAttr(a.el.stopBtn, 'aria-haspopup', 'dialog');
+  a.el.resetBtn = iconButton({
+    icon: 'reset', label: 'Reset', onClick: () => act(a, () => sim.reset(a.ctx)),
+  });
+  for (const b of [a.el.runBtn, a.el.holdBtn, a.el.contBtn, a.el.skipBtn, a.el.stopBtn, a.el.resetBtn]) {
+    g1.appendChild(b);
+  }
+  bar.appendChild(g1);
+  bar.appendChild(toolbarSep());
 
-  // 3 — emergency stop, behind a rule and a gap so it never sits beside a benign control
-  bar.appendChild(h('span', { class: 'runbar__rule', role: 'separator', 'aria-orientation': 'vertical' }));
-  a.el.estopBtn = button('btn btn--danger btn--estop', 'E-STOP', () => act(a, () => sim.estop(a.ctx)), {
+  /* -- 2. emergency stop, alone behind its own groove ---------------------------------------- */
+  const g2 = h('div', { class: 'toolbar__group toolbar__group--estop' });
+  a.el.estopBtn = iconButton({
+    icon: 'estop', label: 'Emergency stop', cls: 'btn--estop', danger: true,
     title: 'Emergency stop — acts immediately, no undo (Shift+Esc twice within 1 s)',
-    'aria-label': 'Emergency stop',
+    onClick: () => act(a, () => sim.estop(a.ctx)),
   });
-  bar.appendChild(a.el.estopBtn);
-  bar.appendChild(h('span', { class: 'runbar__rule', role: 'separator', 'aria-orientation': 'vertical' }));
+  g2.appendChild(a.el.estopBtn);
+  bar.appendChild(g2);
+  bar.appendChild(toolbarSep());
 
-  // 4 — sim speed
-  const g4 = h('div', { class: 'runbar__group', 'data-tour': 'speed' });
-  g4.appendChild(h('span', { class: 'runbar__label', id: 'speed-caption' }, 'Sim speed'));
-  const seg = h('div', {
-    class: 'segmented', role: 'radiogroup', 'aria-labelledby': 'speed-caption',
-  });
+  /* -- 3. simulation speed -------------------------------------------------------------------- */
+  const g3 = h('div', { class: 'toolbar__group', 'data-tour': 'speed' });
+  const seg = h('div', { class: 'segmented', role: 'radiogroup', 'aria-label': 'Simulation speed' });
   a.el.speedSeg = seg;
-  a.el.speedOpts = [];
-  buildSpeedOptions(a);
-  g4.appendChild(seg);
-  a.el.pauseBtn = button('btn btn--icon', '❚❚', () => togglePause(a), {
-    'aria-pressed': 'false', 'aria-label': 'Pause the simulation',
+  a.el.speedChips = [];
+  buildSpeedChips(a);
+  g3.appendChild(seg);
+  a.el.pauseBtn = iconButton({
+    icon: 'pause', label: 'Pause the simulation', pressed: false, onClick: () => togglePause(a),
   });
-  g4.appendChild(a.el.pauseBtn);
-  const note = h('span', { class: 'runbar__speed-note' }, '');
-  a.el.speedNote = note;
-  g4.appendChild(note);
-  bar.appendChild(g4);
+  g3.appendChild(a.el.pauseBtn);
+  a.el.speedLamp = lamp('Speed limited: no');
+  g3.appendChild(a.el.speedLamp);
+  a.el.spdBox = labelBox({ tag: 'SPD', eu: '×', title: 'Achieved simulation speed', narrow: true });
+  g3.appendChild(a.el.spdBox.el);
+  bar.appendChild(g3);
+  bar.appendChild(toolbarSep());
 
-  // 5 — progress
-  const g5 = h('div', { class: 'runbar__group' });
-  const counters = h('span', { class: 'runbar__value num' }, '');
-  a.el.counters = counters;
-  g5.appendChild(counters);
-  const track = h('div', {
-    class: 'runbar__progress', role: 'progressbar',
-    'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0',
-    'aria-label': 'Method progress',
+  /* -- 4. screen navigation ------------------------------------------------------------------- */
+  const g4 = h('div', { class: 'toolbar__group' });
+  a.el.navBtns = new Map();
+  for (const nav of NAV) {
+    const btn = iconButton({
+      icon: nav.icon, label: nav.label, title: `${nav.label} (${nav.key})`, pressed: false,
+      onClick: () => selectNav(a, nav.id),
+    });
+    if (nav.id === 'method') fmt.setAttr(btn, 'data-tour', 'tab-method');
+    a.el.navBtns.set(nav.id, btn);
+    g4.appendChild(btn);
+  }
+  bar.appendChild(g4);
+  bar.appendChild(h('span', { class: 'toolbar__spacer' }));
+
+  /* -- 5. system ------------------------------------------------------------------------------ */
+  const g5 = h('div', { class: 'toolbar__group' });
+  a.el.ackBtn = iconButton({
+    icon: 'ack', label: 'Acknowledge the highest alarm', onClick: () => ackTopAlarm(a),
   });
-  const fill = h('span', { class: 'runbar__progress-fill' });
-  a.el.progressTrack = track;
-  a.el.progressFill = fill;
-  track.appendChild(fill);
-  g5.appendChild(track);
+  a.el.manualBtn = iconButton({
+    icon: 'wrench', label: 'Manual control', pressed: false, onClick: () => toggleManual(a),
+    title: 'METHOD: the engine drives the skid. MANUAL: you do — in IDLE, READY, HELD and PAUSED.',
+  });
+  const scenBtn = iconButton({
+    icon: 'flask', label: 'Teaching scenarios',
+    title: 'Load one of the teaching scenarios — each starts in one click',
+    onClick: () => showScenarios(a),
+  });
+  const helpBtn = iconButton({
+    icon: 'help', label: 'Help, glossary and keyboard shortcuts',
+    title: 'Help, the glossary and the shortcut list (?)',
+    onClick: () => showHelp(a),
+  });
+  a.el.themeBtn = iconButton({
+    icon: 'theme', label: 'Toggle the light and dark theme', pressed: false,
+    onClick: () => toggleTheme(a),
+  });
+  for (const b of [a.el.ackBtn, a.el.manualBtn, scenBtn, helpBtn, a.el.themeBtn]) g5.appendChild(b);
   bar.appendChild(g5);
 
-  // 6 — mode chip, a direct child of .runbar, and the manual-control toggle of §9.4.4
-  const mode = button('pill pill--neutral', 'METHOD', () => toggleManual(a), {
-    title: 'METHOD: the engine drives the skid. MANUAL: you do — available in IDLE, READY, HELD and PAUSED.',
-    'aria-pressed': 'false',
-  });
-  a.el.modeChip = mode;
-  bar.appendChild(mode);
-
   return bar;
 }
 
 /**
- * (Re)build the speed segmented control from `config.sim.speedOptions`, which a different preset
- * may change.
+ * (Re)build the speed chips from `config.sim.speedOptions`, which a different preset may change.
+ * These are the one place a numeral is allowed on the face of a control.
  * @param {object} a the application instance
  * @returns {void}
  */
-function buildSpeedOptions(a) {
+function buildSpeedChips(a) {
   const seg = a.el.speedSeg;
   while (seg.firstChild) seg.removeChild(seg.firstChild);
-  a.el.speedOpts = [];
+  a.el.speedChips = [];
   for (const s of a.ctx.config.sim.speedOptions) {
-    const opt = button('segmented__opt', `${s}×`, () => act(a, () => sim.setSpeed(a.ctx, s)), {
-      role: 'radio', 'aria-checked': 'false', title: `Run the simulation at ${s}× real time`,
+    const chip = button('speedchip', `${s}×`, () => act(a, () => sim.setSpeed(a.ctx, s)), {
+      role: 'radio',
+      'aria-checked': 'false',
+      'aria-label': `Simulation speed ${s} times real time`,
+      title: `Run the simulation at ${s}× real time`,
     });
-    opt.dataset.speed = String(s);
-    a.el.speedOpts.push(opt);
-    seg.appendChild(opt);
+    chip.dataset.speed = String(s);
+    a.el.speedChips.push(chip);
+    seg.appendChild(chip);
   }
 }
 
 /**
- * The Skip Block control: a 400 ms press-and-hold with a filling progress ring (§9.4.3), so a
- * fat-fingered click cannot throw away the rest of a block.
- *
- * The ring is advanced by the shell's own frame pass — no panel starts a second rAF loop.
- *
+ * The Skip Block control: a 400 ms press-and-hold with a filling ring drawn over the glyph, so a
+ * fat-fingered click cannot throw away the rest of a block. The ring is advanced by the shell's own
+ * frame pass — no panel starts a second rAF loop.
  * @param {object} a the application instance
  * @returns {HTMLButtonElement} the skip button
  */
 function buildSkipButton(a) {
-  const btn = /** @type {HTMLButtonElement} */ (h('button', {
-    class: 'btn btn--ghost', type: 'button',
+  const btn = iconButton({
+    icon: 'skip', label: 'Skip the current block', cls: 'btn--hold-to-act',
     title: 'Skip the current block — press and hold for 400 ms (N)',
-  }, 'Skip block'));
+  });
 
   const circumference = 2 * Math.PI * RING_R;
   const arc = fmt.hSvg('circle', {
-    class: 'holdring__fill',
-    cx: '12', cy: '12', r: String(RING_R), fill: 'none',
-    transform: `rotate(-90 12 12)`,
+    class: 'holdring__fill', cx: '12', cy: '12', r: String(RING_R), fill: 'none',
+    transform: 'rotate(-90 12 12)',
     'stroke-dasharray': String(circumference),
     'stroke-dashoffset': String(circumference),
   });
   btn.appendChild(fmt.hSvg('svg', {
-    class: 'holdring', viewBox: '0 0 24 24', width: '18', height: '18', 'aria-hidden': 'true',
+    class: 'holdring', viewBox: '0 0 24 24', 'aria-hidden': 'true', focusable: 'false',
   },
   fmt.hSvg('circle', { class: 'holdring__track', cx: '12', cy: '12', r: String(RING_R), fill: 'none' }),
   arc));
@@ -802,8 +999,7 @@ function buildSkipButton(a) {
   btn.addEventListener('pointercancel', cancel);
   btn.addEventListener('pointerleave', cancel);
   // Keyboard path: a held key has no reliable "still held" signal across layouts, so the keyboard
-  // gets the same confirm dialog the `N` shortcut opens. Both paths are deliberate; neither is a
-  // single unguarded click.
+  // gets the same confirm dialog the `N` shortcut opens. Neither path is a single unguarded click.
   btn.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); confirmSkip(a); }
   });
@@ -811,80 +1007,75 @@ function buildSkipButton(a) {
 }
 
 /**
- * The alarm banner stack of §9.1.1 with the two live regions of §9.7. The shell's error bar lives
- * in this band too, rather than adding a seventh row to the grid.
+ * Band 3 — the 24 px alarm banner and the two screen-reader live regions.
+ *
+ * One row serves two jobs. An active alarm owns it; when there is none, a caught shell error takes
+ * the same slots, so a failure is always visible without a sixth band ever existing.
+ *
  * @param {object} a the application instance
- * @returns {Element} the alarm stack container
+ * @returns {Element} the alarm band
  */
-function buildAlarmStack(a) {
-  const wrap = h('div', { class: 'alarm-stack', role: 'region', 'aria-label': 'Alarms' });
-  const assertive = h('div', {
+function buildAlarmBar(a) {
+  const bar = h('div', { class: 'alarmbar', role: 'region', 'aria-label': 'Alarms' });
+  bar.hidden = true;
+
+  a.el.alarmAssertive = h('div', {
     class: 'sr-only', role: 'alert', 'aria-live': 'assertive', 'aria-atomic': 'true',
   });
-  const polite = h('div', { class: 'sr-only', 'aria-live': 'polite', 'aria-atomic': 'true' });
-  const errors = h('div', {});
-  const list = h('div', { class: 'alarm-stack__list' });
-  a.el.alarmAssertive = assertive;
-  a.el.alarmPolite = polite;
-  a.el.errorSlot = errors;
-  a.el.alarmList = list;
-  wrap.appendChild(assertive);
-  wrap.appendChild(polite);
-  wrap.appendChild(errors);
-  wrap.appendChild(list);
-  return wrap;
-}
+  a.el.alarmPolite = h('div', { class: 'sr-only', 'aria-live': 'polite', 'aria-atomic': 'true' });
+  bar.appendChild(a.el.alarmAssertive);
+  bar.appendChild(a.el.alarmPolite);
 
-/**
- * The 36 px tab strip: a real `role="tablist"` with arrow-key navigation (§9.7).
- * @param {object} a the application instance
- * @returns {Element} the tab strip
- */
-function buildTabStrip(a) {
-  const strip = h('nav', { class: 'tabstrip', role: 'tablist', 'aria-label': 'Workspace views' });
-  a.el.tabs = new Map();
-  for (const tab of TABS) {
-    const on = tab.id === a.activeTab;
-    const btn = button(`tab${on ? ' is-active' : ''}`, tab.label, () => setTab(a, tab.id), {
-      role: 'tab',
-      id: `tab-${tab.id}`,
-      'aria-controls': `view-${tab.id}`,
-      'aria-selected': on ? 'true' : 'false',
-      tabindex: on ? '0' : '-1',
-      title: `${tab.label} (${tab.key})`,
-    });
-    if (tab.id === 'method') fmt.setAttr(btn, 'data-tour', 'tab-method');
-    btn.addEventListener('keydown', (e) => onTabKey(a, e, tab.id));
-    a.el.tabs.set(tab.id, btn);
-    strip.appendChild(btn);
+  a.el.alarmLamp = lamp('Alarm');
+  a.el.alarmSev = h('span', { class: 'banner__sev' }, '');
+  a.el.alarmTag = h('span', { class: 'alarmbar__tag' }, '');
+  a.el.alarmCode = h('span', { class: 'alarmbar__code' }, '');
+  a.el.alarmCond = h('span', { class: 'banner__detail' }, '');
+  bar.appendChild(a.el.alarmLamp);
+  bar.appendChild(a.el.alarmSev);
+  bar.appendChild(a.el.alarmTag);
+  bar.appendChild(a.el.alarmCode);
+  bar.appendChild(a.el.alarmCond);
+
+  const actions = h('div', { class: 'banner__actions' });
+  a.el.alarmCount = h('span', { class: 'banner__count' }, '');
+  a.el.alarmCount.hidden = true;
+  actions.appendChild(a.el.alarmCount);
+
+  a.el.alarmAckBtn = iconButton({
+    icon: 'ack', label: 'Acknowledge this alarm', sm: true, onClick: () => ackTopAlarm(a),
+  });
+  a.el.alarmSilenceBtn = iconButton({
+    icon: 'cross', label: 'Silence this banner', sm: true,
+    title: 'Hide this banner for the session. The alarm stays active and stays logged.',
+    onClick: () => silenceTopAlarm(a),
+  });
+  a.el.alarmMoreBtn = iconButton({
+    icon: 'warn', label: 'Open the alarm table', sm: true,
+    title: 'Open the configuration screen and its alarm table',
+    onClick: () => selectNav(a, 'config'),
+  });
+  a.el.errCopyBtn = iconButton({
+    icon: 'copy', label: 'Copy the error detail', sm: true, onClick: () => copyShellError(a),
+  });
+  a.el.errClearBtn = iconButton({
+    icon: 'cross', label: 'Dismiss this error', sm: true, onClick: () => clearShellError(a),
+  });
+  for (const b of [a.el.alarmAckBtn, a.el.alarmSilenceBtn, a.el.alarmMoreBtn,
+    a.el.errCopyBtn, a.el.errClearBtn]) {
+    b.hidden = true;
+    actions.appendChild(b);
   }
-  return strip;
+  bar.appendChild(actions);
+
+  a.el.alarmBar = bar;
+  return bar;
 }
 
 /**
- * Arrow-key navigation for the tab strip (§9.7).
- * @param {object} a the application instance
- * @param {KeyboardEvent} e the key event
- * @param {string} tabId the tab the key landed on
- * @returns {void}
- */
-function onTabKey(a, e, tabId) {
-  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return;
-  e.preventDefault();
-  const i = TABS.findIndex((t) => t.id === tabId);
-  let j;
-  if (e.key === 'ArrowLeft') j = (i - 1 + TABS.length) % TABS.length;
-  else if (e.key === 'ArrowRight') j = (i + 1) % TABS.length;
-  else if (e.key === 'Home') j = 0;
-  else j = TABS.length - 1;
-  setTab(a, TABS[j].id);
-  const next = a.el.tabs.get(TABS[j].id);
-  if (next) next.focus();
-}
-
-/**
- * The 28 px status strip — the redundant copy of process state that survives a tab switch (§9.1.1).
- * Every chip is a real button, so the glossary behind it is keyboard-reachable.
+ * Band 5 — the 24 px status strip: the eight sunken label boxes, then the run-state lamp with its
+ * STATE box and the data-quality lamp with its QUAL box. This is the redundant copy of process
+ * state that survives a screen change.
  * @param {object} a the application instance
  * @returns {Element} the status strip
  */
@@ -892,25 +1083,34 @@ function buildStatusStrip(a) {
   const strip = h('footer', {
     class: 'statusstrip', 'aria-label': 'Live process values', 'data-tour': 'status',
   });
-  a.el.stat = {};
-  for (const spec of STATUS_CHIPS) {
-    const chip = /** @type {HTMLButtonElement} */ (h('button', {
-      class: 'statchip', type: 'button',
-      title: `${spec.label} — press for what this is and what abnormal looks like`,
-    },
-    h('span', { class: 'statchip__label' }, spec.label),
-    h('span', { class: 'statchip__value' }, fmt.NO_VALUE)));
-    chip.addEventListener('click', () => {
-      if (spec.key === 'quality') showQualityPopover(a, chip);
-      else showGlossary(a, chip, spec.gloss);
+  a.el.fields = {};
+  for (const spec of STATUS_FIELDS) {
+    const entry = glossaryFor(spec.gloss);
+    const rec = labelBox({
+      tag: spec.tag,
+      eu: fmt.unitLabel(spec.kind),
+      gloss: spec.gloss,
+      title: `${spec.isa ? `${spec.isa} · ` : ''}${entry ? entry.term : spec.tag}`,
     });
-    a.el.stat[spec.key] = {
-      chip,
-      value: chip.querySelector('.statchip__value'),
-      sensor: spec.sensor,
-    };
-    strip.appendChild(chip);
+    a.el.fields[spec.key] = rec;
+    strip.appendChild(rec.el);
   }
+
+  strip.appendChild(h('span', { class: 'statusstrip__spacer' }));
+
+  a.el.stateLamp = lamp('Run state: IDLE');
+  strip.appendChild(a.el.stateLamp);
+  a.el.stateBox = labelBox({ tag: 'STATE', gloss: 'run-state', title: 'Run state', wide: true });
+  strip.appendChild(a.el.stateBox.el);
+
+  a.el.qualLamp = lamp('Data quality: OK');
+  strip.appendChild(a.el.qualLamp);
+  a.el.qualBox = labelBox({
+    tag: 'QUAL', narrow: true, title: 'Data quality — press for the per-sensor verdicts',
+    onClick: () => showQualityPopover(a, a.el.qualBox.el),
+  });
+  strip.appendChild(a.el.qualBox.el);
+
   return strip;
 }
 
@@ -920,7 +1120,7 @@ function buildStatusStrip(a) {
 
 /**
  * Run a `core/sim.js` action and surface its refusal. Every action returns `{ ok, reason? }`, and a
- * refusal is ALWAYS shown: a silent refusal teaches nothing and gets worked around (§9.4.4).
+ * refusal is ALWAYS shown: a silent refusal teaches nothing and gets worked around.
  * @param {object} a the application instance
  * @param {function():{ok:boolean, reason?:string}} fn the action thunk
  * @returns {{ok:boolean, reason?:string}} the action's own result
@@ -957,7 +1157,7 @@ function toast(a, message, kind) {
 
 /**
  * Start, or continue from HELD/PAUSED. A pre-run-check refusal opens the full failure list rather
- * than a one-line toast, because all twelve checks report at once (§5.5.1).
+ * than a one-line toast, because all the checks report at once.
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -972,7 +1172,8 @@ function doStartOrContinue(a) {
 }
 
 /**
- * Render the pre-run check failures as a modal list, blocking failures first.
+ * Render the pre-run check failures as a modal list, blocking failures first. A failure surface, so
+ * it is allowed to use words.
  * @param {object} a the application instance
  * @param {Array<{code:string, message:string, acknowledgeable:boolean}>} failures the failures
  * @returns {void}
@@ -1005,29 +1206,31 @@ function showPreRunFailures(a, failures) {
 }
 
 /**
- * The End confirm popover: end now, or end after the current block (§9.4.3).
+ * The End confirm popover: end after the current block, or end now. Two icon buttons — the words
+ * are in their tooltips.
  * @param {object} a the application instance
- * @param {Element} anchorEl the End button
+ * @param {Element} anchorEl the stop button
  * @returns {void}
  */
 function openEndPopover(a, anchorEl) {
-  const box = h('div', {});
-  box.appendChild(h('p', {}, 'End the run:'));
   let handle = null;
-  const after = button('btn btn--ghost btn--sm', 'After this block', () => {
-    overlay.dismiss(handle); act(a, () => sim.end(a.ctx, 'AFTER_BLOCK'));
+  const after = iconButton({
+    icon: 'clock', label: 'End after the current block',
+    title: 'End after the current block — the block finishes and is logged normally',
+    onClick: () => { overlay.dismiss(handle); act(a, () => sim.end(a.ctx, 'AFTER_BLOCK')); },
   });
-  const now = button('btn btn--danger btn--sm', 'End now', () => {
-    overlay.dismiss(handle); act(a, () => sim.end(a.ctx, 'NOW'));
+  const now = iconButton({
+    icon: 'stop', label: 'End now', danger: true,
+    title: 'End now — the current block is cut short at this volume',
+    onClick: () => { overlay.dismiss(handle); act(a, () => sim.end(a.ctx, 'NOW')); },
   });
-  box.appendChild(h('div', { class: 'btn-row' }, after, now));
   handle = overlay.showPopover(a.overlayHost, {
-    anchorEl, content: box, placement: 'bottom', maxWidth: 280,
+    anchorEl, content: h('div', { class: 'btn-row' }, after, now), placement: 'bottom', maxWidth: 200,
   });
 }
 
 /**
- * The keyboard path to Skip Block: a confirm dialog where `Enter` confirms (§9.5).
+ * The keyboard path to Skip Block: a confirm dialog where `Enter` confirms.
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -1077,7 +1280,7 @@ function confirmSkip(a) {
 }
 
 /**
- * Pause / resume the process. `Pause` ramps flow to zero; resuming returns to RUNNING (§5.5).
+ * Pause / resume the process. `Pause` ramps flow to zero; resuming returns to RUNNING.
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -1089,12 +1292,38 @@ function togglePause(a) {
 
 /**
  * Toggle manual control. Interlocks and the legal-state rule live in `sim`; a refusal is explained
- * by the toast (§9.4.4).
+ * by the toast.
  * @param {object} a the application instance
  * @returns {void}
  */
 function toggleManual(a) {
   act(a, () => sim.setManualOverride(a.ctx, !a.ctx.run.manualOverride));
+}
+
+/**
+ * Acknowledge the highest-ranked alarm that is waiting for it.
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function ackTopAlarm(a) {
+  const def = a.alarm.ackable;
+  if (!def) return;
+  act(a, () => sim.acknowledgeAlarm(a.ctx, def.id));
+  a.alarmSig = null;
+}
+
+/**
+ * Hide the top banner for the session. The alarm stays active and stays logged — silencing changes
+ * the screen, never the skid.
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function silenceTopAlarm(a) {
+  const def = a.alarm.active[0];
+  if (!def) return;
+  a.silenced.add(def.id);
+  a.alarmSig = null;
+  toast(a, `${def.id} hidden from the banner. It is still active and still in the event log.`, 'info');
 }
 
 /**
@@ -1111,9 +1340,9 @@ function stepSpeed(a, dir) {
 }
 
 /**
- * Export the loaded method as JSON (`Ctrl+S`). The run's data exports live on the Results tab,
+ * Export the loaded method as JSON (`Ctrl+S`). The run's data exports live on the Results screen,
  * which owns the analytics they carry; the method is shell-scoped because it is editable on the
- * Method tab and worth saving from anywhere.
+ * Method screen and worth saving from anywhere.
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -1128,8 +1357,8 @@ function exportMethod(a) {
 }
 
 /**
- * Open a file picker and install the chosen method JSON through `sim.loadMethod` (`Ctrl+O`, §9.5).
- * The shell owns this shortcut rather than the Method view so it works from any tab.
+ * Open a file picker and install the chosen method JSON through `sim.loadMethod` (`Ctrl+O`).
+ * The shell owns this shortcut rather than the Method screen so it works from anywhere.
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -1166,36 +1395,64 @@ function importMethodFile(a) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * TABS, THEME, HELP
+ * SCREENS, THEME, HELP
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Switch the visible tab. Only the visible view's `update()` runs, so a hidden tab costs nothing.
+ * Act on one of the five navigation buttons. `P&ID` and `TREND` both select the main screen, where
+ * the schematic and the trend are co-visible, and publish which pane the operator asked for so the
+ * screen can favour it; neither ever hides the other.
  * @param {object} a the application instance
- * @param {string} tabId one of `run` | `method` | `results` | `system`
+ * @param {string} navId a {@link NAV} id
  * @returns {void}
  */
-function setTab(a, tabId) {
-  if (!a.views.has(tabId) || a.activeTab === tabId) return;
-  a.activeTab = tabId;
-  for (const tab of TABS) {
-    const entry = a.views.get(tab.id);
-    const btn = a.el.tabs.get(tab.id);
-    const on = tab.id === tabId;
-    entry.host.hidden = !on;
-    fmt.cls(btn, 'is-active', on);
-    fmt.setAttr(btn, 'aria-selected', on ? 'true' : 'false');
-    fmt.setAttr(btn, 'tabindex', on ? '0' : '-1');
-  }
-  // A newly revealed view has missed every frame since it was hidden: give it a structural pass.
-  a.structural = true;
-  a.ctx.bus.emit('tab-changed', tabId);
+function selectNav(a, navId) {
+  const nav = NAV.find((n) => n.id === navId);
+  if (!nav) return;
+  a.activeNav = navId;
+  setScreen(a, nav.screen);
+  if (nav.pane) a.ctx.bus.emit('request-pane', nav.pane);
+  refreshNav(a);
 }
 
 /**
- * Flip between the dark and light themes and tell every canvas painter to re-read its tokens.
- * `index.html` stamps an explicit `data-theme` before first paint, so there is no third state to
- * carry here; reading CSS custom properties per frame is a layout-thrash trap (§6.25).
+ * Show one screen. Only the visible screen's `update()` runs, so a hidden one costs nothing.
+ * @param {object} a the application instance
+ * @param {string} screenId one of the {@link SCREENS} ids
+ * @returns {void}
+ */
+function setScreen(a, screenId) {
+  if (!a.screens.has(screenId) || a.activeScreen === screenId) return;
+  // The popover is anchored to an element on the screen we are leaving; hiding that host would
+  // strand it over the new screen, pointing at nothing.
+  closeGlossary(a);
+  a.activeScreen = screenId;
+  for (const [id, entry] of a.screens) entry.host.hidden = id !== screenId;
+  // A newly revealed screen has missed every frame since it was hidden: give it a structural pass.
+  a.structural = true;
+  a.ctx.bus.emit('screen-changed', screenId);
+  a.ctx.bus.emit('tab-changed', screenId);
+}
+
+/**
+ * Mark the navigation button that is currently showing.
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function refreshNav(a) {
+  for (const nav of NAV) {
+    const btn = a.el.navBtns.get(nav.id);
+    if (!btn) continue;
+    const on = nav.screen === a.activeScreen && (!nav.pane || a.activeNav === nav.id);
+    fmt.cls(btn, 'is-active', on);
+    fmt.setAttr(btn, 'aria-pressed', on ? 'true' : 'false');
+  }
+}
+
+/**
+ * Flip between the classic grey and the dark panel, and tell every canvas painter to re-read its
+ * tokens. `index.html` stamps an explicit `data-theme` before first paint, so there is no third
+ * state to carry here; reading CSS custom properties per frame is a layout-thrash trap.
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -1211,13 +1468,13 @@ function toggleTheme(a) {
  * @returns {void}
  */
 function applyTheme(a, theme, announce) {
-  a.theme = theme === 'light' ? 'light' : 'dark';
+  a.theme = theme === 'dark' ? 'dark' : 'light';
   document.documentElement.setAttribute('data-theme', a.theme);
   if (a.el.themeBtn) {
-    fmt.setAttr(a.el.themeBtn, 'aria-pressed', a.theme === 'light' ? 'true' : 'false');
+    fmt.setAttr(a.el.themeBtn, 'aria-pressed', a.theme === 'dark' ? 'true' : 'false');
     fmt.setAttr(a.el.themeBtn, 'title',
-      a.theme === 'light' ? 'Light theme — switch to dark' : 'Dark theme — switch to light');
-    fmt.setText(a.el.themeBtn, a.theme === 'light' ? '◑' : '◐');
+      a.theme === 'dark' ? 'Dark panel — switch to the classic grey' : 'Classic grey — switch to dark');
+    fmt.cls(a.el.themeBtn, 'is-active', a.theme === 'dark');
   }
   try {
     fmt.invalidateThemeTokens();
@@ -1226,8 +1483,8 @@ function applyTheme(a, theme, announce) {
 }
 
 /**
- * Open the glossary popover for a tag or parameter id (§9.6). A missing entry renders NO info
- * affordance — `glossaryFor` returning null is a contract, not an error (§6.22.1).
+ * Open the glossary popover for a tag or parameter id. A missing entry renders NO info affordance —
+ * `glossaryFor` returning null is a contract, not an error.
  * @param {object} a the application instance
  * @param {Element} anchorEl the element the popover points at
  * @param {string} id a P&ID tag, config path, concept id or alias
@@ -1236,19 +1493,37 @@ function applyTheme(a, theme, announce) {
 function showGlossary(a, anchorEl, id) {
   const entry = glossaryFor(id);
   if (!entry) return;
-  overlay.showGlossaryPopover(a.overlayHost, {
+  // ONE glossary popover at a time. The handle used to be discarded, so every tag you touched left
+  // its popover pinned to the screen — observed live as a 213 px paragraph stranded over the trend.
+  // On an HMI whose whole premise is "almost no text", a leaked block of prose is a real defect.
+  closeGlossary(a);
+  a.glossaryHandle = overlay.showGlossaryPopover(a.overlayHost, {
     anchorEl,
     entry,
     placement: 'top',
     onSeeAlso: (nextId) => showGlossary(a, anchorEl, nextId),
+    onDismiss: () => { a.glossaryHandle = null; },
   });
 }
 
 /**
- * The status strip's Quality chip popover: every `run.qualityFlags` bit currently set (§5.3), and
- * the per-sensor verdict behind them.
+ * Dismiss the open glossary popover, if any. Idempotent, and safe to call when the overlay layer
+ * has already torn the popover down on its own (Esc, outside click, host destroy).
  * @param {object} a the application instance
- * @param {Element} anchorEl the chip
+ * @returns {void}
+ */
+function closeGlossary(a) {
+  if (!a.glossaryHandle) return;
+  const handle = a.glossaryHandle;
+  a.glossaryHandle = null;
+  try { overlay.dismiss(handle); } catch (_err) { /* already gone; nothing to do */ }
+}
+
+/**
+ * The QUAL box's popover: every `run.qualityFlags` bit currently set, and the per-sensor verdict
+ * behind them.
+ * @param {object} a the application instance
+ * @param {Element} anchorEl the box
  * @returns {void}
  */
 function showQualityPopover(a, anchorEl) {
@@ -1274,7 +1549,7 @@ function showQualityPopover(a, anchorEl) {
 }
 
 /**
- * The `SIMULATED` chip's popover: what the model does, and what it deliberately does not (§9.6).
+ * The unit name's popover: what the model does, and what it deliberately does not.
  * @param {object} a the application instance
  * @returns {Element} the popover body
  */
@@ -1291,6 +1566,33 @@ function honestyContent(a) {
     h('p', { class: 'glossary__typical' },
       `${cfg.presetId} · ${cfg.scale} · seed ${cfg.seed} · grid nz=${cfg.column.nz}`
       + `${a.benchmark ? ` · ${a.benchmark.msPerSimSecond.toFixed(2)} ms per simulated second` : ''}`));
+}
+
+/**
+ * Open the teaching-scenario picker.
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function showScenarios(a) {
+  if (a.onboarding) { onboarding.showScenarioPicker(a.onboarding); return; }
+
+  const rows = presets.SCENARIOS || {};
+  const ids = Object.keys(rows);
+  const list = h('div', { class: 'btn-row' });
+  let handle = null;
+  for (const id of ids) {
+    const s = rows[id];
+    list.appendChild(button('btn btn--ghost btn--sm', (s && s.name) || id, () => {
+      overlay.dismiss(handle);
+      act(a, () => sim.loadScenario(a.ctx, id));
+    }, { title: (s && s.teaches) || id }));
+  }
+  handle = overlay.showModal(a.overlayHost, {
+    title: 'Teaching scenarios',
+    content: ids.length ? list : h('p', {}, 'This preset library declares no scenarios.'),
+    dismissible: true,
+    actions: [{ label: 'Close', variant: 'primary', onClick: (hd) => overlay.dismiss(hd) }],
+  });
 }
 
 /**
@@ -1341,44 +1643,43 @@ function showHelp(a) {
 
   const body = h('div', {},
     h('p', {}, `${ids.length} entries cover every instrument tag, every configurable parameter and `
-      + 'every concept the simulator models. The same text is behind the ⓘ on any label on screen.'),
+      + 'every concept the simulator models. The same text is behind every label box on screen.'),
     h('div', { class: 'numfield' }, search),
     list,
     detail);
   render('');
 
+  const actions = [];
+  if (a.onboarding) {
+    actions.push({
+      label: 'Take the tour',
+      variant: 'ghost',
+      onClick: (hd) => { overlay.dismiss(hd); onboarding.startTour(a.onboarding); },
+    });
+  }
+  actions.push({
+    label: 'Keyboard shortcuts',
+    variant: 'ghost',
+    onClick: (hd) => { overlay.dismiss(hd); overlay.showCheatSheet(a.overlayHost, KEYMAP); },
+  });
+  if (a.onboarding) {
+    actions.push({
+      label: hintsOn(a) ? 'Turn coach hints off' : 'Turn coach hints on',
+      variant: 'ghost',
+      onClick: (hd) => {
+        overlay.dismiss(hd);
+        if (!a.onboarding) return;
+        a.onboarding.hintsEnabled = !a.onboarding.hintsEnabled;
+        toast(a, a.onboarding.hintsEnabled
+          ? 'Coach hints on — at most one card every 20 seconds, never blocking.'
+          : 'Coach hints off for this session.', 'info');
+      },
+    });
+  }
+  actions.push({ label: 'Close', variant: 'primary', onClick: (hd) => overlay.dismiss(hd) });
+
   overlay.showModal(a.overlayHost, {
-    title: 'Help and glossary',
-    content: body,
-    dismissible: true,
-    actions: [
-      {
-        label: 'Take the tour',
-        variant: 'ghost',
-        onClick: (hd) => {
-          overlay.dismiss(hd);
-          if (a.onboarding) onboarding.startTour(a.onboarding);
-        },
-      },
-      {
-        label: 'Keyboard shortcuts',
-        variant: 'ghost',
-        onClick: (hd) => { overlay.dismiss(hd); overlay.showCheatSheet(a.overlayHost, KEYMAP); },
-      },
-      {
-        label: hintsOn(a) ? 'Turn coach hints off' : 'Turn coach hints on',
-        variant: 'ghost',
-        onClick: (hd) => {
-          overlay.dismiss(hd);
-          if (!a.onboarding) return;
-          a.onboarding.hintsEnabled = !a.onboarding.hintsEnabled;
-          toast(a, a.onboarding.hintsEnabled
-            ? 'Coach hints on — at most one card every 20 seconds, never blocking.'
-            : 'Coach hints off for this session.', 'info');
-        },
-      },
-      { label: 'Close', variant: 'primary', onClick: (hd) => overlay.dismiss(hd) },
-    ],
+    title: 'Help and glossary', content: body, dismissible: true, actions,
   });
 }
 
@@ -1396,7 +1697,7 @@ function hintsOn(a) {
 
 /**
  * Subscribe the shell to the bus. Every derived value keyed on `config` is dropped on
- * `config-replaced`, and the startup benchmark is re-run on `preset-loaded` (§6.32).
+ * `config-replaced`, and the startup benchmark is re-run on `preset-loaded`.
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -1411,7 +1712,7 @@ function wireBus(a) {
     a.lastEventCount = a.ctx.run.events ? a.ctx.run.events.length : 0;
     a.simFailed = false;
     a.structural = true;
-    if (a.el.speedOpts.length !== a.ctx.config.sim.speedOptions.length) buildSpeedOptions(a);
+    if (a.el.speedChips.length !== a.ctx.config.sim.speedOptions.length) buildSpeedChips(a);
   };
   bus.on('config-replaced', invalidate);
   bus.on('run-reset', invalidate);
@@ -1420,25 +1721,34 @@ function wireBus(a) {
     runStartupBenchmark(a);
     invalidate();
   });
-  bus.on('scenario-applied', () => setTab(a, 'run'));
+  bus.on('scenario-applied', () => selectNav(a, 'pid'));
   bus.on('run-ended', () => { a.structural = true; });
-  bus.on('request-tab', (tabId) => setTab(a, tabId));
+  bus.on('request-tab', (tabId) => {
+    const navId = LEGACY_NAV[String(tabId)];
+    if (navId) selectNav(a, navId);
+  });
   bus.on('show-glossary', (payload) => {
     if (payload && payload.anchorEl && payload.id) showGlossary(a, payload.anchorEl, payload.id);
   });
-  bus.on('display-units-changed', () => { a.structural = true; });
+  bus.on('display-units-changed', () => {
+    a.structural = true;
+    for (const spec of STATUS_FIELDS) {
+      const rec = a.el.fields[spec.key];
+      if (rec) fmt.setText(rec.eu, fmt.unitLabel(spec.kind));
+    }
+  });
 }
 
 /**
- * Install the one document-level key handler. Shell actions execute here; view actions go out on
+ * Install the one document-level key handler. Shell actions execute here; panel actions go out on
  * the bus as `('key-action', { action, combo, event })`, so no second listener is ever needed.
  * @param {object} a the application instance
  * @returns {void}
  */
 function wireKeyboard(a) {
   document.addEventListener('keydown', (e) => {
-    // A control that already consumed the key (the tab strip's arrows, a numfield's stepper, an
-    // open dialog) wins: the global registry never double-handles.
+    // A control that already consumed the key (a splitter's arrows, a numfield's stepper, an open
+    // dialog) wins: the global registry never double-handles.
     if (e.defaultPrevented) return;
     const combo = normaliseCombo(e);
     const entry = KEYMAP[combo];
@@ -1453,12 +1763,12 @@ function wireKeyboard(a) {
  * @param {object} a the application instance
  * @param {string} action the action id from `KEYMAP`
  * @param {KeyboardEvent} e the originating event
- * @param {string} combo the normalised combo, forwarded to the views
+ * @param {string} combo the normalised combo, forwarded to the panels
  * @returns {boolean} true when the event was consumed and should be prevented
  */
 function handleKeyAction(a, action, e, combo) {
   const run = a.ctx.run;
-  if (action.startsWith('tab:')) { setTab(a, action.slice(4)); return true; }
+  if (action.startsWith('nav:')) { selectNav(a, action.slice(4)); return true; }
   if (action.startsWith('speed:')) {
     const opts = a.ctx.config.sim.speedOptions;
     const i = Number(action.slice(6));
@@ -1474,7 +1784,7 @@ function handleKeyAction(a, action, e, combo) {
     case 'hold': act(a, () => sim.hold(a.ctx)); return true;
     case 'continue': act(a, () => sim.resume(a.ctx)); return true;
     case 'skip-block': confirmSkip(a); return true;
-    case 'end-run': openEndPopover(a, a.el.endBtn); return true;
+    case 'end-run': openEndPopover(a, a.el.stopBtn); return true;
     case 'pause-toggle': togglePause(a); return true;
     case 'estop': {
       const now = performance.now();
@@ -1502,32 +1812,33 @@ function handleKeyAction(a, action, e, combo) {
       a.ctx.bus.emit('key-action', { action, combo, event: e });
       return false;                     // the overlay host's own capture-phase Esc handling runs too
     default:
-      // Chart, legend and pooling live in the views; they own these.
+      // The trend, its pen rail and the pooling tools live in the panels; they own these.
       a.ctx.bus.emit('key-action', { action, combo, event: e });
       return true;
   }
 }
 
 /**
- * Show the "best viewed wider" note below 720 px, without ever reading layout in a frame (§9.1.3).
+ * Flag a narrow viewport on the shell so `styles/app.css` can reflow the bands, without ever
+ * reading layout in a frame.
  * @param {object} a the application instance
  * @returns {void}
  */
-function wireResponsiveNote(a) {
+function wireResponsive(a) {
   if (!window.matchMedia) return;
-  const mq = window.matchMedia('(max-width: 719.98px)');
-  const apply = () => { a.el.narrowNote.hidden = !mq.matches; };
+  const mq = window.matchMedia('(max-width: 899.98px)');
+  const apply = () => fmt.cls(a.el.shell, 'is-narrow', mq.matches);
   if (mq.addEventListener) mq.addEventListener('change', apply);
   else if (mq.addListener) mq.addListener(apply);
   apply();
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * THE FRAME LOOP — the ONLY requestAnimationFrame in the program (§3.1)
+ * THE FRAME LOOP — the ONLY requestAnimationFrame in the program
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
- * One animation frame: advance the physics by the real elapsed time, then render the visible view.
+ * One animation frame: advance the physics by the real elapsed time, then render the visible screen.
  *
  * Rendering is decoupled from the fixed-timestep sim: `sim.advanceWall` runs whole 0.05 s ticks and
  * drops any debt it cannot pay, reporting the shortfall through `run.speedDeficit`. Both halves are
@@ -1535,7 +1846,7 @@ function wireResponsiveNote(a) {
  * loop, but the loop itself never stops.
  *
  * `document.hidden` pauses RENDERING only; the simulation keeps running, and the 0.25 s wall clamp
- * inside `advanceWall` stops a backgrounded tab from fast-forwarding (§6.32).
+ * inside `advanceWall` stops a backgrounded tab from fast-forwarding.
  *
  * @param {number} now_ms the `requestAnimationFrame` timestamp, milliseconds
  * @returns {void}
@@ -1579,22 +1890,22 @@ export function frame(now_ms) {
     } catch (err) {
       reportError(a, 'shell', err);
     }
-    const entry = a.views.get(a.activeTab);
+    const entry = a.screens.get(a.activeScreen);
     if (entry && entry.panel && !entry.disabled) {
       try {
         entry.panel.update(info);
         entry.failCount = 0;
       } catch (err) {
         entry.failCount++;
-        reportError(a, `${a.activeTab} view`, err);
-        if (entry.failCount >= VIEW_FAIL_LIMIT) {
+        reportError(a, `${a.activeScreen} screen`, err);
+        if (entry.failCount >= PANEL_FAIL_LIMIT) {
           entry.disabled = true;
-          toast(a, `The ${a.activeTab} view was disabled after ${VIEW_FAIL_LIMIT} errors. `
-            + 'Switch tabs and back to retry.', 'blocked');
+          toast(a, `The ${a.activeScreen} screen was disabled after ${PANEL_FAIL_LIMIT} errors. `
+            + 'Switch screens and back to retry.', 'blocked');
         }
       }
     }
-    if (a.onboarding) {
+    if (a.onboarding && typeof a.onboarding.update === 'function') {
       try {
         a.onboarding.update(info);
       } catch (err) {
@@ -1621,7 +1932,7 @@ export function frame(now_ms) {
 
 /**
  * Consume every event appended to `run.events` since the last frame: feed the coach-hint scheduler
- * and raise the `structural` flag when list content changed (§6.24).
+ * and raise the `structural` flag when list content changed.
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -1645,16 +1956,11 @@ function drainEvents(a) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * SHELL RENDER — text and attributes onto cached nodes; no innerHTML, no layout reads
+ * SHELL RENDER — text, classes and attributes onto cached nodes; no innerHTML, no layout reads
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
  * Repaint the persistent chrome from the current `run`. Called once per visible frame.
- *
- * `refreshAlarms` runs every frame but early-outs on an unchanged id signature, so the banner DOM
- * is rebuilt only when the active set changes; `structural` forces that comparison to be redone
- * after a `config-replaced`, when the whole alarm table may have been swapped.
- *
  * @param {object} a the application instance
  * @param {boolean} structural true when list content may have changed
  * @returns {void}
@@ -1662,31 +1968,73 @@ function drainEvents(a) {
 function refreshShell(a, structural) {
   const { config, run } = a.ctx;
   if (structural) a.alarmSig = null;
-  refreshRunBar(a, config, run);
+  collectAlarms(a, config, run);
+  refreshTitleBar(a, config, run);
+  refreshToolbar(a, config, run);
   refreshStatusStrip(a, config, run);
-  refreshAlarms(a, config, run);
+  refreshAlarmBar(a);
   if (a.skipHold.active) advanceSkipHold(a);
 }
 
 /**
- * Repaint the run control bar (§9.4.3).
+ * Fill `a.alarm` with this frame's alarm picture: the count and the per-severity tallies over EVERY
+ * raised row, the signal names in alarm (which redden the status boxes), the first row waiting to
+ * be acknowledged, and the ranked list of rows the banner may show.
+ *
+ * Silencing is a SCREEN act, never a process act: a silenced row is kept out of `active` — the
+ * banner — but still counts, still lights its summary lamp and can still be acknowledged, so
+ * nothing an operator does to the banner can hide the fact that the alarm is standing.
+ *
+ * Buffers are reused, so a frame allocates nothing here.
+ *
  * @param {object} a the application instance
  * @param {object} config the frozen config
  * @param {object} run the run state
  * @returns {void}
  */
-function refreshRunBar(a, config, run) {
+function collectAlarms(a, config, run) {
+  const defs = config.alarms || [];
+  const out = a.alarm;
+  out.active.length = 0;
+  out.signals.clear();
+  out.evals.clear();
+  out.count = 0;
+  out.crit = 0;
+  out.alarms = 0;
+  out.warns = 0;
+  out.worst = '';
+  out.ackable = null;
+
+  for (let i = 0; i < defs.length; i++) {
+    const def = defs[i];
+    const raised = run.alarmActive[i] === 1
+      || (run.alarmLatched[i] === 1 && run.alarmAcked[i] !== 1);
+    if (!raised) continue;
+    const rank = SEVERITY_RANK[def.severity] || 0;
+    out.count++;
+    if (rank >= SEVERITY_RANK.CRITICAL) out.crit++;
+    else if (rank === SEVERITY_RANK.ALARM) out.alarms++;
+    else out.warns++;
+    if (def.signal) out.signals.add(def.signal);
+    if (def.evalKey) out.evals.add(def.evalKey);
+    if (!out.worst || rank > (SEVERITY_RANK[out.worst] || 0)) out.worst = def.severity;
+    if ((def.ackRequired || def.latching)
+      && (!out.ackable || rank > (SEVERITY_RANK[out.ackable.severity] || 0))) out.ackable = def;
+    if (!a.silenced.has(def.id)) out.active.push(def);
+  }
+  out.active.sort((x, y) => (SEVERITY_RANK[y.severity] || 0) - (SEVERITY_RANK[x.severity] || 0));
+}
+
+/**
+ * Repaint the title strip: unit, block counter, clock, progress and the alarm-summary lamps.
+ * @param {object} a the application instance
+ * @param {object} config the frozen config
+ * @param {object} run the run state
+ * @returns {void}
+ */
+function refreshTitleBar(a, config, run) {
   const el = a.el;
-  const st = run.state;
-
-  // 1 — state, method, block
-  const pillClass = `pill pill--lg pill--${stateTone(st)}`;
-  if (el.statePill.className !== pillClass) el.statePill.className = pillClass;
-  fmt.setText(el.statePill, st);
-  fmt.setAttr(el.statePill, 'title', stateExplanation(st));
-
-  fmt.setText(el.presetName, config.name || config.presetId);
-  fmt.setText(el.methodName, (config.method && config.method.name) || 'No method');
+  fmt.setText(el.unitName, String(config.name || config.presetId).toUpperCase());
 
   const blocks = config.method ? config.method.blocks : null;
   if (blocks && blocks.length > 0) {
@@ -1694,82 +2042,110 @@ function refreshRunBar(a, config, run) {
     const b = blocks[i];
     const prog = blockProgress(config, run);
     const pct = Number.isFinite(prog.fraction) ? Math.round(prog.fraction * 100) : 0;
-    fmt.setText(el.blockName, `${i + 1}/${blocks.length} · ${b.name || b.id} · ${pct}%`);
-    fmt.setAttr(el.blockName, 'title', `Block ${b.id} (${b.type}) — ${pct}% delivered, `
+    setBox(el.blkBox, `${i + 1}/${blocks.length}`, '');
+    fmt.setAttr(el.blkBox.el, 'title', `${b.id} · ${b.name || b.type} — ${pct} % delivered, `
       + `${fmt.fmtVolume(prog.remaining_mL, config)} remaining`);
   } else {
-    fmt.setText(el.blockName, '—');
+    setBox(el.blkBox, fmt.NO_VALUE, '');
+    fmt.setAttr(el.blkBox.el, 'title', 'No method is loaded');
   }
 
-  // 2 — transport
-  const held = st === 'HELD' || st === 'PAUSED';
-  fmt.setText(el.startBtn, held ? 'Continue' : 'Start');
-  setEnabled(el.startBtn, st === 'IDLE' || st === 'READY' || held,
-    `Cannot start from ${st}.`,
-    held ? 'Return to RUNNING (C)' : 'Run the pre-run checks and start (Space)');
-  setEnabled(el.holdBtn, st === 'RUNNING',
-    `Hold is only available while RUNNING (state is ${st}).`,
-    'Freeze the method; flow stays at setpoint (H)');
-  setEnabled(el.skipBtn, st === 'RUNNING' || st === 'HELD',
-    `A block can only be skipped while RUNNING or HELD (state is ${st}).`,
-    'Skip the current block — press and hold for 400 ms (N)');
-  setEnabled(el.endBtn, st === 'RUNNING' || st === 'HELD' || st === 'PAUSED' || st === 'ALARM',
-    `Cannot end from ${st}.`, 'End now, or after the current block (E)');
+  setBox(el.clkBox, fmt.fmtClock(run.t_s), '');
 
-  // At run end the bar collapses to Reset: replay and scrubbing are D26b, so there is no transport
-  // bar and no post-run cursor. The Results tab is the only post-run surface.
-  const resettable = st === 'ENDED' || st === 'FAULT' || st === 'READY';
-  el.resetBtn.hidden = !resettable;
-  setEnabled(el.resetBtn, resettable,
-    `Reset is available from READY, ENDED and FAULT (state is ${st}).`,
-    'Return to IDLE and rebuild the fluid path');
-
-  // 4 — speed
-  for (const opt of el.speedOpts) {
-    const on = Number(opt.dataset.speed) === run.speed;
-    fmt.cls(opt, 'is-selected', on);
-    fmt.setAttr(opt, 'aria-checked', on ? 'true' : 'false');
-  }
-  const paused = st === 'PAUSED' || st === 'HELD';
-  fmt.setText(el.pauseBtn, paused ? '▶' : '❚❚');
-  fmt.setAttr(el.pauseBtn, 'aria-pressed', paused ? 'true' : 'false');
-  fmt.setAttr(el.pauseBtn, 'aria-label', paused ? 'Resume the simulation' : 'Pause the simulation');
-  setEnabled(el.pauseBtn, st === 'RUNNING' || paused,
-    `Nothing is running to pause (state is ${st}).`,
-    paused ? 'Return to RUNNING (P)' : 'Ramp flow to zero and freeze the clock (P)');
-
-  // The honesty readout — never claim a speed the machine is not delivering (§2.1.1, §9.4.3).
-  if (run.speedDeficit > 1.01 && st === 'RUNNING') {
-    fmt.setText(el.speedNote, `${run.speed}× (limited to ${formatSpeed(run.speed / run.speedDeficit)}×)`);
-    fmt.setAttr(el.speedNote, 'title',
-      'This machine cannot keep up with the requested speed. Effective speed is '
-      + 'run.speed / run.speedDeficit; a coarser column grid buys it back.');
-    fmt.cls(el.speedNote, 'is-limited', true);
-  } else {
-    fmt.setText(el.speedNote, `${run.speed}×`);
-    fmt.setAttr(el.speedNote, 'title', 'Simulated seconds per real second');
-    fmt.cls(el.speedNote, 'is-limited', false);
-  }
-
-  // 5 — progress
-  fmt.setText(el.counters,
-    `${fmt.fmtVolume(run.V_tot_mL, config)} · ${fmt.fmtCV(run.V_tot_mL, config)} · ${fmt.fmtClock(run.t_s)}`);
   const pct = Math.round(methodFraction(a, config, run) * 100);
   if (a.progressPct !== pct) {                 // a style write per frame is a style invalidation
     a.progressPct = pct;
     el.progressFill.style.width = `${pct}%`;
     fmt.setAttr(el.progressTrack, 'aria-valuenow', String(pct));
     fmt.setAttr(el.progressTrack, 'aria-valuetext',
-      `${pct}% of the method, ${(run.V_tot_mL / config.column.V_mL).toFixed(2)} column volumes delivered`);
+      `${pct} % of the method, ${(run.V_tot_mL / config.column.V_mL).toFixed(2)} column volumes delivered`);
   }
 
-  // 6 — mode chip, and the amber P&ID outline `.shell.is-manual` draws (§9.4.4)
+  // Counted over every raised row, silenced ones included: a summary lamp that a silenced banner
+  // could switch off would be a lie.
+  const { crit, alarms, warns } = a.alarm;
+  setLamp(el.lampCrit, crit > 0 ? 'alarm' : 'off',
+    crit > 0 ? `Critical alarms: ${crit}` : 'Critical alarms: none', crit > 0);
+  setLamp(el.lampAlarm, alarms > 0 ? 'alarm' : 'off',
+    alarms > 0 ? `Alarms: ${alarms}` : 'Alarms: none', false);
+  setLamp(el.lampWarn, warns > 0 ? 'warn' : 'off',
+    warns > 0 ? `Warnings: ${warns}` : 'Warnings: none', false);
+  setBox(el.almBox, String(a.alarm.count), '');
+  setBoxState(el.almBox, a.alarm.count > 0, false);
+}
+
+/**
+ * Repaint the toolbar: transport availability, the speed chips, the honest speed readout, the
+ * manual-mode toggle and the acknowledge button.
+ * @param {object} a the application instance
+ * @param {object} config the frozen config
+ * @param {object} run the run state
+ * @returns {void}
+ */
+function refreshToolbar(a, config, run) {
+  const el = a.el;
+  const st = run.state;
+  const held = st === 'HELD' || st === 'PAUSED';
+
+  setEnabled(el.runBtn, st === 'IDLE' || st === 'READY',
+    held ? 'Already started — use Continue.' : `Cannot start from ${st}.`,
+    'Run the pre-run checks and start (Space)');
+  setEnabled(el.holdBtn, st === 'RUNNING',
+    `Hold is only available while RUNNING (state is ${st}).`,
+    'Freeze the method; flow stays at setpoint (H)');
+  setEnabled(el.contBtn, held,
+    `Continue is only available from HELD or PAUSED (state is ${st}).`,
+    'Return to RUNNING (C)');
+  setEnabled(el.skipBtn, st === 'RUNNING' || st === 'HELD',
+    `A block can only be skipped while RUNNING or HELD (state is ${st}).`,
+    'Skip the current block — press and hold for 400 ms (N)');
+  setEnabled(el.stopBtn, st === 'RUNNING' || st === 'HELD' || st === 'PAUSED' || st === 'ALARM',
+    `Cannot end from ${st}.`, 'End now, or after the current block (E)');
+  // At run end the transport collapses to Reset: replay and scrubbing do not exist, so there is no
+  // post-run cursor. The Results screen is the only post-run surface.
+  const resettable = st === 'ENDED' || st === 'FAULT' || st === 'READY';
+  setEnabled(el.resetBtn, resettable,
+    `Reset is available from READY, ENDED and FAULT (state is ${st}).`,
+    'Return to IDLE and rebuild the fluid path');
+
+  for (const chip of el.speedChips) {
+    const on = Number(chip.dataset.speed) === run.speed;
+    fmt.cls(chip, 'is-active', on);
+    fmt.setAttr(chip, 'aria-checked', on ? 'true' : 'false');
+  }
+
+  const paused = st === 'PAUSED' || st === 'HELD';
+  fmt.setAttr(el.pauseBtn, 'aria-pressed', paused ? 'true' : 'false');
+  fmt.setAttr(el.pauseBtn, 'aria-label', paused ? 'Resume the simulation' : 'Pause the simulation');
+  fmt.cls(el.pauseBtn, 'is-active', paused);
+  setEnabled(el.pauseBtn, st === 'RUNNING' || paused,
+    `Nothing is running to pause (state is ${st}).`,
+    paused ? 'Return to RUNNING (P)' : 'Ramp flow to zero and freeze the clock (P)');
+
+  // The honesty readout — never claim a speed the machine is not delivering.
+  const limited = run.speedDeficit > 1.01 && st === 'RUNNING';
+  const achieved = limited ? run.speed / run.speedDeficit : run.speed;
+  setBox(el.spdBox, formatSpeed(achieved), '×');
+  setBoxState(el.spdBox, false, limited);
+  setLamp(el.speedLamp, limited ? 'warn' : 'off',
+    limited
+      ? `Speed limited: asking for ${run.speed}×, achieving ${formatSpeed(achieved)}×`
+      : 'Speed limited: no', false);
+  fmt.setAttr(el.spdBox.el, 'title', limited
+    ? 'This machine cannot keep up with the requested speed. Effective speed is '
+      + 'run.speed / run.speedDeficit; a coarser column grid buys it back.'
+    : 'Simulated seconds per real second');
+
   const manual = !!run.manualOverride;
-  fmt.setText(el.modeChip, manual ? 'MANUAL' : 'METHOD');
-  const modeClass = `pill ${manual ? 'pill--warn' : 'pill--neutral'}`;
-  if (el.modeChip.className !== modeClass) el.modeChip.className = modeClass;
-  fmt.setAttr(el.modeChip, 'aria-pressed', manual ? 'true' : 'false');
+  fmt.cls(el.manualBtn, 'is-active', manual);
+  fmt.setAttr(el.manualBtn, 'aria-pressed', manual ? 'true' : 'false');
+  fmt.setAttr(el.manualBtn, 'aria-label', manual ? 'Manual control is ON' : 'Manual control is OFF');
   fmt.cls(el.shell, 'is-manual', manual);
+
+  const ackable = a.alarm.ackable;
+  setEnabled(el.ackBtn, !!ackable,
+    'No alarm is waiting to be acknowledged.',
+    ackable ? `Acknowledge ${ackable.id} — ${ackable.name}` : 'Acknowledge the highest alarm');
 }
 
 /**
@@ -1788,7 +2164,7 @@ function advanceSkipHold(a) {
 }
 
 /**
- * Overall method progress as a fraction, weighted by block VOLUME so the run bar's thin bar agrees
+ * Overall method progress as a fraction, weighted by block VOLUME so the title strip's bar agrees
  * with the phase rail. `methodDemand` is cached per `config` and dropped on `config-replaced`.
  * @param {object} a the application instance
  * @param {object} config the frozen config
@@ -1817,37 +2193,46 @@ function methodFraction(a, config, run) {
 }
 
 /**
- * Repaint the status strip. Each chip carries its sensor's `sensorQuality` verdict as a class, and
- * `styles/app.css` renders that as colour; the Quality chip states the verdict in words, so the
- * information is never colour alone (§5.3, §9.7).
+ * Repaint the status strip. Each box carries its sensor's `sensorQuality` verdict and its alarm
+ * state as classes, which `styles/app.css` renders as digit colour; the QUAL box states the verdict
+ * as a code, so the information is never colour alone.
  * @param {object} a the application instance
  * @param {object} config the frozen config
  * @param {object} run the run state
  * @returns {void}
  */
 function refreshStatusStrip(a, config, run) {
-  const s = a.el.stat;
-  fmt.setText(s.p1.value, fmt.fmtPressure(run.press.P1disp_bar));
-  fmt.setText(s.dp.value, fmt.fmtPressure(run.press.P1disp_bar - run.press.P2disp_bar));
-  fmt.setText(s.flow.value, fmt.fmtFlow(run.Q_actual_mLs, config));
-  fmt.setText(s.pctb.value, fmt.fmtPct(run.pctB_colInlet));
-  fmt.setText(s.uv.value, fmt.fmtAbs(run.uv.Afilt[0]));
-  fmt.setText(s.cond.value, fmt.fmtCond(run.cond.kappaDisp_mScm));
-  fmt.setText(s.ph.value, fmt.fmtPH(run.ph.pHfilt));
-  fmt.setText(s.cv.value, fmt.fmtCV(run.V_tot_mL, config));
-  fmt.setText(s.clock.value, fmt.fmtClock(run.t_s));
+  const f = a.el.fields;
+  writeField(f.flow, 'flow', run.Q_actual_mLs, config);
+  writeField(f.pctb, 'pct', run.pctB_actual, config);
+  writeField(f.p1, 'pressure', run.press.P1disp_bar, config);
+  writeField(f.dp, 'pressure', run.dP_bar, config);
+  writeField(f.uv, 'abs', run.uv.Afilt[0], config);
+  writeField(f.cond, 'cond', run.cond.kappaDisp_mScm, config);
+  writeField(f.ph, 'ph', run.ph.pHfilt, config);
+  writeField(f.cv, 'cv', run.V_tot_mL, config);
 
   let worst = 'OK';
-  for (const spec of STATUS_CHIPS) {
-    if (!spec.sensor) continue;
-    const q = sensorQuality(run, spec.sensor);
-    applyQualityClass(s[spec.key].chip, q);
+  for (const spec of STATUS_FIELDS) {
+    const q = spec.sensor ? sensorQuality(run, spec.sensor) : 'OK';
     if (q !== 'OK' && worst === 'OK') worst = q;
     else if (q === 'INVALID') worst = 'INVALID';
+    let inAlarm = false;
+    for (const s of spec.signals) if (a.alarm.signals.has(s)) inAlarm = true;
+    for (const k of spec.evals) if (a.alarm.evals.has(k)) inAlarm = true;
+    // Flow has no sensor of its own, but an automatic flow reduction means the number on screen is
+    // not the number the method asked for, and that must be visible.
+    const stale = q !== 'OK'
+      || (spec.key === 'flow' && (run.qualityFlags & QF.FLOW_REDUCED) !== 0);
+    setBoxState(f[spec.key], inAlarm, stale);
   }
-  // Flow has no sensor of its own, but an automatic flow reduction means the number on screen is
-  // not the number the method asked for, and that must be visible.
-  applyQualityClass(s.flow.chip, (run.qualityFlags & QF.FLOW_REDUCED) !== 0 ? 'SUSPECT' : 'OK');
+
+  const st = run.state;
+  setBox(a.el.stateBox, st, '');
+  setBoxState(a.el.stateBox, st === 'ALARM' || st === 'FAULT', st === 'HELD' || st === 'PAUSED');
+  fmt.setAttr(a.el.stateBox.el, 'title', stateExplanation(st));
+  setLamp(a.el.stateLamp, stateLamp(st), `Run state: ${st} — ${stateExplanation(st)}`,
+    st === 'ALARM' || st === 'FAULT');
 
   let nFlags = 0;
   const names = [];
@@ -1856,139 +2241,128 @@ function refreshStatusStrip(a, config, run) {
     nFlags++;
     names.push(label);
   }
-  fmt.setText(s.quality.value, nFlags === 0 ? 'OK' : `${worst} · ${nFlags}`);
-  applyQualityClass(s.quality.chip, worst);
-  fmt.setAttr(s.quality.chip, 'title', nFlags === 0
-    ? 'Every sensor is reporting normally. Press for the per-sensor verdicts.'
-    : `${nFlags} quality flag${nFlags === 1 ? '' : 's'} set: ${names.join(' · ')}`);
+  const tone = worst === 'INVALID' ? 'alarm' : (worst === 'OK' ? 'run' : 'warn');
+  const qualText = nFlags === 0
+    ? 'Data quality: OK — press for the per-sensor verdicts'
+    : `Data quality: ${worst}, ${nFlags} flag${nFlags === 1 ? '' : 's'}: ${names.join(' · ')}`;
+  setLamp(a.el.qualLamp, tone, qualText, false);
+  setBox(a.el.qualBox, QUALITY_CODE[worst] || worst, nFlags > 0 ? String(nFlags) : '');
+  setBoxState(a.el.qualBox, worst === 'INVALID', worst !== 'OK');
+  fmt.setAttr(a.el.qualBox.el, 'title', qualText);
 }
 
 /**
- * Map a `sensorQuality` verdict onto the status chip's state classes.
- * @param {Element} chip the chip element
- * @param {'OK'|'SUSPECT'|'INVALID'|'BYPASSED'} q the verdict
- * @returns {void}
- */
-function applyQualityClass(chip, q) {
-  fmt.cls(chip, 'is-warn', q === 'SUSPECT');
-  fmt.cls(chip, 'is-invalid', q === 'INVALID');
-  fmt.cls(chip, 'is-off', q === 'BYPASSED');
-}
-
-/**
- * Rebuild the alarm banner stack when the active set changes, and keep the two live regions honest.
- *
- * Only the newest alarm's text is placed in a live region, rebuilt rather than appended, so a
- * screen reader announces once (§9.7).
- *
- * @param {object} a the application instance
+ * Format one canonical value into its label box, unit and all.
+ * @param {{val:Element, eu:Element, box:Element}} rec the label box record
+ * @param {'volume'|'cv'|'flow'|'time'|'pressure'|'conc'|'abs'|'cond'|'ph'|'pct'} kind the quantity
+ * @param {number} value the canonical value
  * @param {object} config the frozen config
- * @param {object} run the run state
  * @returns {void}
  */
-function refreshAlarms(a, config, run) {
-  const defs = config.alarms || [];
-  const active = [];
-  for (let i = 0; i < defs.length; i++) {
-    const shown = run.alarmActive[i] === 1 || (run.alarmLatched[i] === 1 && run.alarmAcked[i] !== 1);
-    if (!shown) continue;
-    if (a.silenced.has(defs[i].id)) continue;
-    active.push(defs[i]);
-  }
-  active.sort((x, y) => (SEVERITY_RANK[y.severity] || 0) - (SEVERITY_RANK[x.severity] || 0));
-
-  const sig = active.map((d) => d.id).join('|');
-  if (sig === a.alarmSig) return;
-  a.alarmSig = sig;
-
-  const list = a.el.alarmList;
-  while (list.firstChild) list.removeChild(list.firstChild);
-  for (const def of active.slice(0, MAX_BANNERS)) list.appendChild(buildBanner(a, def, active.length));
-
-  const extra = active.length - MAX_BANNERS;
-  if (extra > 0) {
-    list.appendChild(button('btn btn--ghost btn--sm',
-      `+${extra} more active alarm${extra === 1 ? '' : 's'} — open the System tab`,
-      () => setTab(a, 'system')));
-  }
-
-  const top = active[0];
-  const topId = top ? top.id : '';
-  if (topId !== a.liveAlarmId) {
-    a.liveAlarmId = topId;
-    const text = top ? `${top.severity}: ${top.name}` : '';
-    const rank = top ? (SEVERITY_RANK[top.severity] || 0) : 0;
-    fmt.setText(a.el.alarmAssertive, rank >= SEVERITY_RANK.CRITICAL ? text : '');
-    fmt.setText(a.el.alarmPolite, rank > 0 && rank < SEVERITY_RANK.CRITICAL ? text : '');
-  }
+function writeField(rec, kind, value, config) {
+  if (!rec) return;
+  const d = fmt.toDisplay(kind, value, config);
+  setBox(rec, fmt.fmtFixed(d.value, d.decimals), d.unit);
 }
 
 /**
- * Build one alarm banner (§9.4.2): colour bar, glyph, severity word, message, detail, Ack, Silence
- * and the glossary affordance.
+ * Repaint the alarm banner when the active set changes, and keep the two live regions honest.
+ *
+ * The band shows the highest-ranked alarm; when there is none it shows the last caught shell error;
+ * when there is neither it disappears. Only the newest alarm's text is placed in a live region,
+ * rebuilt rather than appended, so a screen reader announces once.
+ *
  * @param {object} a the application instance
- * @param {object} def the `AlarmDef` row from `config.alarms`
- * @param {number} total how many alarms are active in total
- * @returns {Element} the banner
+ * @returns {void}
  */
-function buildBanner(a, def, total) {
-  const sev = def.severity || 'WARN';
-  const banner = h('div', { class: `banner banner--${sev.toLowerCase()}` });
-  banner.appendChild(h('span', { class: 'banner__bar', 'aria-hidden': 'true' }));
-  banner.appendChild(h('span', { class: 'banner__icon', 'aria-hidden': 'true' },
-    SEVERITY_GLYPH[sev] || '!'));
+function refreshAlarmBar(a) {
+  const el = a.el;
+  const top = a.alarm.active[0] || null;
+  const err = a.shellError;
+  const sig = top
+    ? `A:${a.alarm.active.map((d) => d.id).join('|')}#${a.alarm.count}`
+    : (err ? `E:${err.source}:${err.message}` : '');
 
-  banner.appendChild(h('div', { class: 'banner__text' },
-    h('span', { class: 'banner__sev' }, sev),
-    h('span', { class: 'banner__msg' }, def.name),
-    h('span', { class: 'banner__detail' }, describeAlarm(def))));
+  if (sig !== a.alarmSig) {
+    a.alarmSig = sig;
 
-  const actions = h('div', { class: 'banner__actions' });
-  if (def.ackRequired || def.latching) {
-    actions.appendChild(button('btn btn--ghost btn--sm', 'Ack', () => {
-      act(a, () => sim.acknowledgeAlarm(a.ctx, def.id));
-      a.alarmSig = null;
-    }, { 'aria-label': `Acknowledge ${def.name}` }));
+    if (top) {
+      const sev = top.severity || 'WARN';
+      setLamp(el.alarmLamp, SEVERITY_LAMP[sev] || 'warn', `${sev}: ${top.name}`,
+        (SEVERITY_RANK[sev] || 0) >= SEVERITY_RANK.ALARM);
+      fmt.setText(el.alarmSev, SEVERITY_CODE[sev] || sev);
+      fmt.setText(el.alarmTag, alarmTag(top));
+      fmt.setText(el.alarmCode, `${top.id} · ${top.name}`);
+      fmt.setText(el.alarmCond, alarmCondition(top));
+      fmt.setAttr(el.alarmBar, 'title', `${top.id} — ${top.name}. Action ${top.action}.`);
+      fmt.setText(el.alarmCount, String(a.alarm.count));
+      el.alarmCount.hidden = a.alarm.count < 2;
+      el.alarmAckBtn.hidden = !(top.ackRequired || top.latching);
+      fmt.setAttr(el.alarmAckBtn, 'aria-label', `Acknowledge ${top.name}`);
+      el.alarmSilenceBtn.hidden = false;
+      fmt.setAttr(el.alarmSilenceBtn, 'aria-label', `Silence the banner for ${top.name}`);
+      el.alarmMoreBtn.hidden = a.alarm.count < 2;
+      el.errCopyBtn.hidden = true;
+      el.errClearBtn.hidden = true;
+    } else if (err) {
+      setLamp(el.alarmLamp, 'alarm', `Shell error in ${err.source}`, false);
+      fmt.setText(el.alarmSev, 'ERR');
+      fmt.setText(el.alarmTag, err.source.toUpperCase());
+      fmt.setText(el.alarmCode, err.message);
+      fmt.setText(el.alarmCond, '');
+      fmt.setAttr(el.alarmBar, 'title', `${err.source}: ${err.message}`);
+      el.alarmCount.hidden = true;
+      el.alarmAckBtn.hidden = true;
+      el.alarmSilenceBtn.hidden = true;
+      el.alarmMoreBtn.hidden = true;
+      el.errCopyBtn.hidden = false;
+      el.errClearBtn.hidden = false;
+    }
+    el.alarmBar.hidden = !(top || err);
+
+    const topId = top ? top.id : '';
+    if (topId !== a.liveAlarmId) {
+      a.liveAlarmId = topId;
+      const text = top ? `${top.severity}: ${top.name}` : '';
+      const rank = top ? (SEVERITY_RANK[top.severity] || 0) : 0;
+      fmt.setText(el.alarmAssertive, rank >= SEVERITY_RANK.CRITICAL ? text : '');
+      fmt.setText(el.alarmPolite, rank > 0 && rank < SEVERITY_RANK.CRITICAL ? text : '');
+    }
   }
-  actions.appendChild(button('btn btn--ghost btn--sm', 'Silence', () => {
-    a.silenced.add(def.id);
-    a.alarmSig = null;
-    toast(a, `${def.id} hidden from the banner. It is still active and still in the event log.`, 'info');
-  }, {
-    'aria-label': `Silence the banner for ${def.name}`,
-    title: 'Hide this banner for the session. The alarm stays active and stays logged.',
-  }));
-  if (glossaryFor(def.signal || 'alarm-state')) {
-    const info = button('info-dot', 'i', (e) => {
-      showGlossary(a, /** @type {Element} */ (e.currentTarget), def.signal || 'alarm-state');
-    }, { 'aria-label': `What ${def.name} means` });
-    actions.appendChild(info);
-  }
-  if (total > 1) actions.appendChild(h('span', { class: 'banner__count' }, String(total)));
-  banner.appendChild(actions);
-  return banner;
 }
 
 /**
- * One line of context under an alarm's name: what it watches, and what it will do about it.
+ * The ISA tag an alarm watches, for the banner's tag slot.
  * @param {object} def the `AlarmDef` row
- * @returns {string} the detail line
+ * @returns {string} the tag, or the alarm's own family prefix when it watches no single instrument
  */
-function describeAlarm(def) {
-  const parts = [def.id];
-  if (def.signal && def.op && typeof def.threshold === 'number') {
-    parts.push(`${def.signal} ${def.op} ${def.threshold}`);
-  } else if (def.evalKey) {
-    parts.push(def.evalKey);
+function alarmTag(def) {
+  const entry = def.signal ? glossaryFor(def.signal) : null;
+  if (entry && entry.term) {
+    const m = /([A-Z]{2,4}-\d{3})/.exec(entry.term);
+    if (m) return m[1];
   }
-  if (def.persist_s > 0) parts.push(`held ${def.persist_s} s`);
-  parts.push(`action ${def.action}`);
-  return parts.join(' · ');
+  if (def.signal) return def.signal;
+  return def.id.split('-').slice(0, 2).join('-');
 }
 
 /**
- * Repaint the `Ctrl+Alt+P` performance overlay (§6.32). Rows are created once and then written to,
- * so the overlay costs a handful of text assignments per frame.
+ * The trip condition in as few characters as a 24 px band allows: `P1 > 1.60`, or the custom
+ * evaluator's key when there is no simple comparison.
+ * @param {object} def the `AlarmDef` row
+ * @returns {string} the condition
+ */
+function alarmCondition(def) {
+  if (def.signal && def.op && typeof def.threshold === 'number') {
+    return `${def.signal} ${def.op} ${def.threshold}`;
+  }
+  if (def.evalKey) return def.evalKey;
+  return def.action || '';
+}
+
+/**
+ * Repaint the `Ctrl+Alt+P` performance overlay. Rows are created once and then written to, so the
+ * overlay costs a handful of text assignments per frame.
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -1996,29 +2370,29 @@ function renderPerf(a) {
   const run = a.ctx.run;
   const p = a.perf;
   const rows = [
-    ['frame', `${p.frame_ms.toFixed(1)} ms · ${(1000 / Math.max(p.frame_ms, 0.001)).toFixed(0)} fps`],
-    ['sim', `${p.sim_ms.toFixed(2)} ms`],
-    ['render', `${p.render_ms.toFixed(2)} ms`],
-    ['ticks/frame', String(p.ticks)],
-    ['ticks/s', p.tps.toFixed(0)],
-    ['speed', `${run.speed}× → ${formatSpeed(run.speed / Math.max(run.speedDeficit, 1e-9))}×`],
-    ['speedDeficit', run.speedDeficit.toFixed(3)],
-    ['ms/sim-s', run.diag.msPerSimSecond.toFixed(3)],
-    ['ms/tick', run.diag.msLastTick.toFixed(3)],
-    ['nSub', String(run.diag.nSubLast)],
-    ['courant', run.diag.courant.toFixed(3)],
-    ['active cells', String(run.diag.activeCells)],
-    ['nz', String(a.ctx.config.column.nz)],
-    ['boot bench', a.benchmark ? `${a.benchmark.msPerSimSecond.toFixed(2)} ms/sim-s` : 'not run'],
-    ['log rows', String(run.log ? run.log.n : 0)],
+    ['FRAME', `${p.frame_ms.toFixed(1)} ms · ${(1000 / Math.max(p.frame_ms, 0.001)).toFixed(0)} fps`],
+    ['SIM', `${p.sim_ms.toFixed(2)} ms`],
+    ['RENDER', `${p.render_ms.toFixed(2)} ms`],
+    ['TICK/FR', String(p.ticks)],
+    ['TICK/S', p.tps.toFixed(0)],
+    ['SPEED', `${run.speed}× → ${formatSpeed(run.speed / Math.max(run.speedDeficit, 1e-9))}×`],
+    ['DEFICIT', run.speedDeficit.toFixed(3)],
+    ['MS/SIM-S', run.diag.msPerSimSecond.toFixed(3)],
+    ['MS/TICK', run.diag.msLastTick.toFixed(3)],
+    ['NSUB', String(run.diag.nSubLast)],
+    ['COURANT', run.diag.courant.toFixed(3)],
+    ['CELLS', String(run.diag.activeCells)],
+    ['NZ', String(a.ctx.config.column.nz)],
+    ['BENCH', a.benchmark ? `${a.benchmark.msPerSimSecond.toFixed(2)} ms/sim-s` : 'not run'],
+    ['LOG', String(run.log ? run.log.n : 0)],
   ];
 
   if (!a.perfRows || a.perfRows.length !== rows.length) {
     while (a.el.perf.firstChild) a.el.perf.removeChild(a.el.perf.firstChild);
     a.perfRows = rows.map(([k]) => {
-      const value = h('span', { class: 'perf-overlay__v' }, '');
-      a.el.perf.appendChild(h('div', { class: 'perf-overlay__row' },
-        h('span', { class: 'perf-overlay__k' }, k), value));
+      const value = h('span', { class: 'perf__value' }, '');
+      a.el.perf.appendChild(h('div', { class: 'perf__row' },
+        h('span', { class: 'perf__key' }, k), value));
       return value;
     });
   }
@@ -2026,7 +2400,7 @@ function renderPerf(a) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * ERRORS
+ * ERRORS — the alarm band doubles as the shell's failure surface
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
@@ -2039,32 +2413,45 @@ function errText(err) {
 }
 
 /**
- * Surface a caught error in the chrome instead of freezing. The bar is rebuilt, not stacked, so a
- * fault that repeats every frame does not grow the DOM without bound.
+ * Surface a caught error in the alarm band instead of freezing. One error is held at a time, so a
+ * fault that repeats every frame never grows the DOM. An active alarm always outranks it.
  * @param {object} a the application instance
- * @param {string} source where it came from, e.g. `'run view'`
+ * @param {string} source where it came from, e.g. `'main screen'`
  * @param {*} err the thrown value
  * @returns {void}
  */
 function reportError(a, source, err) {
   console.error(`[app] ${source} failed:`, err);
-  const slot = a.el && a.el.errorSlot;
-  if (!slot) return;
-  while (slot.firstChild) slot.removeChild(slot.firstChild);
+  if (!a || !a.el || !a.el.alarmBar) return;
+  a.shellError = {
+    source,
+    message: errText(err),
+    detail: `${source}: ${errText(err)}\n${(err && err.stack) || ''}`,
+  };
+  a.alarmSig = null;
+}
 
-  const bar = h('div', { class: 'shell-error', role: 'alert' },
-    h('span', { class: 'shell-error__msg' }, `${source}: ${errText(err)}`));
-  const actions = h('div', { class: 'shell-error__actions' });
-  actions.appendChild(button('btn btn--ghost btn--sm', 'Copy details', () => {
-    const text = `${source}: ${errText(err)}\n${(err && err.stack) || ''}`;
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text);
-    else console.log(text);
-  }));
-  actions.appendChild(button('btn btn--ghost btn--sm', 'Dismiss', () => {
-    while (slot.firstChild) slot.removeChild(slot.firstChild);
-  }));
-  bar.appendChild(actions);
-  slot.appendChild(bar);
+/**
+ * Copy the held error, stack and all, to the clipboard — the one thing a user can usefully do with
+ * a stack trace.
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function copyShellError(a) {
+  if (!a.shellError) return;
+  const text = a.shellError.detail;
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text);
+  else console.log(text);
+}
+
+/**
+ * Dismiss the held error and let the band close.
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function clearShellError(a) {
+  a.shellError = null;
+  a.alarmSig = null;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -2073,35 +2460,35 @@ function reportError(a, source, err) {
 
 /**
  * @param {string} st a `run.state` value
- * @returns {string} the pill tone class suffix
+ * @returns {'off'|'run'|'warn'|'alarm'} the lamp colour for the run-state lamp
  */
-function stateTone(st) {
+function stateLamp(st) {
   switch (st) {
-    case 'RUNNING': return 'ok';
-    case 'READY': return 'info';
-    case 'ENDED': return 'info';
+    case 'RUNNING': return 'run';
+    case 'READY': return 'run';
+    case 'ENDED': return 'run';
     case 'HELD': return 'warn';
     case 'PAUSED': return 'warn';
     case 'ALARM': return 'alarm';
     case 'FAULT': return 'alarm';
-    default: return 'neutral';
+    default: return 'off';
   }
 }
 
 /**
- * One sentence explaining what a run state permits — the pill's tooltip (§5.5).
+ * One sentence explaining what a run state permits — the state box's tooltip.
  * @param {string} st a `run.state` value
  * @returns {string} the explanation
  */
 function stateExplanation(st) {
   switch (st) {
-    case 'IDLE': return 'Idle — pumps at zero. Start runs the twelve pre-run checks first.';
+    case 'IDLE': return 'Idle — pumps at zero. Start runs the pre-run checks first.';
     case 'READY': return 'Ready — the pre-run checks passed. Start begins the method.';
     case 'RUNNING': return 'Running — the method engine is driving the skid.';
     case 'HELD': return 'Held — flow continues at setpoint; the block clock and block volume are frozen.';
     case 'PAUSED': return 'Paused — flow has ramped to zero and the clock is frozen.';
     case 'ALARM': return 'Alarm — the outlet is diverted to waste. Acknowledge, then Hold or Pause.';
-    case 'ENDED': return 'Ended — the Results tab has the analysis. Reset to arm another run.';
+    case 'ENDED': return 'Ended — the Results screen has the analysis. Reset to arm another run.';
     case 'FAULT': return 'Fault — flow stopped without a ramp. Only Reset recovers.';
     default: return 'Run state';
   }
