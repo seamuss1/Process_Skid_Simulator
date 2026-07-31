@@ -2,17 +2,28 @@
  * @file src/ui/pid.js — the plant P&ID: ISA-5.1 instrument bubbles, service-coloured process lines,
  * beveled equipment, sunken label boxes and the packed-bed canvas painter.
  *
- * The schematic is inline SVG on a `viewBox="0 0 1200 440"` grid drawn in the "FT-CLASSIC" idiom of
+ * The schematic is inline SVG on a `viewBox="0 0 1640 430"` grid drawn in the "FT-CLASSIC" idiom of
  * a FactoryTalk View SE / InTouch operator screen: square corners, beveled grey chrome, sunken
  * near-black label boxes with lime PV digits, round glassy lamps, ISA bubbles wired to their
  * equipment by thin leader lines.
+ *
+ * The 3.81:1 grid is chosen to match the host panel's letterbox: at `xMidYMid meet` inside a
+ * ~1900 x 465 slot the drawing renders ~1772 x 435 and the dead margin drops to well under 70 px a
+ * side.  Equipment is spread across that width in process order — tank farm along the top, feed
+ * train (P-101, M-101, F-101, AT-101, IV-101) across the left-centre, the column and CV-101 in the
+ * centre, the analyser train right-centre, the fraction collector far right and the waste header
+ * along the bottom — with ISA hop arcs wherever two runs cross.
+ *
+ * Text is deliberately scarce: a tag, a loop number and a value.  Recipe descriptions ("0.5 M
+ * NaOH", "Equilibration buffer") are NOT drawn — they live in the hover tooltip and the faceplate,
+ * which is where the operator asks for them.
  *
  * Static geometry is authored once in {@link PID_TEMPLATE} and injected with `innerHTML` at panel
  * construction ONLY; every subsequent update writes `class` / `style` / `transform` / `textContent`
  * / `d` on `id`-tagged nodes.  The SVG is never re-serialised.
  *
  * The packed bed is a sibling absolutely-positioned `<canvas>` aligned to the vessel interior at
- * SVG (508,134)-(612,366) — 104 x 232 schematic units — painted by {@link paintBed} from
+ * SVG (840,158)-(960,376) — 120 x 218 schematic units — painted by {@link paintBed} from
  * `physics/bed.js::bedAxialSnapshot`.
  *
  * This module is READ-ONLY over `config` and `run`.  Every mutation goes through `ctx.sim`.
@@ -28,18 +39,18 @@ import * as overlay from './overlay.js';
  * =============================================================================================*/
 
 /** Schematic viewBox width, user units. @type {number} */
-const VIEW_W = 1200;
+const VIEW_W = 1640;
 /** Schematic viewBox height, user units. @type {number} */
-const VIEW_H = 440;
+const VIEW_H = 430;
 
 /** Bed canvas left edge, schematic units. @type {number} */
-const BED_X = 508;
+const BED_X = 840;
 /** Bed canvas top edge, schematic units. @type {number} */
-const BED_Y = 134;
+const BED_Y = 158;
 /** Bed canvas logical width. @type {number} */
-const BED_W = 104;
+const BED_W = 120;
 /** Bed canvas logical height. @type {number} */
-const BED_H = 232;
+const BED_H = 218;
 
 /** Maximum bed-top compression offset, px — matches `bed.js::BED_TOP_OFFSET_MAX_PX`. */
 const BED_TOP_MAX_PX = 18;
@@ -62,11 +73,77 @@ const BED_BUDGET_MS = 2.0;
 /** Dash travel at full pump flow, schematic units per second. */
 const DASH_PX_PER_S_AT_QMAX = 44;
 
-/** Tank cell origins in visual order CIP, A, B, S — indexed by display slot [a,b,s,cip]. */
-const TANK_X = [148, 280, 412, 16];
+/* -----------------------------------------------------------------------------------------------
+ * Layout table.  Every schematic coordinate the update loop also has to know lives here, so the
+ * drawing and the code that animates it can never drift apart.
+ * ---------------------------------------------------------------------------------------------*/
 
+/** Tank cell origins in visual order CIP, A, B, S — indexed by display slot [a,b,s,cip]. */
+const TANK_X = [266, 496, 726, 36];
+
+/** Tank vessel width, schematic units. */
+const TANK_W = 110;
+/** Tank vessel top edge. */
+const TANK_TOP = 28;
+/** Tank vessel height. */
+const TANK_H = 72;
+/** Tank vessel bottom edge. */
+const TANK_BOT = TANK_TOP + TANK_H;
 /** Tank cell drop-pipe x offset from the cell origin. */
-const TANK_DROP_DX = 24;
+const TANK_DROP_DX = 30;
+
+/** Air trap body box. */
+const TRAP_X = 388;
+/** Air trap body width. */
+const TRAP_W = 54;
+/** Air trap body top edge. */
+const TRAP_TOP = 214;
+/** Air trap body height. */
+const TRAP_H = 74;
+/** Air trap body bottom edge. */
+const TRAP_BOT = TRAP_TOP + TRAP_H;
+
+/** System pump centre x. */
+const PUMP_CX = 66;
+/** System pump centre y. */
+const PUMP_CY = 252;
+
+/** Mini axial profile baseline x — the column's internal ordinate axis. */
+const COL_AXIS_X = 962;
+/** Mini axial profile full-scale deflection, schematic units. */
+const COL_PROFILE_W = 16;
+
+/** Waste container box. */
+const WASTE_X = 36;
+/** Waste container top edge. */
+const WASTE_Y = 350;
+/** Waste container width. */
+const WASTE_W = 104;
+/** Waste container height. */
+const WASTE_H = 62;
+/** Waste container bottom edge. */
+const WASTE_BOT = WASTE_Y + WASTE_H;
+
+/** Fraction-collector first vial left edge. */
+const VIAL_X0 = 1356;
+/** Fraction-collector total vial run width. */
+const VIAL_SPAN = 256;
+/** Fraction-collector vial top edge. */
+const VIAL_TOP = 366;
+/** Fraction-collector vial height. */
+const VIAL_H = 46;
+/** Fraction-collector vial bottom edge. */
+const VIAL_BOT = VIAL_TOP + VIAL_H;
+/** Fraction-collector transfer-head parked x. */
+const VIAL_PARK_X = 1360;
+
+/** Column-valve travel-arc radius. */
+const CV_ARC_R = 27;
+/** Diverter-valve travel-arc radius. */
+const DV_ARC_R = 20;
+
+/** Default ISA instrument-bubble radius. */
+const BUBBLE_R = 19;
 
 /* ===============================================================================================
  * 2.  THEME TOKENS  (FT-CLASSIC)
@@ -363,6 +440,36 @@ function bevel(x, y, w, h, sunken) {
     + `<path class="${i2}" d="M${R - 1},${T + 1} V${B - 1} H${L + 1}"/>`;
 }
 
+/** Right-hand padding inside a label box, schematic units. @type {number} */
+const FLD_PAD = 3;
+/** Guaranteed clear gutter between the value digits and the EU suffix. @type {number} */
+const FLD_GUTTER = 3;
+
+/**
+ * Upper bound on the rendered width of an EU suffix at the 8 px `.pid-fld-eu` size.
+ *
+ * `--font-num` is a *preference*, not a promise: when the host stylesheet leaves it undefined the
+ * suffix renders in the proportional UI face, where `mAU` is 32 % wider than a monospace estimate
+ * would predict — which is exactly how the value digits used to end up sitting on top of it.  The
+ * three weights below are measured maxima for that face and over-reserve for a monospace one, so
+ * the gutter survives either resolution.
+ *
+ * @param {string} eu the engineering-unit suffix
+ * @returns {number} reserved width, schematic units
+ */
+function euWidth(eu) {
+  if (!eu) return 0;
+  let w = 0;
+  for (let i = 0; i < eu.length; i++) {
+    const c = eu.charAt(i);
+    if (c >= 'A' && c <= 'Z') w += 6.4;
+    else if (c === '%') w += 6.6;
+    else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) w += 5;
+    else w += 4.4;
+  }
+  return w;
+}
+
 /**
  * A sunken label box: near-black field, right-aligned tabular value, dim EU suffix.
  * @param {string} id element id stem — the value text gets `${id}-v`
@@ -375,20 +482,26 @@ function bevel(x, y, w, h, sunken) {
  * @returns {string} SVG markup
  */
 function fld(id, x, y, w, h, eu, kind) {
-  const euW = eu ? eu.length * 4.3 + 3 : 0;
+  const euW = eu ? euWidth(eu) + FLD_GUTTER : 0;
   const base = y + h - Math.max(4, (h - 10) / 2);
   return `<g id="${id}" class="pid-fld${kind ? ' pid-fld--' + kind : ''}">`
     + `<rect class="pid-fld-bg" x="${x}" y="${y}" width="${w}" height="${h}"/>`
     + bevel(x, y, w, h, true)
-    + `<text id="${id}-v" class="pid-fld-v" x="${(x + w - 4 - euW).toFixed(1)}" `
+    + `<text id="${id}-v" class="pid-fld-v" x="${(x + w - FLD_PAD - euW).toFixed(1)}" `
     + `y="${base.toFixed(1)}" text-anchor="end">—</text>`
-    + (eu ? `<text class="pid-fld-eu" x="${x + w - 3}" y="${base.toFixed(1)}" `
+    + (eu ? `<text class="pid-fld-eu" x="${x + w - FLD_PAD}" y="${base.toFixed(1)}" `
       + `text-anchor="end">${eu}</text>` : '')
     + '</g>';
 }
 
 /**
  * An ISA-5.1 field instrument bubble: plain circle, function letters over loop number.
+ *
+ * Both lines are `dominant-baseline:middle`, so `dy = -3` and `dy = +8` place their *optical*
+ * centres, not their baselines.  At 8.5 px and 7.5 px that puts the function-letter box at
+ * `cy-8.1 .. cy+2.1` and the loop box at `cy+3.5 .. cy+12.5` — 1.4 px of clear air between them
+ * and 6.5 px of margin inside an `r = 19` ring.
+ *
  * @param {string} id element id
  * @param {number} cx centre x
  * @param {number} cy centre y
@@ -398,11 +511,11 @@ function fld(id, x, y, w, h, eu, kind) {
  * @returns {string} SVG markup
  */
 function bubble(id, cx, cy, fn, loop, r) {
-  const rr = r || 13;
+  const rr = r || BUBBLE_R;
   return `<g id="${id}" class="pid-bub">`
     + `<circle class="pid-bub-c" cx="${cx}" cy="${cy}" r="${rr}"/>`
-    + `<text class="pid-bub-t" x="${cx}" y="${cy - 1}" text-anchor="middle">${fn}</text>`
-    + `<text class="pid-bub-t" x="${cx}" y="${cy + 8}" text-anchor="middle">${loop}</text>`
+    + `<text class="pid-bub-t pid-bub-fn" x="${cx}" y="${cy - 3}" text-anchor="middle">${fn}</text>`
+    + `<text class="pid-bub-t pid-bub-lp" x="${cx}" y="${cy + 8}" text-anchor="middle">${loop}</text>`
     + '</g>';
 }
 
@@ -468,16 +581,16 @@ function valveV(id, cx, cy, comp, label, tag) {
     + '</g>';
 }
 
-/** Column-valve internal channel geometry, per position.  Local coords, port radius 16. */
+/** Column-valve internal channel geometry, per position.  Local coords, port radius 20. */
 const CV_CHANNELS = {
   // IN(W) -> column TOP(S) straight through, and column BOTTOM(N) -> detectors(E) hopping over it.
-  DOWN: 'M-16,0 L-6,0 Q0,0 0,6 L0,16 M0,-16 L0,-6 Q0,0 6,0 L16,0',
+  DOWN: 'M-20,0 L-8,0 Q0,0 0,8 L0,20 M0,-20 L0,-8 Q0,0 8,0 L20,0',
   // IN(W) -> column BOTTOM(N), and column TOP(S) -> detectors(E).
-  UP: 'M-16,0 L-6,0 Q0,0 0,-6 L0,-16 M0,16 L0,6 Q0,0 6,0 L16,0',
+  UP: 'M-20,0 L-8,0 Q0,0 0,-8 L0,-20 M0,20 L0,8 Q0,0 8,0 L20,0',
   // IN(W) -> detectors(E): the column is out of line.
-  BYPASS: 'M-16,0 H16',
+  BYPASS: 'M-20,0 H20',
   ISOLATED: '',
-  CIP_DETECTOR_BYPASS: 'M-16,0 L-6,0 Q0,0 0,6 L0,16 M0,-16 L0,-6 Q0,0 6,0 L16,0',
+  CIP_DETECTOR_BYPASS: 'M-20,0 L-8,0 Q0,0 0,8 L0,20 M0,-20 L0,-8 Q0,0 8,0 L20,0',
 };
 
 /** Which column-valve ports are capped (dead-ended) in each position. */
@@ -494,16 +607,16 @@ const CV_ROTOR_DEG = {
 };
 
 /**
- * Injection-valve internal channels, by sample mode.  Ports (local, r = 18): FEED W, COLUMN E,
+ * Injection-valve internal channels, by sample mode.  Ports (local, r = 22): FEED W, COLUMN E,
  * LOOP_A NW, LOOP_B NE, SAMPLE SE, WASTE SW.
  */
 const IV_CHANNELS = {
   // Pump straight to the column; the sample line charges the loop and overflows to waste.
-  LOAD: 'M-18,0 H18 M15.6,9 L-15.6,-9 M15.6,-9 L-15.6,9',
+  LOAD: 'M-22,0 H22 M19.05,11 L-19.05,-11 M19.05,-11 L-19.05,11',
   // Pump pushes the loop contents onto the column.
-  INJECT: 'M-18,0 L-15.6,-9 M15.6,-9 L18,0 M15.6,9 L-15.6,9',
+  INJECT: 'M-22,0 L-19.05,-11 M19.05,-11 L22,0 M19.05,11 L-19.05,11',
   // Sample and buffer both reach the column through the injection tee.
-  DIRECT: 'M-18,0 H18 M15.6,9 L4,1.5',
+  DIRECT: 'M-22,0 H22 M19.05,11 L5,1.8',
 };
 
 /* ===============================================================================================
@@ -512,6 +625,11 @@ const IV_CHANNELS = {
 
 /**
  * One tank cell: vessel, level fill, LT bubble, level label box and low-level lamp.
+ *
+ * The cell carries the SERVICE name and the level readout and nothing else.  The recipe
+ * description that used to sit on the same 20 px baseline (and collided with it, and truncated) is
+ * gone from the drawing — `liveLineFor` hands it to the tooltip and the faceplate instead.
+ *
  * @param {number} i the display slot index (0 = A, 1 = B, 2 = S, 3 = CIP)
  * @param {string} comp the `data-component` id
  * @param {string} role the printed role tag
@@ -524,21 +642,21 @@ function tankCell(i, comp, role, label, lt) {
   const dx = x + TANK_DROP_DX;
   return `<g id="pid-tk${i}" class="pid-tank">`
     + `<text id="pid-tk${i}-role" class="pid-tag" x="${x}" y="20">${role}</text>`
-    + `<text id="pid-tk${i}-id" class="pid-tag pid-tag--dim" x="${x + 72}" y="20" `
-    + 'text-anchor="end">—</text>'
-    + `<rect class="pid-tank-bg" x="${x}" y="26" width="72" height="74"/>`
+    + `<rect class="pid-tank-bg" x="${x}" y="${TANK_TOP}" width="${TANK_W}" height="${TANK_H}"/>`
     + `<g clip-path="url(#pid-clip-tk${i})">`
-    + `<rect id="pid-tk${i}-fill" class="pid-tank-fill" x="${x}" y="70" width="72" height="30"/>`
-    + `<line id="pid-tk${i}-men" class="pid-tank-men" x1="${x}" y1="70" x2="${x + 72}" y2="70"/>`
+    + `<rect id="pid-tk${i}-fill" class="pid-tank-fill" x="${x}" y="70" `
+    + `width="${TANK_W}" height="30"/>`
+    + `<line id="pid-tk${i}-men" class="pid-tank-men" x1="${x}" y1="70" `
+    + `x2="${x + TANK_W}" y2="70"/>`
     + '</g>'
-    + bevel(x, 26, 72, 74, true)
-    + leader(`M${x + 72},42 H${x + 85}`)
-    + bubble('pid-tk' + i + '-bub', x + 98, 42, 'LT', lt)
-    + fld('pid-tk' + i + '-lv', x + 76, 62, 54, 17, 'L')
-    + lamp('pid-tk' + i + '-lamp', x + 100, 88, 5.5)
-    + hit(comp, x, 26, 72, 74, label)
-    + hit(comp + '-LT', x + 85, 29, 26, 26, label + ' level transmitter')
-    + `<path class="pid-tank-nozzle" d="M${dx},100 V104"/>`
+    + bevel(x, TANK_TOP, TANK_W, TANK_H, true)
+    + leader(`M${x + TANK_W},44 H${x + 123}`)
+    + bubble('pid-tk' + i + '-bub', x + 142, 44, 'LT', lt)
+    + fld('pid-tk' + i + '-lv', x + 166, 35, 52, 18, 'L')
+    + lamp('pid-tk' + i + '-lamp', x + 142, 78, 5.5)
+    + hit(comp, x, TANK_TOP, TANK_W, TANK_H, label)
+    + hit(comp + '-LT', x + 123, 25, 38, 38, label + ' level transmitter')
+    + `<path class="pid-tank-nozzle" d="M${dx},${TANK_BOT} V${TANK_BOT + 6}"/>`
     + '</g>';
 }
 
@@ -554,16 +672,16 @@ function tankCell(i, comp, role, label, lt) {
  */
 function detector(id, y, tag, glyph, comp, label) {
   return `<g id="${id}" class="pid-det">`
-    + `<rect class="pid-det-bg" x="700" y="${y}" width="80" height="40"/>`
-    + bevel(700, y, 80, 40, false)
-    + `<text class="pid-tag" x="705" y="${y + 13}">${tag}</text>`
-    + `<path class="pid-det-glyph" transform="translate(700,${y})" d="${glyph}"/>`
-    + hit(comp, 700, y, 80, 40, label)
+    + `<rect class="pid-det-bg" x="1060" y="${y}" width="110" height="46"/>`
+    + bevel(1060, y, 110, 46, false)
+    + `<text class="pid-tag" x="1066" y="${y + 14}">${tag}</text>`
+    + `<path class="pid-det-glyph" transform="translate(1060,${y})" d="${glyph}"/>`
+    + hit(comp, 1060, y, 110, 46, label)
     + '</g>';
 }
 
 /**
- * The complete static schematic markup, `viewBox="0 0 1200 440"`.
+ * The complete static schematic markup, `viewBox="0 0 1640 430"`.
  *
  * Injected with `innerHTML` exactly once, at panel construction.  Elements that change carry an
  * `id`; pipe runs carry `data-seg`; interactive components carry `data-component` on a transparent
@@ -576,12 +694,18 @@ export const PID_TEMPLATE = `
 <svg class="pid-svg" viewBox="0 0 ${VIEW_W} ${VIEW_H}" preserveAspectRatio="xMidYMid meet"
      role="group" aria-label="Process and instrumentation diagram">
   <defs>
-    <clipPath id="pid-clip-tk0"><rect x="${TANK_X[0]}" y="26" width="72" height="74"/></clipPath>
-    <clipPath id="pid-clip-tk1"><rect x="${TANK_X[1]}" y="26" width="72" height="74"/></clipPath>
-    <clipPath id="pid-clip-tk2"><rect x="${TANK_X[2]}" y="26" width="72" height="74"/></clipPath>
-    <clipPath id="pid-clip-tk3"><rect x="${TANK_X[3]}" y="26" width="72" height="74"/></clipPath>
-    <clipPath id="pid-clip-waste"><rect x="40" y="340" width="72" height="64"/></clipPath>
-    <clipPath id="pid-clip-trap"><rect x="276" y="166" width="40" height="58"/></clipPath>
+    <clipPath id="pid-clip-tk0"><rect x="${TANK_X[0]}" y="${TANK_TOP}" width="${TANK_W}"
+      height="${TANK_H}"/></clipPath>
+    <clipPath id="pid-clip-tk1"><rect x="${TANK_X[1]}" y="${TANK_TOP}" width="${TANK_W}"
+      height="${TANK_H}"/></clipPath>
+    <clipPath id="pid-clip-tk2"><rect x="${TANK_X[2]}" y="${TANK_TOP}" width="${TANK_W}"
+      height="${TANK_H}"/></clipPath>
+    <clipPath id="pid-clip-tk3"><rect x="${TANK_X[3]}" y="${TANK_TOP}" width="${TANK_W}"
+      height="${TANK_H}"/></clipPath>
+    <clipPath id="pid-clip-waste"><rect x="${WASTE_X}" y="${WASTE_Y}" width="${WASTE_W}"
+      height="${WASTE_H}"/></clipPath>
+    <clipPath id="pid-clip-trap"><rect x="${TRAP_X}" y="${TRAP_TOP}" width="${TRAP_W}"
+      height="${TRAP_H}"/></clipPath>
     <pattern id="pid-hazard" width="8" height="8" patternUnits="userSpaceOnUse"
              patternTransform="rotate(45)">
       <rect width="8" height="8" class="pid-hz-bg"/>
@@ -596,35 +720,35 @@ export const PID_TEMPLATE = `
 
   <!-- ============================ PROCESS LINES (idle layer) ============================ -->
   <g id="pid-pipes" class="pid-pipes" fill="none">
-    <path data-seg="s-tank-c"    d="M40,104 V123"/>
-    <path data-seg="s-tank-a"    d="M172,104 V123"/>
-    <path data-seg="s-tank-b"    d="M304,104 V123"/>
-    <path data-seg="s-tank-s"    d="M436,104 V123"/>
-    <path data-seg="s-drop-c"    d="M40,145 V160"/>
-    <path data-seg="s-drop-a"    d="M172,145 V160"/>
-    <path data-seg="s-drop-b"    d="M304,145 V160"/>
-    <path data-seg="s-drop-s"    d="M436,145 V330 H400 V304"/>
-    <path data-seg="s-hdr-2"     d="M304,160 H172"/>
-    <path data-seg="s-hdr-1"     d="M172,160 H40 V180"/>
-    <path data-seg="s-pump-out"  d="M60,200 H96"/>
-    <path data-seg="s-mix-out"   d="M164,200 H196"/>
-    <path data-seg="s-filt-out"  d="M244,200 H276"/>
-    <path data-seg="s-trap-out"  d="M316,200 H352"/>
-    <path data-seg="s-samp-disc" d="M400,276 V209 L385.6,209"/>
-    <path data-seg="s-loop"      d="M354.4,191 L348,177 H392 L385.6,191"/>
-    <path data-seg="s-iv-vent"   d="M354.4,209 L344,224 V428"/>
-    <path data-seg="s-iv-out"    d="M388,200 H430 A6,6 0 0,1 442,200 H460 V92 H544"/>
-    <path data-seg="s-cv-top"    d="M560,108 V120"/>
-    <path data-seg="s-col-bot"   d="M560,374 V390 H648 V60 H560 V76"/>
-    <path data-seg="s-cv-out"    d="M576,92 H642 A6,6 0 0,1 654,92 H740 V126"/>
-    <path data-seg="s-det-in"    d="M740,126 V150"/>
-    <path data-seg="s-uv-ce"     d="M740,190 V216"/>
-    <path data-seg="s-ce-ae"     d="M740,256 V282"/>
-    <path data-seg="s-det-out"   d="M740,322 V336 H820"/>
-    <path data-seg="s-cip-shunt" d="M740,126 H690 V366 H820 V336"/>
-    <path data-seg="s-dv-in"     d="M820,336 H846"/>
-    <path data-seg="s-waste"     d="M862,352 V428 H28 V356 H40"/>
-    <path data-seg="s-collect"   d="M878,336 H960 V344"/>
+    <path data-seg="s-tank-c"    d="M66,106 V133"/>
+    <path data-seg="s-tank-a"    d="M296,106 V133"/>
+    <path data-seg="s-tank-b"    d="M526,106 V133"/>
+    <path data-seg="s-tank-s"    d="M756,106 V133"/>
+    <path data-seg="s-drop-c"    d="M66,155 V176"/>
+    <path data-seg="s-drop-a"    d="M296,155 V176"/>
+    <path data-seg="s-drop-b"    d="M526,155 V176"/>
+    <path data-seg="s-drop-s"    d="M756,155 V300 H717"/>
+    <path data-seg="s-hdr-2"     d="M526,176 H296"/>
+    <path data-seg="s-hdr-1"     d="M296,176 H66 V228"/>
+    <path data-seg="s-pump-out"  d="M90,252 H136"/>
+    <path data-seg="s-mix-out"   d="M244,252 H282"/>
+    <path data-seg="s-filt-out"  d="M350,252 H388"/>
+    <path data-seg="s-trap-out"  d="M442,252 H538"/>
+    <path data-seg="s-samp-disc" d="M683,300 H610 V263 H579.05"/>
+    <path data-seg="s-loop"      d="M540.95,241 L534,226 H586 L579.05,241"/>
+    <path data-seg="s-iv-vent"   d="M540.95,263 L528,280 V424"/>
+    <path data-seg="s-iv-out"    d="M582,252 H744 A12,12 0 0,1 768,252 H790 V112 H880"/>
+    <path data-seg="s-cv-top"    d="M900,132 V140"/>
+    <path data-seg="s-col-bot"   d="M900,394 V412 H1000 V66 H900 V92"/>
+    <path data-seg="s-cv-out"    d="M920,112 H988 A12,12 0 0,1 1012,112 H1115 V140"/>
+    <path data-seg="s-det-in"    d="M1115,140 V166"/>
+    <path data-seg="s-uv-ce"     d="M1115,212 V240"/>
+    <path data-seg="s-ce-ae"     d="M1115,286 V314"/>
+    <path data-seg="s-det-out"   d="M1115,360 V392 H1274"/>
+    <path data-seg="s-cip-shunt" d="M1115,140 H1040 V404 H1274 V392"/>
+    <path data-seg="s-dv-in"     d="M1274,392 H1290"/>
+    <path data-seg="s-waste"     d="M1306,408 V424 H26 V380 H${WASTE_X}"/>
+    <path data-seg="s-collect"   d="M1322,392 H1340 V348 H1362"/>
   </g>
 
   <!-- flow dashes + inline arrowheads are populated at mount -->
@@ -638,251 +762,258 @@ export const PID_TEMPLATE = `
   ${tankCell(2, 'TK-S', 'SAMPLE', 'Sample tank', '103')}
 
   <!-- ============================ INLET VALVES ============================ -->
-  ${valveV('pid-v-V4', 40, 134, 'V4', 'CIP inlet valve V4', 'V4')}
-  ${valveV('pid-v-V1', 172, 134, 'V1', 'Buffer A inlet valve V1', 'V1')}
-  ${valveV('pid-v-V2', 304, 134, 'V2', 'Buffer B inlet valve V2', 'V2')}
-  ${valveV('pid-v-V3', 436, 134, 'V3', 'Sample inlet valve V3', 'V3')}
+  ${valveV('pid-v-V4', 66, 144, 'V4', 'CIP inlet valve V4', 'V4')}
+  ${valveV('pid-v-V1', 296, 144, 'V1', 'Buffer A inlet valve V1', 'V1')}
+  ${valveV('pid-v-V2', 526, 144, 'V2', 'Buffer B inlet valve V2', 'V2')}
+  ${valveV('pid-v-V3', 756, 144, 'V3', 'Sample inlet valve V3', 'V3')}
 
   <!-- ============================ PUMPS ============================ -->
   <g id="pid-pump" class="pid-mach">
-    <circle class="pid-mach-b" cx="40" cy="200" r="20"/>
-    <g id="pid-impeller" class="pid-impeller" transform="rotate(0,40,200)">
-      <path d="M40,187 L43.4,200 L36.6,200 Z"/>
-      <path d="M51.3,206.5 L41,203.6 L44.2,197.9 Z"/>
-      <path d="M28.7,206.5 L35.8,197.9 L39,203.6 Z"/>
-      <circle class="pid-impeller-hub" cx="40" cy="200" r="2.8"/>
+    <circle class="pid-mach-b" cx="${PUMP_CX}" cy="${PUMP_CY}" r="24"/>
+    <g id="pid-impeller" class="pid-impeller" transform="rotate(0,${PUMP_CX},${PUMP_CY})">
+      <path d="M66,236.4 L70.1,252 L61.9,252 Z"/>
+      <path d="M79.6,259.8 L67.2,256.3 L71,249.5 Z"/>
+      <path d="M52.4,259.8 L61,249.5 L64.8,256.3 Z"/>
+      <circle class="pid-impeller-hub" cx="${PUMP_CX}" cy="${PUMP_CY}" r="3.4"/>
     </g>
-    <text class="pid-tag" x="40" y="231" text-anchor="middle">P-101</text>
-    ${hit('P-101', 20, 180, 40, 40, 'System pump P-101')}
+    <text class="pid-tag" x="${PUMP_CX}" y="288" text-anchor="middle">P-101</text>
+    ${hit('P-101', 42, 228, 48, 48, 'System pump P-101')}
   </g>
   <g id="pid-pump-s" class="pid-mach">
-    <circle class="pid-mach-b" cx="400" cy="290" r="14"/>
-    <path class="pid-impeller-static" d="M400,281 L402.4,290 L397.6,290 Z
-                                         M407.6,294.6 L400.7,292.5 L403,288.6 Z
-                                         M392.4,294.6 L397,288.6 L399.3,292.5 Z"/>
-    <text class="pid-tag" x="418" y="293">P-102</text>
-    ${hit('P-102', 386, 276, 28, 28, 'Sample pump P-102')}
+    <circle class="pid-mach-b" cx="700" cy="300" r="17"/>
+    <path class="pid-impeller-static" d="M700,289.1 L702.9,300 L697.1,300 Z
+                                         M709.2,305.6 L700.9,303 L703.6,298.3 Z
+                                         M690.8,305.6 L696.4,298.3 L699.1,303 Z"/>
+    <text class="pid-tag" x="700" y="328" text-anchor="middle">P-102</text>
+    ${hit('P-102', 683, 283, 34, 34, 'Sample pump P-102')}
   </g>
 
   <!-- ============================ MIXER / FILTER / AIR TRAP ============================ -->
   <g id="pid-mixer" class="pid-eq">
-    <rect class="pid-eq-bg" x="96" y="176" width="68" height="48"/>
-    ${bevel(96, 176, 68, 48, false)}
-    <path class="pid-eq-glyph" d="M102,218 L112,183 L122,218 L132,183 L142,218 L152,183"/>
-    <text class="pid-tag" x="130" y="172" text-anchor="middle">M-101</text>
-    ${hit('M-101', 96, 176, 68, 48, 'Gradient mixer M-101')}
+    <rect class="pid-eq-bg" x="136" y="226" width="108" height="52"/>
+    ${bevel(136, 226, 108, 52, false)}
+    <path class="pid-eq-glyph" d="M142,272 L154,232 L166,272 L178,232 L190,272 L202,232
+                                  L214,272 L226,232 L238,272"/>
+    <text class="pid-tag" x="190" y="220" text-anchor="middle">M-101</text>
+    ${hit('M-101', 136, 226, 108, 52, 'Gradient mixer M-101')}
   </g>
   <g id="pid-filter" class="pid-eq">
-    <rect class="pid-eq-bg" x="196" y="178" width="48" height="44"/>
-    ${bevel(196, 178, 48, 44, false)}
-    <path class="pid-eq-glyph" d="M200,188 H240 M200,196 H240 M200,204 H240 M200,212 H240"/>
-    <text class="pid-tag" x="220" y="174" text-anchor="middle">F-101</text>
-    ${hit('F-101', 196, 178, 48, 44, 'Inline filter F-101')}
+    <rect class="pid-eq-bg" x="282" y="228" width="68" height="48"/>
+    ${bevel(282, 228, 68, 48, false)}
+    <path class="pid-eq-glyph" d="M287,238 H345 M287,247 H345 M287,256 H345 M287,265 H345"/>
+    <text class="pid-tag" x="316" y="222" text-anchor="middle">F-101</text>
+    ${hit('F-101', 282, 228, 68, 48, 'Inline filter F-101')}
   </g>
   <g id="pid-trap" class="pid-eq">
-    <line class="pid-vent" x1="306" y1="166" x2="306" y2="158"/>
-    <line class="pid-vent" x1="300" y1="158" x2="312" y2="158"/>
-    <rect class="pid-eq-bg" x="276" y="166" width="40" height="58"/>
+    <line class="pid-vent" x1="415" y1="${TRAP_TOP}" x2="415" y2="204"/>
+    <line class="pid-vent" x1="408" y1="204" x2="422" y2="204"/>
+    <rect class="pid-eq-bg" x="${TRAP_X}" y="${TRAP_TOP}" width="${TRAP_W}" height="${TRAP_H}"/>
     <g clip-path="url(#pid-clip-trap)">
-      <rect id="pid-trap-liq" class="pid-trap-liq" x="276" y="188" width="40" height="36"/>
-      <line id="pid-trap-men" class="pid-tank-men" x1="276" y1="188" x2="316" y2="188"/>
+      <rect id="pid-trap-liq" class="pid-trap-liq" x="${TRAP_X}" y="240" width="${TRAP_W}"
+            height="48"/>
+      <line id="pid-trap-men" class="pid-tank-men" x1="${TRAP_X}" y1="240"
+            x2="${TRAP_X + TRAP_W}" y2="240"/>
     </g>
-    ${bevel(276, 166, 40, 58, true)}
-    <text class="pid-tag" x="320" y="172">AT-101</text>
-    ${hit('AT-101', 276, 166, 40, 58, 'Air trap AT-101')}
+    ${bevel(TRAP_X, TRAP_TOP, TRAP_W, TRAP_H, true)}
+    <text class="pid-tag" x="446" y="220">AT-101</text>
+    ${hit('AT-101', TRAP_X, TRAP_TOP, TRAP_W, TRAP_H, 'Air trap AT-101')}
   </g>
 
   <!-- ============================ INJECTION VALVE ============================ -->
-  <g id="pid-iv" class="pid-rot" transform="translate(370,200)">
-    <circle class="pid-rot-b" cx="0" cy="0" r="18"/>
+  <g id="pid-iv" class="pid-rot" transform="translate(560,252)">
+    <circle class="pid-rot-b" cx="0" cy="0" r="22"/>
     <g class="pid-rot-ports">
-      <circle cx="-18" cy="0" r="2.2"/><circle cx="18" cy="0" r="2.2"/>
-      <circle cx="-15.6" cy="-9" r="2.2"/><circle cx="15.6" cy="-9" r="2.2"/>
-      <circle cx="-15.6" cy="9" r="2.2"/><circle cx="15.6" cy="9" r="2.2"/>
+      <circle cx="-22" cy="0" r="2.4"/><circle cx="22" cy="0" r="2.4"/>
+      <circle cx="-19.05" cy="-11" r="2.4"/><circle cx="19.05" cy="-11" r="2.4"/>
+      <circle cx="-19.05" cy="11" r="2.4"/><circle cx="19.05" cy="11" r="2.4"/>
     </g>
     <path id="pid-iv-ch" class="pid-rot-ch" d=""/>
-    <text class="pid-tag" x="26" y="-14">IV-101</text>
-    <text id="pid-iv-mode" class="pid-tag pid-tag--state" x="0" y="40"
+    <text class="pid-tag" x="30" y="-8">IV-101</text>
+    <text id="pid-iv-mode" class="pid-tag pid-tag--state" x="0" y="42"
           text-anchor="middle">LOAD</text>
-    ${hit('IV-101', -19, -19, 38, 38, 'Injection valve IV-101')}
+    ${hit('IV-101', -23, -23, 46, 46, 'Injection valve IV-101')}
   </g>
 
   <!-- ============================ COLUMN VALVE ============================ -->
-  <g id="pid-cv" class="pid-rot" transform="translate(560,92)">
-    <circle class="pid-rot-b" cx="0" cy="0" r="16"/>
+  <g id="pid-cv" class="pid-rot" transform="translate(900,112)">
+    <circle class="pid-rot-b" cx="0" cy="0" r="20"/>
     <g class="pid-rot-ports">
-      <circle cx="0" cy="-16" r="2.2"/><circle cx="16" cy="0" r="2.2"/>
-      <circle cx="0" cy="16" r="2.2"/><circle cx="-16" cy="0" r="2.2"/>
+      <circle cx="0" cy="-20" r="2.4"/><circle cx="20" cy="0" r="2.4"/>
+      <circle cx="0" cy="20" r="2.4"/><circle cx="-20" cy="0" r="2.4"/>
     </g>
     <path id="pid-cv-ch" class="pid-rot-ch" d=""/>
     <g id="pid-cv-caps" class="pid-rot-caps">
-      <line id="pid-cv-cap-n" x1="-4.5" y1="-11" x2="4.5" y2="-11"/>
-      <line id="pid-cv-cap-e" x1="11" y1="-4.5" x2="11" y2="4.5"/>
-      <line id="pid-cv-cap-s" x1="-4.5" y1="11" x2="4.5" y2="11"/>
-      <line id="pid-cv-cap-w" x1="-11" y1="-4.5" x2="-11" y2="4.5"/>
+      <line id="pid-cv-cap-n" x1="-5.5" y1="-14" x2="5.5" y2="-14"/>
+      <line id="pid-cv-cap-e" x1="14" y1="-5.5" x2="14" y2="5.5"/>
+      <line id="pid-cv-cap-s" x1="-5.5" y1="14" x2="5.5" y2="14"/>
+      <line id="pid-cv-cap-w" x1="-14" y1="-5.5" x2="-14" y2="5.5"/>
     </g>
     <g id="pid-cv-rotor" class="pid-rot-rotor">
-      <path d="M0,-22 L3.6,-27 L-3.6,-27 Z"/>
-      <line x1="0" y1="-16" x2="0" y2="-22"/>
+      <path d="M0,-27 L4.2,-32.5 L-4.2,-32.5 Z"/>
+      <line x1="0" y1="-20" x2="0" y2="-27"/>
     </g>
-    <circle id="pid-cv-arc" class="pid-move-arc" cx="0" cy="0" r="22"/>
-    <text class="pid-tag" x="-24" y="-20" text-anchor="end">CV-101</text>
-    ${hit('CV-101', -17, -17, 34, 34, 'Column valve CV-101')}
+    <circle id="pid-cv-arc" class="pid-move-arc" cx="0" cy="0" r="${CV_ARC_R}"/>
+    <text class="pid-tag" x="26" y="22">CV-101</text>
+    ${hit('CV-101', -21, -21, 42, 42, 'Column valve CV-101')}
   </g>
-  ${fld('pid-cv-pos', 430, 100, 96, 18, '')}
+  ${fld('pid-cv-pos', 610, 104, 96, 18, '')}
 
   <!-- ============================ COLUMN ============================ -->
   <g id="pid-column" class="pid-col">
-    <rect class="pid-col-adapter" x="486" y="118" width="148" height="16"/>
-    ${bevel(486, 118, 148, 16, false)}
-    <rect class="pid-col-adapter" x="486" y="366" width="148" height="16"/>
-    ${bevel(486, 366, 148, 16, false)}
-    <rect class="pid-col-tube" x="490" y="126" width="140" height="248"/>
-    ${bevel(490, 126, 140, 248, true)}
-    <line class="pid-col-frit" x1="508" y1="134" x2="612" y2="134"/>
-    <line class="pid-col-frit" x1="508" y1="366" x2="612" y2="366"/>
-    <text class="pid-tag" x="490" y="112">C-101</text>
+    <rect class="pid-col-adapter" x="812" y="140" width="176" height="16"/>
+    ${bevel(812, 140, 176, 16, false)}
+    <rect class="pid-col-adapter" x="812" y="378" width="176" height="16"/>
+    ${bevel(812, 378, 176, 16, false)}
+    <rect class="pid-col-tube" x="820" y="148" width="160" height="238"/>
+    ${bevel(820, 148, 160, 238, true)}
+    <line class="pid-col-frit" x1="${BED_X}" y1="${BED_Y}" x2="${BED_X + BED_W}" y2="${BED_Y}"/>
+    <line class="pid-col-frit" x1="${BED_X}" y1="${BED_Y + BED_H}" x2="${BED_X + BED_W}"
+          y2="${BED_Y + BED_H}"/>
+    <text class="pid-tag" x="818" y="134">C-101</text>
     <g class="pid-col-ruler">
-      <line x1="492" y1="134" x2="500" y2="134"/>
-      <line x1="492" y1="192" x2="500" y2="192"/>
-      <line x1="492" y1="250" x2="500" y2="250"/>
-      <line x1="492" y1="308" x2="500" y2="308"/>
-      <line x1="492" y1="366" x2="500" y2="366"/>
+      <line x1="822" y1="158" x2="834" y2="158"/>
+      <line x1="822" y1="212" x2="834" y2="212"/>
+      <line x1="822" y1="267" x2="834" y2="267"/>
+      <line x1="822" y1="321" x2="834" y2="321"/>
+      <line x1="822" y1="376" x2="834" y2="376"/>
     </g>
     <g class="pid-col-profile">
-      <line class="pid-col-axis" x1="614" y1="134" x2="614" y2="366"/>
+      <line class="pid-col-axis" x1="${COL_AXIS_X}" y1="${BED_Y}" x2="${COL_AXIS_X}"
+            y2="${BED_Y + BED_H}"/>
       <polyline id="pid-profile-line" class="pid-profile-line" points=""/>
     </g>
-    ${hit('C-101', 486, 118, 148, 264, 'Chromatography column C-101')}
+    ${hit('C-101', 812, 140, 176, 254, 'Chromatography column C-101')}
   </g>
 
   <!-- ============================ PDT-101 ============================ -->
   <g id="pid-dp" class="pid-inst">
-    <path class="pid-bracket" d="M490,140 H478 V360 H490"/>
-    ${leader('M478,360 V404 H487')}
-    ${bubble('pid-dp-bub', 500, 410, 'PDT', '101')}
-    ${fld('pid-dp-f', 518, 401, 84, 18, 'bar')}
-    ${hit('PDT-101', 487, 397, 26, 26, 'Column differential pressure PDT-101')}
+    <path class="pid-bracket" d="M820,158 H806 V376 H820"/>
+    ${leader('M806,376 H790')}
+    ${bubble('pid-dp-bub', 771, 376, 'PDT', '101')}
+    ${fld('pid-dp-f', 656, 367, 92, 18, 'bar')}
+    ${hit('PDT-101', 752, 357, 38, 38, 'Column differential pressure PDT-101')}
   </g>
 
   <!-- ============================ PT-102 ============================ -->
   <g id="pid-pt102" class="pid-inst">
-    ${leader('M648,60 H663')}
-    ${bubble('pid-pt102-bub', 676, 60, 'PT', '102')}
-    ${fld('pid-pt102-f', 692, 51, 84, 18, 'bar')}
-    ${hit('PT-102', 663, 47, 26, 26, 'Post-column pressure transmitter PT-102')}
+    ${leader('M1000,66 L1014,56')}
+    ${bubble('pid-pt102-bub', 1030, 48, 'PT', '102')}
+    ${fld('pid-pt102-f', 1056, 39, 92, 18, 'bar')}
+    ${hit('PT-102', 1011, 29, 38, 38, 'Post-column pressure transmitter PT-102')}
   </g>
 
   <!-- ============================ FT-101 / AIC-101 / PT-101 ============================ -->
   <g id="pid-ft" class="pid-inst">
-    ${leader('M44,259 L41,221')}
-    ${bubble('pid-ft-bub', 44, 272, 'FT', '101')}
-    ${fld('pid-ft-f', 61, 263, 84, 18, 'mL/min')}
-    ${fld('pid-ft-sp', 61, 285, 84, 18, 'mL/min', 'sp')}
-    ${hit('FT-101', 31, 259, 26, 26, 'Flow transmitter FT-101')}
+    ${leader('M113,301 V254')}
+    ${bubble('pid-ft-bub', 113, 320, 'FT', '101')}
+    ${fld('pid-ft-f', 138, 302, 96, 19, 'mL/min')}
+    ${fld('pid-ft-sp', 138, 324, 96, 19, 'mL/min', 'sp')}
+    ${hit('FT-101', 94, 301, 38, 38, 'Flow transmitter FT-101')}
   </g>
   <g id="pid-pctb" class="pid-inst">
-    ${leader('M176,259 L152,226')}
-    ${bubble('pid-pctb-bub', 176, 272, 'AIC', '101')}
-    ${fld('pid-pctb-f', 193, 263, 84, 18, '%')}
-    ${fld('pid-pctb-sp', 193, 285, 84, 18, '%', 'sp')}
-    ${hit('PCTB', 163, 259, 26, 26, 'Gradient percent buffer B, AIC-101')}
+    ${leader('M285.6,307.6 L244,272')}
+    ${bubble('pid-pctb-bub', 300, 320, 'AIC', '101')}
+    ${fld('pid-pctb-f', 324, 302, 96, 19, '%')}
+    ${fld('pid-pctb-sp', 324, 324, 96, 19, '%', 'sp')}
+    ${hit('PCTB', 281, 301, 38, 38, 'Gradient percent buffer B, AIC-101')}
   </g>
   <g id="pid-pt101" class="pid-inst">
-    ${leader('M250,157 V199')}
-    ${bubble('pid-pt101-bub', 250, 144, 'PT', '101')}
-    ${fld('pid-pt101-f', 266, 135, 84, 18, 'bar')}
-    ${hit('PT-101', 237, 131, 26, 26, 'Pre-column pressure transmitter PT-101')}
+    ${leader('M510,225 V252')}
+    ${bubble('pid-pt101-bub', 510, 206, 'PT', '101')}
+    ${fld('pid-pt101-f', 534, 197, 92, 18, 'bar')}
+    ${hit('PT-101', 491, 187, 38, 38, 'Pre-column pressure transmitter PT-101')}
   </g>
 
   <!-- ============================ DETECTOR TRAIN ============================ -->
-  ${detector('pid-uv', 150, 'UV-101',
-    'M14,30 H30 M30,22 L46,30 L46,14 Z M52,22 H66 M52,30 H62', 'UV-101',
+  ${detector('pid-uv', 166, 'UV-101',
+    'M24,34 H42 M42,25 L60,34 L60,16 Z M68,25 H84 M68,34 H80', 'UV-101',
     'UV absorbance monitor UV-101')}
-  ${detector('pid-ce', 216, 'CE-101',
-    'M22,20 V34 M32,20 V34 M22,27 H32 M46,20 V34 M56,20 V34 M46,27 H56', 'CE-101',
+  ${detector('pid-ce', 240, 'CE-101',
+    'M30,22 V40 M42,22 V40 M30,31 H42 M62,22 V40 M74,22 V40 M62,31 H74', 'CE-101',
     'Conductivity cell CE-101')}
-  ${detector('pid-ae', 282, 'AE-101',
-    'M28,18 V30 A6,6 0 0,0 40,30 V18 M28,18 H40 M52,20 V34 M46,27 H58', 'AE-101',
+  ${detector('pid-ae', 314, 'AE-101',
+    'M34,20 V32 A7,7 0 0,0 48,32 V20 M34,20 H48 M66,22 V40 M59,31 H73', 'AE-101',
     'pH electrode AE-101')}
 
   <g id="pid-uv-i" class="pid-inst">
-    ${leader('M780,170 H799')}
-    ${bubble('pid-uv-bub', 812, 170, 'AT', '101')}
-    ${fld('pid-uv-f', 828, 161, 84, 18, 'mAU')}
+    ${leader('M1170,189 H1189')}
+    ${bubble('pid-uv-bub', 1208, 189, 'AT', '101')}
+    ${fld('pid-uv-f', 1232, 180, 92, 18, 'mAU')}
   </g>
   <g id="pid-ce-i" class="pid-inst">
-    ${leader('M780,236 H799')}
-    ${bubble('pid-ce-bub', 812, 236, 'CE', '101')}
-    ${fld('pid-ce-f', 828, 227, 84, 18, 'mS/cm')}
+    ${leader('M1170,263 H1189')}
+    ${bubble('pid-ce-bub', 1208, 263, 'CE', '101')}
+    ${fld('pid-ce-f', 1232, 254, 92, 18, 'mS/cm')}
   </g>
   <g id="pid-ae-i" class="pid-inst">
-    ${leader('M780,302 H799')}
-    ${bubble('pid-ae-bub', 812, 302, 'AE', '101')}
-    ${fld('pid-ae-f', 828, 293, 84, 18, 'pH')}
+    ${leader('M1170,337 H1189')}
+    ${bubble('pid-ae-bub', 1208, 337, 'AE', '101')}
+    ${fld('pid-ae-f', 1232, 328, 92, 18, 'pH')}
   </g>
   <g id="pid-tt" class="pid-inst">
-    ${leader('M799,105 L741,97')}
-    ${bubble('pid-tt-bub', 812, 110, 'TT', '101')}
-    ${fld('pid-tt-f', 828, 101, 84, 18, '°C')}
-    ${hit('TT-101', 799, 97, 26, 26, 'Temperature transmitter TT-101')}
+    ${leader('M1080,112 L1101,103')}
+    ${bubble('pid-tt-bub', 1118, 96, 'TT', '101')}
+    ${fld('pid-tt-f', 1144, 87, 92, 18, '°C')}
+    ${hit('TT-101', 1099, 77, 38, 38, 'Temperature transmitter TT-101')}
   </g>
 
   <!-- ============================ DIVERTER / WASTE / COLLECTOR ============================ -->
-  <g id="pid-dv" class="pid-vlv" transform="translate(862,336)">
+  <g id="pid-dv" class="pid-vlv" transform="translate(1306,392)">
     <path class="pid-vlv-body" d="M-16,-9 L-16,9 L0,0 Z"/>
     <path class="pid-vlv-body" d="M16,-9 L16,9 L0,0 Z"/>
     <path class="pid-vlv-body pid-vlv-body--3" d="M-9,16 L9,16 L0,0 Z"/>
-    <circle id="pid-dv-arc" class="pid-move-arc" cx="0" cy="0" r="14"/>
-    <text class="pid-tag" x="0" y="-14" text-anchor="middle">DV-101</text>
-    ${hit('DV-101', -17, -17, 34, 34, 'Fraction diverter valve DV-101')}
+    <circle id="pid-dv-arc" class="pid-move-arc" cx="0" cy="0" r="${DV_ARC_R}"/>
+    <text class="pid-tag" x="0" y="-22" text-anchor="middle">DV-101</text>
+    ${hit('DV-101', -20, -20, 40, 40, 'Fraction diverter valve DV-101')}
   </g>
 
   <g id="pid-waste" class="pid-waste">
     <g clip-path="url(#pid-clip-waste)">
-      <rect class="pid-waste-hz" x="40" y="340" width="72" height="64"/>
-      <rect id="pid-waste-fill" class="pid-waste-fill" x="40" y="380" width="72" height="24"/>
+      <rect class="pid-waste-hz" x="${WASTE_X}" y="${WASTE_Y}" width="${WASTE_W}"
+            height="${WASTE_H}"/>
+      <rect id="pid-waste-fill" class="pid-waste-fill" x="${WASTE_X}" y="388"
+            width="${WASTE_W}" height="24"/>
     </g>
-    ${bevel(40, 340, 72, 64, true)}
-    <text class="pid-tag" x="28" y="310">WASTE</text>
-    ${fld('pid-waste-lv', 28, 314, 96, 18, 'L')}
-    ${hit('WASTE', 40, 340, 72, 64, 'Waste container')}
+    ${bevel(WASTE_X, WASTE_Y, WASTE_W, WASTE_H, true)}
+    <text class="pid-tag" x="146" y="366">WASTE</text>
+    ${fld('pid-waste-lv', 146, 372, 76, 18, 'L')}
+    ${hit('WASTE', WASTE_X, WASTE_Y, WASTE_W, WASTE_H, 'Waste container')}
   </g>
 
   <g id="pid-collector" class="pid-fc">
-    <line class="pid-rail" x1="890" y1="344" x2="1180" y2="344"/>
-    <rect class="pid-fc-bg" x="890" y="356" width="290" height="64"/>
-    ${bevel(890, 356, 290, 64, false)}
+    <line class="pid-rail" x1="1360" y1="348" x2="1616" y2="348"/>
+    <rect class="pid-fc-bg" x="1352" y="360" width="264" height="60"/>
+    ${bevel(1352, 360, 264, 60, false)}
     <g id="pid-vials"></g>
-    <g id="pid-frac-head" class="pid-frac-head" transform="translate(896,0)">
-      <line x1="0" y1="344" x2="0" y2="356"/>
-      <path d="M-5,354 L5,354 L0,362 Z"/>
+    <g id="pid-frac-head" class="pid-frac-head" transform="translate(${VIAL_PARK_X},0)">
+      <line x1="0" y1="348" x2="0" y2="360"/>
+      <path d="M-5,358 L5,358 L0,366 Z"/>
     </g>
-    <text class="pid-tag" x="890" y="338">FC-101</text>
-    ${fld('pid-frac', 1060, 320, 120, 18, 'mL')}
-    ${hit('FC-101', 890, 356, 290, 64, 'Fraction collector FC-101')}
+    <text class="pid-tag" x="1352" y="342">FC-101</text>
+    ${fld('pid-frac', 1490, 322, 126, 18, 'mL')}
+    ${hit('FC-101', 1352, 360, 264, 60, 'Fraction collector FC-101')}
   </g>
 
   <!-- ============================ SERVICE LEGEND ============================ -->
   <g id="pid-legend" class="pid-legend" aria-hidden="true">
-    <rect class="pid-lg-sw" x="810" y="24" width="14" height="9"
+    <rect class="pid-lg-sw" x="1180" y="26" width="16" height="10"
           style="fill:var(--svc-a,#2D6FB8)"/>
-    <text class="pid-tag" x="828" y="32">A</text>
-    <rect class="pid-lg-sw" x="872" y="24" width="14" height="9"
+    <text class="pid-tag" x="1200" y="35">A</text>
+    <rect class="pid-lg-sw" x="1254" y="26" width="16" height="10"
           style="fill:var(--svc-b,#8A5BC8)"/>
-    <text class="pid-tag" x="890" y="32">B</text>
-    <rect class="pid-lg-sw" x="934" y="24" width="14" height="9"
+    <text class="pid-tag" x="1274" y="35">B</text>
+    <rect class="pid-lg-sw" x="1328" y="26" width="16" height="10"
           style="fill:var(--svc-sample,#C8862B)"/>
-    <text class="pid-tag" x="952" y="32">SMP</text>
-    <rect class="pid-lg-sw" x="996" y="24" width="14" height="9"
+    <text class="pid-tag" x="1348" y="35">SMP</text>
+    <rect class="pid-lg-sw" x="1402" y="26" width="16" height="10"
           style="fill:var(--svc-cip,#1FA98C)"/>
-    <text class="pid-tag" x="1014" y="32">CIP</text>
-    <rect class="pid-lg-sw" x="1058" y="24" width="14" height="9"
+    <text class="pid-tag" x="1422" y="35">CIP</text>
+    <rect class="pid-lg-sw" x="1476" y="26" width="16" height="10"
           style="fill:var(--svc-product,#16C60C)"/>
-    <text class="pid-tag" x="1076" y="32">PROD</text>
-    <rect class="pid-lg-sw" x="1128" y="24" width="14" height="9"
+    <text class="pid-tag" x="1496" y="35">PROD</text>
+    <rect class="pid-lg-sw" x="1550" y="26" width="16" height="10"
           style="fill:var(--svc-waste,#6B6B6B)"/>
-    <text class="pid-tag" x="1146" y="32">WST</text>
+    <text class="pid-tag" x="1570" y="35">WST</text>
   </g>
 </svg>`;
 
@@ -913,9 +1044,11 @@ const PID_CSS = `
 /* ---- text ----------------------------------------------------------------- */
 .pid-tag{font-size:9px;fill:var(--ink,#101010);letter-spacing:.04em;text-transform:uppercase;
   font-weight:600;}
-.pid-tag--dim{fill:var(--ink-2,#3A3A3A);font-weight:400;}
 .pid-tag--state{fill:var(--ink-2,#3A3A3A);font-size:9px;}
-.pid-bub-t{font-size:8px;fill:var(--ink,#101010);letter-spacing:.02em;font-weight:600;}
+.pid-bub-t{fill:var(--ink,#101010);letter-spacing:.02em;font-weight:600;
+  dominant-baseline:middle;}
+.pid-bub-fn{font-size:8.5px;}
+.pid-bub-lp{font-size:7.5px;}
 
 /* ---- label boxes ---------------------------------------------------------- */
 .pid-fld-bg{fill:var(--fld-bg,#0A0F0A);}
@@ -1680,6 +1813,7 @@ export function createPID(rootEl, ctx) {
      */
     const q = (id) => el.querySelector('#' + id);
     nodes = {
+      svg: el.querySelector('.pid-svg'),
       pumpG: q('pid-pump'), impeller: q('pid-impeller'),
       trapLiq: q('pid-trap-liq'), trapMen: q('pid-trap-men'),
       ivCh: q('pid-iv-ch'), ivMode: q('pid-iv-mode'), ivG: q('pid-iv'),
@@ -1703,7 +1837,7 @@ export function createPID(rootEl, ctx) {
       fracHead: q('pid-frac-head'), fracV: q('pid-frac-v'), fracBox: q('pid-frac'),
       vials: q('pid-vials'), profile: q('pid-profile-line'),
       tanks: [0, 1, 2, 3].map((i) => ({
-        g: q('pid-tk' + i), role: q('pid-tk' + i + '-role'), id: q('pid-tk' + i + '-id'),
+        g: q('pid-tk' + i), role: q('pid-tk' + i + '-role'),
         fill: q('pid-tk' + i + '-fill'), men: q('pid-tk' + i + '-men'),
         val: q('pid-tk' + i + '-lv-v'), box: q('pid-tk' + i + '-lv'),
         lamp: q('pid-tk' + i + '-lamp'), hit: null,
@@ -1769,21 +1903,21 @@ export function createPID(rootEl, ctx) {
     while (host.firstChild) host.removeChild(host.firstChild);
     vialNodes = [];
     const n = Math.max(1, ports.length);
-    const slotW = 282 / n;
+    const slotW = VIAL_SPAN / n;
     for (let i = 0; i < n; i++) {
       const g = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
-      const x = 894 + i * slotW;
+      const x = VIAL_X0 + i * slotW;
       const w = Math.max(3, slotW - 2);
       const body = doc.createElementNS('http://www.w3.org/2000/svg', 'rect');
       body.setAttribute('class', 'pid-vial');
       body.setAttribute('x', x.toFixed(2));
-      body.setAttribute('y', '364');
+      body.setAttribute('y', String(VIAL_TOP));
       body.setAttribute('width', w.toFixed(2));
-      body.setAttribute('height', '50');
+      body.setAttribute('height', String(VIAL_H));
       const fill = doc.createElementNS('http://www.w3.org/2000/svg', 'rect');
       fill.setAttribute('class', 'pid-vial-fill');
       fill.setAttribute('x', x.toFixed(2));
-      fill.setAttribute('y', '414');
+      fill.setAttribute('y', String(VIAL_BOT));
       fill.setAttribute('width', w.toFixed(2));
       fill.setAttribute('height', '0');
       g.appendChild(fill);
@@ -1867,16 +2001,26 @@ export function createPID(rootEl, ctx) {
   /**
    * Recompute the bed canvas position and backing size from the panel box.  Called only from the
    * ResizeObserver and from {@link scheduleRelayout}, never from `update`.
+   *
+   * The box is measured off the `<svg>` itself rather than off `el.clientWidth`: the client box is
+   * rounded to whole pixels, and at this aspect ratio that rounding walked the bed canvas ~3 px out
+   * of the vessel interior.  `getBoundingClientRect` gives the fractional box the browser actually
+   * used to solve `xMidYMid meet`, so the canvas lands exactly on the frits.
+   *
    * @returns {boolean} true once the panel had a non-zero box and the canvas was sized
    */
   function relayout() {
     if (destroyed) return false;
-    const w = el.clientWidth;
-    const h = el.clientHeight;
+    const svgEl = nodes.svg || el.querySelector('.pid-svg');
+    if (!svgEl) return false;
+    const box = svgEl.getBoundingClientRect();
+    const rootBox = el.getBoundingClientRect();
+    const w = box.width;
+    const h = box.height;
     if (w <= 0 || h <= 0) return false;
     const scale = Math.min(w / VIEW_W, h / VIEW_H);
-    const ox = (w - VIEW_W * scale) / 2;
-    const oy = (h - VIEW_H * scale) / 2;
+    const ox = (box.left - rootBox.left) + (w - VIEW_W * scale) / 2;
+    const oy = (box.top - rootBox.top) + (h - VIEW_H * scale) / 2;
     const dpr = (typeof devicePixelRatio === 'number' && devicePixelRatio > 0) ? devicePixelRatio : 1;
     const cssW = BED_W * scale;
     const cssH = BED_H * scale;
@@ -2069,7 +2213,6 @@ export function createPID(rootEl, ctx) {
       const k = slotIdx[i];
       text(nd.role, slotRole[i]);
       if (k < 0 || k >= config.tanks.length) {
-        text(nd.id, '—');
         text(nd.val, '—');
         setLamp(nd.lamp, 'off', false);
         if (nd.fill) nd.fill.setAttribute('height', '0');
@@ -2079,11 +2222,11 @@ export function createPID(rootEl, ctx) {
       const vol = run.tankVolume_mL[k];
       const cap = t.nominalVolume_mL || Math.max(vol, 1);
       const frac = clamp(vol / cap, 0, 1);
-      const yTop = 100 - frac * 72;
+      const yTop = TANK_BOT - frac * TANK_H;
       const colour = tankColour(config, theme, k, slots.cip, i === 1);
       if (nd.fill) {
         nd.fill.setAttribute('y', yTop.toFixed(2));
-        nd.fill.setAttribute('height', (100 - yTop).toFixed(2));
+        nd.fill.setAttribute('height', (TANK_BOT - yTop).toFixed(2));
         nd.fill.style.fill = colour;
       }
       if (nd.men) {
@@ -2091,7 +2234,6 @@ export function createPID(rootEl, ctx) {
         nd.men.setAttribute('y2', yTop.toFixed(2));
       }
       const fv = fmtTankVolume(vol);
-      text(nd.id, String(t.label || t.id).slice(0, 12));
       text(nd.val, fv.value);
       const empty = vol <= (t.emptyLevel_mL || 0);
       const low = frac < ((t.lowLevelPct != null ? t.lowLevelPct : 10) / 100) && !empty;
@@ -2137,9 +2279,9 @@ export function createPID(rootEl, ctx) {
       const trapSeg = (config.skid.segments || []).find((s) => s.id === 'G5');
       const trapV = trapSeg ? trapSeg.V_mL : 50;
       const gasFrac = clamp((run.trapHeadspace_mL || 0) / Math.max(trapV, 1e-9), 0, 1);
-      const yTop = 166 + gasFrac * 58;
+      const yTop = TRAP_TOP + gasFrac * TRAP_H;
       nodes.trapLiq.setAttribute('y', yTop.toFixed(2));
-      nodes.trapLiq.setAttribute('height', (224 - yTop).toFixed(2));
+      nodes.trapLiq.setAttribute('height', (TRAP_BOT - yTop).toFixed(2));
       nodes.trapLiq.style.fill = lutAt(theme.lutAB, run.pctB_actual);
       if (nodes.trapMen) {
         nodes.trapMen.setAttribute('y1', yTop.toFixed(2));
@@ -2185,7 +2327,7 @@ export function createPID(rootEl, ctx) {
     if (moving && nodes.cvArc) {
       const tot = Math.max(0.05, config.skid.fracValve.tSwitch_s * 2);
       const frac = clamp(1 - run.valves.moveRemaining_s / tot, 0, 1);
-      const circ = 2 * Math.PI * 22;
+      const circ = 2 * Math.PI * CV_ARC_R;
       nodes.cvArc.setAttribute('stroke-dasharray', (circ * frac).toFixed(1) + ' ' + circ.toFixed(1));
     }
     const cvFault = !moving && pos !== cmd && run.valves.mismatch_s > 0.5;
@@ -2206,7 +2348,7 @@ export function createPID(rootEl, ctx) {
     if (fmoving && nodes.dvArc) {
       const frac = clamp(run.frac.moveElapsed_s
         / Math.max(config.skid.fracValve.tSwitch_s, 1e-6), 0, 1);
-      const circ = 2 * Math.PI * 14;
+      const circ = 2 * Math.PI * DV_ARC_R;
       nodes.dvArc.setAttribute('stroke-dasharray', (circ * frac).toFixed(1) + ' ' + circ.toFixed(1));
     }
     const dvBodies = nodes.dvG ? nodes.dvG.querySelectorAll('.pid-vlv-body') : [];
@@ -2223,8 +2365,8 @@ export function createPID(rootEl, ctx) {
     for (let i = 0; i < vialNodes.length; i++) {
       const vn = vialNodes[i];
       const vol = run.portVolume_mL[i] || 0;
-      const h = clamp(vol / cap, 0, 1) * 50;
-      vn.fill.setAttribute('y', (414 - h).toFixed(2));
+      const h = clamp(vol / cap, 0, 1) * VIAL_H;
+      vn.fill.setAttribute('y', (VIAL_BOT - h).toFixed(2));
       vn.fill.setAttribute('height', h.toFixed(2));
       vn.fill.style.fill = lutAt(theme.lutAB, run.pctB_actual);
       const isActive = (ports[i] === outlet);
@@ -2232,7 +2374,7 @@ export function createPID(rootEl, ctx) {
       cls(vn.body, 'is-active', isActive);
     }
     if (nodes.fracHead) {
-      const hx = (activeVial >= 0) ? vialNodes[activeVial].cx : 896;
+      const hx = (activeVial >= 0) ? vialNodes[activeVial].cx : VIAL_PARK_X;
       nodes.fracHead.setAttribute('transform', 'translate(' + hx.toFixed(2) + ',0)');
     }
     const portIdx = ports.indexOf(outlet);
@@ -2243,8 +2385,8 @@ export function createPID(rootEl, ctx) {
     /* ---- waste ---- */
     const wasteFrac = clamp(run.wasteVolume_mL / Math.max(config.skid.wasteCapacity_mL, 1), 0, 1);
     if (nodes.wasteFill) {
-      const h = wasteFrac * 64;
-      nodes.wasteFill.setAttribute('y', (404 - h).toFixed(2));
+      const h = wasteFrac * WASTE_H;
+      nodes.wasteFill.setAttribute('y', (WASTE_BOT - h).toFixed(2));
       nodes.wasteFill.setAttribute('height', h.toFixed(2));
     }
     text(nodes.wasteV, (run.wasteVolume_mL / 1000).toFixed(1));
@@ -2356,7 +2498,7 @@ export function createPID(rootEl, ctx) {
       else profileMax = Math.max(mx, profileMax * 0.995, 1e-9);
       let d = '';
       for (let p = 0; p < pts; p++) {
-        const x = 614 + clamp(buf[p] / profileMax, 0, 1) * 13;
+        const x = COL_AXIS_X + clamp(buf[p] / profileMax, 0, 1) * COL_PROFILE_W;
         const y = BED_Y + (p + 0.5) / pts * BED_H;
         d += (p ? ' ' : '') + x.toFixed(1) + ',' + y.toFixed(1);
       }
@@ -2470,9 +2612,13 @@ export function createPID(rootEl, ctx) {
     if (componentId.indexOf('TK-') === 0) {
       const base = componentId.replace(/-LT$/, '');
       const k = { 'TK-A': slots.a, 'TK-B': slots.b, 'TK-S': slots.s, 'TK-CIP': slots.cip }[base];
-      if (k >= 0) {
+      if (k >= 0 && k < pid._config.tanks.length) {
+        /* The recipe description is deliberately absent from the drawing — this is where the
+           operator gets it, in full, untruncated. */
+        const t = pid._config.tanks[k];
         const fv = fmtTankVolume(run.tankVolume_mL[k]);
-        return fv.value + ' ' + fv.unit + ' remaining';
+        const desc = String(t.label || t.id || '');
+        return (desc ? desc + ' — ' : '') + fv.value + ' ' + fv.unit + ' remaining';
       }
     }
     return '';
@@ -2766,7 +2912,7 @@ export function createPID(rootEl, ctx) {
       impellerAngle = (impellerAngle
         + (60 + 300 * clamp(pid._run.Q_actual_mLs / qmax, 0, 1)) * dt_s) % 360;
       nodes.impeller.setAttribute('transform',
-        'rotate(' + impellerAngle.toFixed(1) + ',40,200)');
+        'rotate(' + impellerAngle.toFixed(1) + ',' + PUMP_CX + ',' + PUMP_CY + ')');
     }
 
     if (now - lastBed >= bedPeriod) {
