@@ -1,8 +1,9 @@
 /**
  * @file `src/ui/view_system.js` — the SYSTEM screen (architecture-v2 §6.31, §9.1.1), drawn in the
- * FT-CLASSIC operator vocabulary: beveled grey panels, sunken label boxes carrying a tag and an
- * engineering unit, icon-only controls with tooltips, classic sunken data grids with a severity
- * lamp in the first column.
+ * HMI-2012 operator vocabulary: graphite panels edged with a single 1px border over a subtle
+ * 180deg gradient, recessed label boxes carrying a tag and an engineering unit, icon-only controls
+ * with tooltips, recessed data grids with a severity lamp in the first column. 2px corners; never
+ * a four-step bevel.
  *
  * The screen keeps every function it had: column / resin, skid, chemistry, load, tanks, species and
  * isotherm parameters, the derived-geometry and hold-up reports, the alarm-limit table and the
@@ -52,10 +53,14 @@ const SEV_LAMP = {
   INFO: 'off', WARN: 'warn', ALARM: 'alarm', CRITICAL: 'alarm', FAULT: 'alarm',
 };
 
-/** Canvas colours are resolved from the live custom properties once per theme. */
-const TOKEN_NAMES = ['--face', '--face-2', '--face-3', '--bev-hi', '--bev-lt', '--bev-sh',
-  '--bev-dk', '--ink', '--ink-2', '--ink-off', '--fld-bg', '--fld-pv', '--fld-eu', '--plot-axis',
-  '--pipe-idle', '--svc-a'];
+/**
+ * Canvas colours are resolved from the live custom properties once per theme — a canvas cannot
+ * use `var()`, so this is the only place the HMI-2012 palette crosses out of CSS.
+ */
+const TOKEN_NAMES = ['--panel', '--panel-hi', '--panel-lo', '--edge', '--edge-soft',
+  '--ink', '--ink-2', '--ink-3', '--fld-bg', '--fld-pv', '--fld-eu',
+  '--equip-top', '--equip-bot', '--equip-edge', '--spec-edge', '--shade-deep',
+  '--alarm', '--svc-b', '--font-num'];
 
 /**
  * Column fields. `tag` is the 10 px uppercase label, `label` the tooltip / aria text. `get` reads
@@ -193,165 +198,175 @@ const ICONS = {
   caretRight: { f: ['M6 4v8l5-4z'] },
 };
 
-/** The scoped FT-CLASSIC sheet. Every value is a token with the §palette hex as its fallback. */
+/**
+ * The scoped HMI-2012 sheet.
+ *
+ * Two things are load-bearing here and easy to undo by accident:
+ *
+ *  1. THE DEPTH LANGUAGE is six aliases on `.sv-root` — raised, pressed, sunken, zebra, gloss —
+ *     each pointing at one of the recipes `styles/tokens.css` publishes (`--surface-raised`,
+ *     `--elev-sunken`, `--lamp-gloss` …). No rule below hand-rolls a border, a gradient or a
+ *     shadow, so the light theme comes for free and there is not one colour literal in this file.
+ *
+ *  2. EVERY SELECTOR IS SCOPED UNDER `.sv-root`, so this sheet cannot reach another screen.
+ */
 const CSS = `
 .sv-root{
-  --screen:#6E6E6E;--face:#C7C3BC;--face-2:#BFBBB4;--face-3:#D2CEC7;
-  --bev-hi:#FFFFFF;--bev-lt:#E6E2DA;--bev-sh:#85817B;--bev-dk:#4A4744;
-  --ink:#101010;--ink-2:#3A3A3A;--ink-off:#7A7A7A;
-  --fld-bg:#0A0F0A;--fld-pv:#12FF4B;--fld-sp:#FFD400;--fld-out:#00E5FF;--fld-alarm:#FF3B30;
-  --fld-stale:#7A8A7A;--fld-eu:#9FB39F;
-  --lamp-off:#4A4744;--lamp-run:#16C60C;--lamp-warn:#FFC000;--lamp-alarm:#E81123;
-  --plot-axis:#C7C3BC;--pipe-idle:#4A4744;--svc-a:#2D6FB8;
-  --font-ui:system-ui,'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;
-  --font-num:ui-monospace,Consolas,'Cascadia Mono','Courier New',monospace;
+  --u-raise:var(--surface-raised);
+  --u-press:var(--surface-pressed);
+  --u-drop:var(--elev-raised);
+  --u-sunk:var(--elev-sunken);
+  --u-zebra:var(--press-tint);
+  --u-gloss:radial-gradient(circle at 34% 27%,var(--lamp-gloss) 0 1.3px,transparent 2.4px);
   position:relative;height:100%;overflow:auto;background:var(--screen);color:var(--ink);
-  font:400 11px/1.2 var(--font-ui);padding:3px;display:flex;flex-direction:column;gap:3px;
+  font:400 11px/1.3 var(--font-ui);padding:3px;display:flex;flex-direction:column;gap:3px;
   -webkit-font-smoothing:antialiased;
 }
-:root[data-theme="dark"] .sv-root{
-  --screen:#2A2A2A;--face:#4A4744;--face-2:#3E3B38;--face-3:#565250;
-  --bev-hi:#7A7672;--bev-lt:#605C58;--bev-sh:#2E2B29;--bev-dk:#1A1817;
-  --ink:#E8E4DC;--ink-2:#B8B4AC;--ink-off:#8A8680;--plot-axis:#C7C3BC;
-}
-@media (prefers-color-scheme:dark){
-  :root:not([data-theme]) .sv-root{
-    --screen:#2A2A2A;--face:#4A4744;--face-2:#3E3B38;--face-3:#565250;
-    --bev-hi:#7A7672;--bev-lt:#605C58;--bev-sh:#2E2B29;--bev-dk:#1A1817;
-    --ink:#E8E4DC;--ink-2:#B8B4AC;--ink-off:#8A8680;
-  }
-}
-.sv-root *{box-sizing:border-box;border-radius:0}
-.sv-rz{box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
-  inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
-.sv-sk{box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),
-  inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt)}
-.sv-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(268px,1fr));gap:3px;align-items:start}
-.sv-logs{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:3px;align-items:stretch}
-@media (max-width:1080px){.sv-logs{grid-template-columns:minmax(0,1fr)}}
-.sv-panel{background:var(--face);padding:3px;display:flex;flex-direction:column;min-width:0}
-.sv-hd{height:20px;flex:0 0 20px;display:flex;align-items:center;gap:4px;padding:0 4px;
-  background:var(--face-2);color:var(--ink);user-select:none;
-  font:700 10px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.04em}
-.sv-hd__sp{flex:1 1 auto}
-.sv-grp{border-top:1px solid var(--bev-sh);margin-top:2px}
-.sv-grp__hd{width:100%;height:18px;display:flex;align-items:center;gap:3px;padding:0 3px;border:0;
-  background:var(--face-2);color:var(--ink);cursor:pointer;text-align:left;
-  font:700 10px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.04em}
-.sv-grp__hd svg{width:11px;height:11px;fill:currentColor;stroke:none;flex:0 0 11px}
-.sv-grp.is-closed .sv-grp__b{display:none}
-.sv-form{display:grid;grid-template-columns:repeat(auto-fill,minmax(178px,1fr));gap:1px 6px;padding:3px 2px}
-.sv-f{display:grid;grid-template-columns:66px minmax(0,1fr);align-items:center;gap:4px;height:20px}
-.sv-f--w{grid-column:1/-1;grid-template-columns:110px minmax(0,1fr)}
-.sv-lb{font:700 10px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.04em;color:var(--ink-2);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:none;border:0;padding:0;text-align:left}
-button.sv-lb{cursor:help;text-decoration:underline dotted 1px;text-underline-offset:2px}
-button.sv-lb:hover{color:var(--ink)}
-.sv-box{display:flex;align-items:center;height:18px;min-width:0;padding:0 2px;background:var(--fld-bg)}
-.sv-box>input{flex:1 1 auto;min-width:0;width:100%;background:transparent;border:0;padding:0;margin:0;
-  text-align:right;color:var(--fld-sp);font:700 12px/1 var(--font-num);
+.sv-root *{box-sizing:border-box}
+.sv-root .sv-rz{background:var(--u-raise);border:var(--border-edge);border-radius:2px;
+  box-shadow:var(--u-drop)}
+.sv-root .sv-sk{background:var(--fld-bg);border:var(--border-field);border-radius:2px;
+  box-shadow:var(--u-sunk)}
+.sv-root .sv-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(268px,1fr));gap:3px;
+  align-items:start}
+.sv-root .sv-logs{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:3px;
+  align-items:stretch}
+@media (max-width:1080px){.sv-root .sv-logs{grid-template-columns:minmax(0,1fr)}}
+.sv-root .sv-panel{background:var(--panel);border:var(--border-edge);border-radius:2px;
+  box-shadow:var(--u-drop);display:flex;flex-direction:column;min-width:0;overflow:hidden}
+.sv-root .sv-hd{height:22px;flex:0 0 22px;display:flex;align-items:center;gap:6px;padding:0 6px;
+  background:var(--u-raise);border:0;border-bottom:var(--border-soft);border-radius:0;
+  box-shadow:none;color:var(--ink);user-select:none;font:600 11px/1 var(--font-ui);
+  text-transform:uppercase;letter-spacing:.02em}
+.sv-root .sv-hd__sp{flex:1 1 auto}
+.sv-root .sv-grp{border-top:var(--border-soft)}
+.sv-root .sv-grp__hd{width:100%;height:22px;display:flex;align-items:center;gap:4px;padding:0 6px;
+  border:0;background:var(--u-raise);color:var(--ink-2);cursor:pointer;text-align:left;
+  font:600 10px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.02em}
+.sv-root .sv-grp__hd:hover{color:var(--ink)}
+.sv-root .sv-grp__hd:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.sv-root .sv-grp__hd svg{width:11px;height:11px;fill:currentColor;stroke:none;flex:0 0 11px}
+.sv-root .sv-grp.is-closed .sv-grp__b{display:none}
+.sv-root .sv-form{display:grid;grid-template-columns:repeat(auto-fill,minmax(184px,1fr));
+  gap:2px 8px;padding:4px}
+.sv-root .sv-f{display:grid;grid-template-columns:68px minmax(0,1fr);align-items:center;gap:5px;
+  height:22px}
+.sv-root .sv-f--w{grid-column:1/-1;grid-template-columns:110px minmax(0,1fr)}
+.sv-root .sv-lb{font:500 10px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.02em;
+  color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:none;
+  border:0;padding:0;text-align:left}
+.sv-root button.sv-lb{cursor:help;text-decoration:underline dotted 1px;text-underline-offset:2px}
+.sv-root button.sv-lb:hover{color:var(--ink)}
+.sv-root .sv-box{display:flex;align-items:center;height:20px;min-width:0;padding:0 4px;
+  background:var(--fld-bg);border:var(--border-field);border-radius:2px;
+  box-shadow:var(--u-sunk)}
+.sv-root .sv-box>input{flex:1 1 auto;min-width:0;width:100%;background:transparent;border:0;
+  padding:0;margin:0;text-align:right;color:var(--fld-sp);font:500 13px/1 var(--font-num);
   font-variant-numeric:tabular-nums lining-nums}
-.sv-box>input:focus{outline:none}
-.sv-box>input:disabled{color:var(--fld-stale)}
-.sv-box>.sv-v{flex:1 1 auto;min-width:0;text-align:right;color:var(--fld-pv);
-  font:700 12px/1 var(--font-num);font-variant-numeric:tabular-nums lining-nums;
+.sv-root .sv-box>input:focus{outline:none}
+.sv-root .sv-box>input:disabled{color:var(--fld-stale)}
+.sv-root .sv-box>.sv-v{flex:1 1 auto;min-width:0;text-align:right;color:var(--fld-pv);
+  font:500 13px/1 var(--font-num);font-variant-numeric:tabular-nums lining-nums;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sv-box>.sv-v[data-q="alarm"]{color:var(--fld-alarm)}
-.sv-box>.sv-v[data-q="stale"]{color:var(--fld-stale)}
-.sv-box>.sv-eu{flex:0 0 auto;padding-left:3px;color:var(--fld-eu);
+.sv-root .sv-box>.sv-v[data-q="alarm"]{color:var(--fld-alarm)}
+.sv-root .sv-box>.sv-v[data-q="stale"]{color:var(--fld-stale)}
+.sv-root .sv-box>.sv-eu{flex:0 0 auto;padding-left:4px;color:var(--fld-eu);
   font:400 10px/1 var(--font-num);white-space:nowrap}
-.sv-box:focus-within{outline:2px solid #FFD400;outline-offset:-2px}
-.sv-box--bad{outline:2px solid var(--fld-alarm);outline-offset:-2px}
-.sv-sel{height:18px;min-width:0;width:100%;padding:0 2px;background:var(--face-3);color:var(--ink);
-  border:0;font:400 11px/1 var(--font-ui);cursor:pointer}
-.sv-sel:focus-visible{outline:2px solid #FFD400;outline-offset:-2px}
-.sv-sel:disabled{color:var(--ink-off);cursor:not-allowed}
-.sv-btn{width:22px;height:20px;flex:0 0 22px;padding:0;border:0;background:var(--face);color:var(--ink);
-  display:inline-flex;align-items:center;justify-content:center;cursor:pointer;
-  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
-    inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)}
-.sv-btn svg{width:12px;height:12px;display:block;fill:none;stroke:currentColor;stroke-width:1.5;
-  stroke-linecap:square;stroke-linejoin:miter;pointer-events:none}
-.sv-btn:active:not(:disabled),.sv-btn[aria-pressed="true"]{
-  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),
-    inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt)}
-.sv-btn:active:not(:disabled) svg,.sv-btn[aria-pressed="true"] svg{transform:translate(1px,1px)}
-.sv-btn:disabled{color:var(--ink-off);cursor:not-allowed}
-.sv-btn:focus-visible{outline:2px solid #FFD400;outline-offset:1px}
-.sv-btn--wide{width:auto;flex:0 0 auto;padding:0 5px;gap:3px;
-  font:700 10px/1 var(--font-num);letter-spacing:.04em}
-.sv-bar{display:flex;align-items:center;gap:2px;height:24px;flex:0 0 24px;padding:0 3px;
-  background:var(--face-2);flex-wrap:nowrap;overflow:hidden}
-.sv-sep{width:2px;height:16px;flex:0 0 2px;margin:0 3px;background:var(--face);
-  box-shadow:inset 1px 0 0 var(--bev-dk),inset -1px 0 0 var(--bev-hi)}
-.sv-lamp{width:10px;height:10px;flex:0 0 10px;border-radius:50%;border:1px solid #2A2A2A;
-  background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.8) 0 1.2px,rgba(255,255,255,0) 2.2px),
-    var(--lamp-off)}
-.sv-lamp[data-s="run"]{background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.85) 0 1.2px,
-  rgba(255,255,255,0) 2.2px),var(--lamp-run)}
-.sv-lamp[data-s="warn"]{background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.85) 0 1.2px,
-  rgba(255,255,255,0) 2.2px),var(--lamp-warn)}
-.sv-lamp[data-s="alarm"]{background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.85) 0 1.2px,
-  rgba(255,255,255,0) 2.2px),var(--lamp-alarm)}
-.sv-lamp[data-blink="1"]{animation:sv-blink 900ms steps(1,end) infinite}
+.sv-root .sv-box:focus-within{outline:2px solid var(--accent);outline-offset:-2px}
+.sv-root .sv-box--bad{border-color:var(--alarm);outline:2px solid var(--alarm);outline-offset:-2px}
+.sv-root .sv-sel{height:20px;min-width:0;width:100%;padding:0 4px;background:var(--fld-bg);
+  color:var(--ink);border:var(--border-field);border-radius:2px;box-shadow:var(--u-sunk);
+  font:400 11px/1 var(--font-ui);cursor:pointer}
+.sv-root .sv-sel:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.sv-root .sv-sel:disabled{color:var(--ink-3);cursor:not-allowed}
+.sv-root .sv-btn{width:22px;height:22px;flex:0 0 22px;padding:0;border:var(--border-edge);
+  border-radius:2px;background:var(--u-raise);color:var(--ink-2);box-shadow:var(--u-drop);
+  display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.sv-root .sv-btn svg{width:12px;height:12px;display:block;fill:none;stroke:currentColor;
+  stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+.sv-root .sv-btn:hover:not(:disabled){color:var(--ink);border-color:var(--ink-3)}
+.sv-root .sv-btn:active:not(:disabled){background:var(--u-press);box-shadow:none}
+.sv-root .sv-btn[aria-pressed="true"]{background:var(--u-press);border-color:var(--accent);
+  color:var(--ink);box-shadow:none}
+.sv-root .sv-btn:disabled{color:var(--ink-3);cursor:not-allowed;box-shadow:none}
+.sv-root .sv-btn:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.sv-root .sv-btn--wide{width:auto;flex:0 0 auto;padding:0 7px;gap:4px;
+  font:600 10px/1 var(--font-num);letter-spacing:.02em}
+.sv-root .sv-bar{display:flex;align-items:center;gap:3px;height:26px;flex:0 0 26px;padding:0 4px;
+  background:var(--panel);border:0;border-bottom:var(--border-soft);border-radius:0;
+  box-shadow:none;flex-wrap:nowrap;overflow:hidden}
+.sv-root .sv-sep{width:1px;height:15px;flex:0 0 1px;margin:0 4px;background:var(--edge-soft);
+  box-shadow:none}
+.sv-root .sv-lamp{width:10px;height:10px;flex:0 0 10px;border-radius:50%;
+  border:1px solid var(--lamp-ring);background:var(--u-gloss),var(--lamp-off)}
+.sv-root .sv-lamp[data-s="run"]{background:var(--u-gloss),var(--ok);
+  box-shadow:0 0 5px var(--glow-run)}
+.sv-root .sv-lamp[data-s="warn"]{background:var(--u-gloss),var(--warn);
+  box-shadow:0 0 5px var(--glow-warn)}
+.sv-root .sv-lamp[data-s="alarm"]{background:var(--u-gloss),var(--alarm);
+  box-shadow:0 0 5px var(--glow-alarm)}
+.sv-root .sv-lamp[data-blink="1"]{animation:sv-blink 900ms steps(1,end) infinite}
 @keyframes sv-blink{50%{filter:brightness(.35)}}
-.sv-tw{flex:1 1 auto;min-height:0;overflow:auto;background:var(--face-3)}
-.sv-tw--h{max-height:266px}
-.sv-tbl{width:100%;border-collapse:collapse;font:400 11px/1 var(--font-ui);color:var(--ink)}
-.sv-tbl th{height:20px;padding:0 4px;text-align:left;white-space:nowrap;background:var(--face-2);
-  color:var(--ink);position:sticky;top:0;z-index:1;
-  font:700 10px/1 var(--font-ui);text-transform:uppercase;letter-spacing:.04em;
-  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-sh)}
-.sv-tbl td{height:22px;padding:0 4px;white-space:nowrap;border-bottom:1px solid var(--bev-sh);
-  overflow:hidden;text-overflow:ellipsis;max-width:340px}
-.sv-tbl td.num,.sv-tbl th.num{text-align:right;font-family:var(--font-num);
+.sv-root .sv-tw{flex:1 1 auto;min-height:0;overflow:auto;background:var(--panel);box-shadow:none}
+.sv-root .sv-tw--h{max-height:266px}
+.sv-root .sv-tbl{width:100%;border-collapse:collapse;font:400 11px/1 var(--font-ui);
+  color:var(--ink)}
+.sv-root .sv-tbl th{height:24px;padding:0 6px;text-align:left;white-space:nowrap;
+  background:var(--u-raise);border-bottom:var(--border-edge);color:var(--ink-2);
+  position:sticky;top:0;z-index:1;font:600 10px/1 var(--font-ui);text-transform:uppercase;
+  letter-spacing:.02em}
+.sv-root .sv-tbl td{height:24px;padding:0 6px;white-space:nowrap;
+  border-bottom:var(--border-soft);overflow:hidden;text-overflow:ellipsis;max-width:340px}
+.sv-root .sv-tbl td.num,.sv-root .sv-tbl th.num{text-align:right;font-family:var(--font-num);
   font-variant-numeric:tabular-nums lining-nums}
-.sv-tbl td.lamp{width:18px;padding:0 0 0 4px}
-.sv-tbl td.act{width:26px;padding:0 2px}
-.sv-tbl tbody tr:nth-child(2n) td{background:rgba(0,0,0,.045)}
-.sv-tbl tbody tr:hover td{background:var(--face)}
-.sv-tbl td[data-sev="ALARM"],.sv-tbl td[data-sev="CRITICAL"],.sv-tbl td[data-sev="FAULT"]{color:#8E1710}
-.sv-tbl td[data-sev="WARN"]{color:#7A5200}
-:root[data-theme="dark"] .sv-tbl td[data-sev="ALARM"],
-:root[data-theme="dark"] .sv-tbl td[data-sev="CRITICAL"],
-:root[data-theme="dark"] .sv-tbl td[data-sev="FAULT"]{color:#FF8A80}
-:root[data-theme="dark"] .sv-tbl td[data-sev="WARN"]{color:#FFC000}
-.sv-tbl input{width:76px;height:16px;padding:0 2px;border:0;background:var(--fld-bg);color:var(--fld-sp);
-  text-align:right;font:700 11px/1 var(--font-num);font-variant-numeric:tabular-nums lining-nums;
-  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi)}
-.sv-tbl input:disabled{color:var(--fld-stale)}
-.sv-tbl input:focus-visible{outline:2px solid #FFD400;outline-offset:-2px}
-.sv-kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(178px,1fr));gap:1px 6px;padding:3px 2px;margin:0}
-.sv-tank{display:grid;grid-template-columns:52px minmax(60px,1fr) 62px 22px;gap:4px;align-items:center;
-  padding:2px 3px;border-bottom:1px solid var(--bev-sh)}
-.sv-tank__id{font:700 10px/1 var(--font-num);letter-spacing:.04em;color:var(--ink);
+.sv-root .sv-tbl td.lamp{width:20px;padding:0 0 0 6px}
+.sv-root .sv-tbl td.act{width:28px;padding:0 3px}
+.sv-root .sv-tbl tbody tr:nth-child(2n) td{background:var(--u-zebra)}
+.sv-root .sv-tbl tbody tr:hover td{background:var(--panel-hi)}
+.sv-root .sv-tbl td[data-sev="ALARM"],.sv-root .sv-tbl td[data-sev="CRITICAL"],
+.sv-root .sv-tbl td[data-sev="FAULT"]{color:var(--alarm)}
+.sv-root .sv-tbl td[data-sev="WARN"]{color:var(--warn)}
+.sv-root .sv-tbl input{width:78px;height:18px;padding:0 3px;border:var(--border-field);
+  border-radius:2px;background:var(--fld-bg);color:var(--fld-sp);box-shadow:var(--u-sunk);
+  text-align:right;font:500 12px/1 var(--font-num);font-variant-numeric:tabular-nums lining-nums}
+.sv-root .sv-tbl input:disabled{color:var(--fld-stale)}
+.sv-root .sv-tbl input:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.sv-root .sv-kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(184px,1fr));
+  gap:2px 8px;padding:4px;margin:0}
+.sv-root .sv-tank{display:grid;grid-template-columns:52px minmax(60px,1fr) 62px 22px;gap:5px;
+  align-items:center;padding:3px 5px;border-bottom:var(--border-soft)}
+.sv-root .sv-tank__id{font:600 10px/1 var(--font-num);letter-spacing:.02em;color:var(--ink);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sv-lvl{position:relative;height:14px;background:var(--fld-bg);overflow:hidden}
-.sv-lvl>i{position:absolute;left:0;top:0;bottom:0;display:block;background:var(--svc-a)}
-.sv-lvl[data-low="true"]>i{background:var(--lamp-warn)}
-.sv-thumb{display:block;width:100%;background:var(--fld-bg)}
-.sv-status{height:18px;display:flex;align-items:center;gap:4px;padding:0 3px;background:var(--fld-bg);
-  color:var(--fld-pv);font:700 10px/1 var(--font-num);letter-spacing:.04em;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sv-status[data-kind="warn"]{color:var(--fld-alarm)}
-.sv-empty{display:flex;align-items:center;gap:4px;padding:3px 4px;background:var(--fld-bg);
-  color:var(--fld-stale);font:700 10px/1 var(--font-num);letter-spacing:.06em}
-.sv-empty[hidden]{display:none}
-.sv-logs>.sv-panel{max-height:452px}
-.sv-search{display:flex;align-items:center;gap:3px;height:18px;padding:0 3px;background:var(--fld-bg);min-width:120px}
-.sv-search input[type="search"]{-webkit-appearance:none;appearance:none}
-.sv-search svg{width:11px;height:11px;flex:0 0 11px;fill:none;stroke:var(--fld-eu);stroke-width:1.5}
-.sv-search input{flex:1 1 auto;min-width:0;background:transparent;border:0;color:var(--fld-pv);
-  font:400 11px/1 var(--font-num)}
-.sv-search input:focus{outline:none}
-.sv-search:focus-within{outline:2px solid #FFD400;outline-offset:-2px}
-.sv-row{display:flex;align-items:center;gap:3px;padding:2px 3px;flex-wrap:wrap}
+.sv-root .sv-lvl{position:relative;height:14px;background:var(--fld-bg);overflow:hidden}
+.sv-root .sv-lvl>i{position:absolute;left:0;top:0;bottom:0;display:block;background:var(--svc-a)}
+.sv-root .sv-lvl[data-low="true"]>i{background:var(--warn)}
+.sv-root .sv-thumb{display:block;width:100%;background:var(--fld-bg)}
+.sv-root .sv-status{height:20px;display:flex;align-items:center;gap:5px;padding:0 5px;
+  background:var(--fld-bg);border:var(--border-field);border-radius:2px;
+  box-shadow:var(--u-sunk);color:var(--fld-pv);font:500 11px/1 var(--font-num);
+  letter-spacing:.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sv-root .sv-status[data-kind="warn"]{color:var(--fld-alarm)}
+.sv-root .sv-empty{display:flex;align-items:center;gap:6px;margin:3px;padding:4px 6px;
+  background:var(--fld-bg);border:var(--border-field);border-radius:2px;
+  box-shadow:var(--u-sunk);color:var(--fld-stale);font:500 10px/1 var(--font-num);
+  letter-spacing:.02em}
+.sv-root .sv-empty[hidden]{display:none}
+.sv-root .sv-logs>.sv-panel{max-height:452px}
+.sv-root .sv-search{display:flex;align-items:center;gap:4px;height:20px;padding:0 5px;
+  background:var(--fld-bg);min-width:120px}
+.sv-root .sv-search input[type="search"]{-webkit-appearance:none;appearance:none}
+.sv-root .sv-search svg{width:11px;height:11px;flex:0 0 11px;fill:none;stroke:var(--fld-eu);
+  stroke-width:1.5}
+.sv-root .sv-search input{flex:1 1 auto;min-width:0;background:transparent;border:0;
+  color:var(--fld-pv);font:400 11px/1 var(--font-num)}
+.sv-root .sv-search input:focus{outline:none}
+.sv-root .sv-search:focus-within{outline:2px solid var(--accent);outline-offset:-2px}
+.sv-root .sv-row{display:flex;align-items:center;gap:4px;padding:3px 4px;flex-wrap:wrap}
 @media (prefers-reduced-motion:reduce){
-  .sv-lamp[data-blink="1"]{animation:none}
-  .sv-btn:active:not(:disabled) svg,.sv-btn[aria-pressed="true"] svg{transform:none}
+  .sv-root .sv-lamp[data-blink="1"]{animation:none}
 }
 @media (prefers-contrast:more){
-  .sv-root{--bev-sh:#5A5652;--ink-2:var(--ink)}
+  .sv-root{--ink-2:var(--ink)}
 }
 `;
 
@@ -359,7 +374,7 @@ button.sv-lb:hover{color:var(--ink)}
 /* Helpers                                                                    */
 /* ========================================================================== */
 
-/** Inject the scoped FT-CLASSIC sheet once per document. */
+/** Inject the scoped HMI-2012 sheet once per document. */
 function injectStyles() {
   if (document.getElementById(STYLE_ID)) return;
   const style = document.createElement('style');
@@ -382,7 +397,7 @@ function num(x, d) {
 const CLAUSE_BREAK = /[.;](?=\s|$)|\s[—-]\s/;
 
 /**
- * The SHORT clause an FT-CLASSIC row may carry: the first clause of a message, capped at `max`
+ * The SHORT clause an HMI-2012 row may carry: the first clause of a message, capped at `max`
  * characters. Case is left alone — this feeds a data grid, not a caption. The whole sentence
  * always goes in the row's `title`, which is the only place explanation renders on this screen.
  *
@@ -1247,24 +1262,40 @@ export function createSystemView(rootEl, ctx) {
       dom.unitBox);
   }
 
-  /** Resolve the canvas colours from the live custom properties (a canvas cannot use `var()`). */
+  /**
+   * Resolve the canvas colours from the live custom properties, because a canvas cannot use
+   * `var()`. Every name in {@link TOKEN_NAMES} is read once per theme and cached.
+   */
   function readTokens() {
     const out = {};
     try {
       const cs = getComputedStyle(dom.thumb || el);
       for (const n of TOKEN_NAMES) out[n] = (cs.getPropertyValue(n) || '').trim();
     } catch (err) {
-      // Literal fallbacks below cover a missing computed style.
+      // A host without a computed style draws with whatever the context already holds; the
+      // alternative would be a colour literal in this file, and there are none.
     }
     return out;
   }
 
-  function tok(name, fallback) {
+  /**
+   * One token's resolved value, falling back to a SECOND TOKEN rather than to a hex — this file
+   * carries no colour literal.
+   *
+   * @param {string} name The custom property to read.
+   * @param {string} [backup] A second custom property, used when the first resolves empty.
+   * @returns {string} A CSS colour or font value, or '' when neither resolved.
+   */
+  function tok(name, backup) {
     const v = tokens ? tokens[name] : '';
-    return v || fallback;
+    if (v) return v;
+    return (backup && tokens && tokens[backup]) || '';
   }
 
-  /** Draw the column to scale, with beveled adapters and the live compression state. */
+  /**
+   * Draw the column to scale: a 180° equipment gradient, a specular highlight down the inside
+   * left edge, a soft inner shadow at the base, and the live compression state.
+   */
   function drawThumb() {
     const canvas = dom.thumb;
     if (!canvas) return;
@@ -1281,7 +1312,7 @@ export function createSystemView(rootEl, ctx) {
     if (!g) return;
     if (!tokens) tokens = readTokens();
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    g.fillStyle = tok('--fld-bg', '#0A0F0A');
+    g.fillStyle = tok('--fld-bg', '--panel-lo');
     g.fillRect(0, 0, W, H);
 
     const c = config.column;
@@ -1294,37 +1325,69 @@ export function createSystemView(rootEl, ctx) {
     const x = Math.round((W - colW) / 2);
     const y = 26;
 
-    // Tube: a sunken glass column on the black field.
-    g.fillStyle = 'rgba(255,255,255,0.05)';
-    g.fillRect(x, y, colW, colH);
-    g.lineWidth = 1;
-    g.strokeStyle = tok('--plot-axis', '#C7C3BC');
-    g.strokeRect(x + 0.5, y + 0.5, colW - 1, colH - 1);
+    const equipTop = tok('--equip-top', '--panel-hi');
+    const equipBot = tok('--equip-bot', '--panel');
+    const equipEdge = tok('--equip-edge', '--edge');
+    const specular = tok('--spec-edge', '--ink');
+    const shade = tok('--shade-deep', '--panel-lo');
 
-    // Bed, shortened by the compression offset.
+    /**
+     * A vertical two-stop gradient, or a plain colour when a token did not resolve —
+     * `addColorStop` throws on an empty string, `fillStyle` merely ignores one.
+     *
+     * @param {number} y0 Top, CSS px.
+     * @param {number} y1 Bottom, CSS px.
+     * @param {string} a Colour at `y0`.
+     * @param {string} b Colour at `y1`.
+     * @returns {CanvasGradient|string} A gradient, or the best single colour available.
+     */
+    const vgrad = (y0, y1, a, b) => {
+      if (!a || !b) return b || a || '';
+      const gr = g.createLinearGradient(0, y0, 0, y1);
+      gr.addColorStop(0, a);
+      gr.addColorStop(1, b);
+      return gr;
+    };
+
+    // Tube: the 180° equipment gradient, not a flat grey slab.
+    g.fillStyle = vgrad(y, y + colH, equipTop, equipBot);
+    g.fillRect(x, y, colW, colH);
+
+    // Bed, shortened by the compression offset. Colour is state, so a collapsed bed — and only a
+    // collapsed bed — earns a saturated fill.
     const eps0 = c.compression.eps0 || c.epsC;
     const shrink = eps0 > 0 ? Math.max(0, 1 - (1 - run.epsCompressed) / (1 - eps0)) : 0;
     const bedTop = y + Math.min(colH * 0.25, colH * shrink);
-    g.fillStyle = run.bedCollapsed ? '#8A5BC8' : '#6E6E6E';
-    g.globalAlpha = 0.55;
-    g.fillRect(x + 2, bedTop, colW - 4, y + colH - bedTop - 2);
+    g.fillStyle = run.bedCollapsed ? tok('--alarm', '--svc-b') : tok('--ink-3', '--edge');
+    g.globalAlpha = run.bedCollapsed ? 0.5 : 0.28;
+    g.fillRect(x + 1, bedTop, colW - 2, y + colH - bedTop - 1);
     g.globalAlpha = 1;
 
-    // Adapters, drawn with the same bevel language as the chrome.
+    // Specular highlight down the inside left edge — `--spec-edge` already carries its alpha.
+    g.fillStyle = specular;
+    g.fillRect(x + 1, y + 1, 1, colH - 2);
+
+    // Soft inner shadow at the base, so the vessel sits in the field rather than on it.
+    g.fillStyle = vgrad(y + colH - 14, y + colH, 'transparent', shade);
+    g.fillRect(x + 1, y + colH - 14, colW - 2, 13);
+
+    g.lineWidth = 1;
+    g.strokeStyle = equipEdge;
+    g.strokeRect(x + 0.5, y + 0.5, colW - 1, colH - 1);
+
+    // Adapters: the same 1 px border and vertical gradient as every other body on the screen.
     const adapter = (ay) => {
-      g.fillStyle = tok('--face', '#C7C3BC');
+      g.fillStyle = vgrad(ay, ay + 7, equipTop, equipBot);
       g.fillRect(x - 5, ay, colW + 10, 7);
-      g.fillStyle = tok('--bev-hi', '#FFFFFF');
-      g.fillRect(x - 5, ay, colW + 10, 1);
-      g.fillStyle = tok('--bev-dk', '#4A4744');
-      g.fillRect(x - 5, ay + 6, colW + 10, 1);
+      g.strokeStyle = equipEdge;
+      g.strokeRect(x - 4.5, ay + 0.5, colW + 9, 6);
     };
     adapter(y - 8);
     adapter(y + colH + 1);
 
     // Dimension tags — labels and numbers, never a sentence.
-    g.fillStyle = tok('--fld-eu', '#9FB39F');
-    g.font = '10px ' + (tok('--font-num', 'Consolas, monospace'));
+    g.fillStyle = tok('--fld-eu', '--ink-2');
+    g.font = '10px ' + tok('--font-num');
     g.textAlign = 'center';
     g.fillText(`ID ${c.id_cm.toFixed(2)} cm`, W / 2, y - 13);
     g.save();
@@ -1332,7 +1395,7 @@ export function createSystemView(rootEl, ctx) {
     g.rotate(-Math.PI / 2);
     g.fillText(`L ${c.L_cm.toFixed(2)} cm`, 0, 0);
     g.restore();
-    g.fillStyle = tok('--fld-pv', '#12FF4B');
+    g.fillStyle = tok('--fld-pv', '--ink');
     g.fillText(`CV ${c.V_mL.toFixed(1)} mL`, W / 2, y + colH + 24);
 
     setAttr(canvas, 'title', `${config.name} · ${config.scale} · ` +

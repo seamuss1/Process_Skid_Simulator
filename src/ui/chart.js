@@ -1,22 +1,36 @@
 /**
  * @file src/ui/chart.js
- * The FT-CLASSIC process trend: a three-layer canvas plot well, a legend rail of ISA
- * tags and label boxes, and a slim history strip — styled as a Rockwell FactoryTalk /
- * Wonderware operator trend rather than as a web chart.
+ * The HMI-2012 process trend: a three-layer canvas plot well, a legend rail of ISA tags and
+ * value fields, and a slim history strip — styled as a Wonderware InTouch 2012 / FactoryTalk
+ * View SE 7 / Ignition 7 operator trend rather than as a web chart.
+ *
+ * THE SKIN. Depth is a 1px border plus a subtle vertical gradient, never a hard bevel: the
+ * plot well and every value field use the SUNKEN recipe, the toolbar and the rail use the
+ * RAISED one, 2 px of radius on panels, buttons, fields and chips, 3 px on the well. Digits
+ * are WHITE for a PV and amber for an SP on a recessed near-black field — the single change
+ * that separates a 2012 screen from a 1996 one. The graticule is a low-contrast cool grey,
+ * axis furniture is `--edge`, axis labels are `--ink-2`, and saturated colour is spent only
+ * on the pens, on state and on alarms.
  *
  * WHY PV-VERSUS-SP IS THE WHOLE DESIGN
  * Every pen is a pair. The process variable is a SOLID 1.5 px stroke; its setpoint is the
- * SAME HUE, DASHED 5-4, at 1 px. FIC-101 (flow) and AIC-101 (%B) are true closed loops and
- * are lit by default. PT-101 and PDT-101 have no setpoint — they get their alarm LIMIT as
- * a dashed line in their own hue, captioned `LIM`, never `SP`. UV-101, CE-101, AE-101 and
- * TT-101 are bare measurements and show a PV box only. The rail never invents a setpoint.
+ * SAME HUE, DASHED 5-4, at 1 px. FIC-101 (flow) and AIC-101 (%B) are true closed loops.
+ * PT-101 and PDT-101 have no setpoint — they get their alarm LIMIT as a dashed line in their
+ * own hue, captioned `LIM`, never `SP`. UV-101, CE-101, AE-101 and TT-101 are bare
+ * measurements and show a PV field only. The rail never invents a setpoint.
+ *
+ * WHICH PENS ARE LIT ON ARRIVAL. Pressure is the safety-critical variable on a column skid,
+ * so PT-101 carries the default view together with its trip limit; UV-101 is the product
+ * signal and FIC-101 is the loop the operator drives. AIC-101 and CE-101 stay dark on
+ * arrival — five pens on three gutters is a readable screen, seven is not — and every one of
+ * them is a single click away in the rail.
  *
  * A setpoint is a HELD value, so it is stroked as a STAIRCASE — horizontal run, vertical
  * jump — in every mode and at every zoom level. A measurement is interpolated between
  * samples; a command is not, and zoom must never turn an instantaneous step into a ramp.
  *
  * LAYERS (each `cssW*dpr x cssH*dpr`, context scaled by `dpr`)
- *   1. static  — black well, dark-green graticule, phase bands, fraction ticks, pooled
+ *   1. static  — graphite well, cool-grey graticule, phase bands, fraction ticks, pooled
  *                region, peak flags, axis furniture.
  *   2. traces  — PV and SP pens, min/max decimated to at most two vertices per device
  *                pixel column, with the append-only blit fast path at the live edge.
@@ -123,6 +137,9 @@ const DEFAULT_Y_AXES = Object.freeze([
   // a 196 setpoint is two pixels of deviation on a 0–250 scale and unreadable. Banding is
   // what makes the PV/SP pair do its job.
   { id: 'flow', eu: 'mL/min', side: 'right', mode: 'auto-band', min: 0, max: 10 },
+  // Pressure is zero-anchored and sticky, and the autoscaler folds PT-101's trip limit into
+  // its range, so the pen and the line it must not cross share one gutter at a readable
+  // scale from the first sample. This is the axis the default view is built around.
   { id: 'press', eu: 'bar', side: 'right', mode: 'auto-sticky', min: 0, max: 2 },
   { id: 'temp', eu: 'C', side: 'right', mode: 'auto-sticky', min: 0, max: 40 },
 ]);
@@ -143,15 +160,15 @@ const DEFAULT_PENS = Object.freeze([
   },
   {
     id: 'pctb', tag: 'AIC-101', channel: 'pctB_column_inlet', sp: 'pctB_setpoint',
-    eu: '%', dec: 1, axis: 'pct', penVar: '--pen-pctb', gloss: 'pctB', visible: true, fill: 0.1,
+    eu: '%', dec: 1, axis: 'pct', penVar: '--pen-pctb', gloss: 'pctB', visible: false, fill: 0.1,
   },
   {
     id: 'cond', tag: 'CE-101', channel: 'cond_mS_cm', sp: null, eu: 'mS/cm', dec: 2,
-    axis: 'cond', penVar: '--pen-cond', gloss: 'CE-101', visible: true,
+    axis: 'cond', penVar: '--pen-cond', gloss: 'CE-101', visible: false,
   },
   {
     id: 'press', tag: 'PT-101', channel: 'P1_bar', sp: null, limitSignal: 'P1', eu: 'bar',
-    dec: 2, axis: 'press', penVar: '--pen-press', gloss: 'PT-101', visible: false,
+    dec: 2, axis: 'press', penVar: '--pen-press', gloss: 'PT-101', visible: true,
   },
   {
     id: 'dp', tag: 'PDT-101', channel: 'dP_bar', sp: null, limitSignal: 'DP', eu: 'bar',
@@ -168,57 +185,79 @@ const DEFAULT_PENS = Object.freeze([
 ]);
 
 /**
- * Pen-token fallbacks, used when `styles/tokens.css` has not defined them. These are the
- * FT-CLASSIC trend pens and are IDENTICAL in both themes — the plot well is black either
- * way, so the pens never change. `--pen-dp` is the one pen the palette does not name:
- * PDT-101 needs a hue of its own, because its limit line must be "the same hue" as its own
- * PV and therefore cannot share PT-101's amber.
+ * Pen-token fallbacks, used when `styles/tokens.css` has not defined them.
+ *
+ * WHY LITERALS EXIST AT ALL IN THIS FILE. `ctx.fillStyle` cannot resolve `var()`, so every
+ * canvas painter needs a resolved string; {@link readTokens} reads the real token off the
+ * document element and only reaches these tables when the palette does not define the name.
+ * They are the module's ONLY colour literals, they are dead the moment `styles/tokens.css`
+ * declares the token, and nothing outside these four tables hard-codes a colour.
+ *
+ * A trend is the one place saturated colour earns its keep, because the operator tells the
+ * pens apart by hue — but the hues are the HMI-2012 ones, NOT the CRT set this file used to
+ * carry. Every value below is a byte-for-byte copy of the GRAPHITE block of
+ * `styles/tokens.css`, so a build that somehow renders before the palette lands paints the
+ * same muted pens it will paint a frame later, instead of flashing lime on graphite.
+ * Ten entries: `--pen-uv2` and `--pen-uv3` are here for the results chromatogram's pens.
  */
 const FALLBACK_PEN = Object.freeze({
-  '--pen-flow': '#00E5FF',
-  '--pen-pctb': '#FF6EC7',
-  '--pen-press': '#FFD400',
-  '--pen-uv': '#12FF4B',
-  '--pen-cond': '#FF9A3C',
-  '--pen-ph': '#B39DFF',
-  '--pen-temp': '#FFFFFF',
-  '--pen-dp': '#5AA9FF',
+  '--pen-flow': '#4FC3F7',
+  '--pen-pctb': '#CE93D8',
+  '--pen-press': '#FFB74D',
+  '--pen-uv': '#66BB6A',
+  '--pen-uv2': '#9CCC65',
+  '--pen-uv3': '#26A69A',
+  '--pen-cond': '#FF8A65',
+  '--pen-ph': '#B39DDB',
+  '--pen-temp': '#E8ECF0',
+  '--pen-dp': '#F06292',
 });
 
-/** Rotating pen palette for a caller-supplied pen whose token resolves to nothing. */
+/**
+ * Rotating pen palette for a caller-supplied pen whose token resolves to nothing. Same ten
+ * hues, ordered so adjacent pens never share a family.
+ */
 const PEN_CYCLE = Object.freeze([
-  '#12FF4B', '#00E5FF', '#FF6EC7', '#FFD400', '#FF9A3C', '#B39DFF', '#FFFFFF', '#5AA9FF',
+  '#66BB6A', '#4FC3F7', '#CE93D8', '#FFB74D', '#FF8A65',
+  '#B39DDB', '#E8ECF0', '#F06292', '#9CCC65', '#26A69A',
 ]);
 
-/** Field / plot tokens, theme-independent. */
+/**
+ * Value-field, state and service tokens the CANVAS resolves. Theme-independent by design: a
+ * recessed field reads the same in a lit control room and a dark one, and so must an alarm.
+ * Only tokens a painter actually asks for appear here — the rest of the field palette is
+ * consumed by the stylesheet through `var()`, where a JS fallback could not help anyway.
+ */
 const FIXED_TOKENS = Object.freeze({
-  '--plot-bg': '#000000',
-  '--plot-grid': '#1F3D1F',
-  '--plot-axis': '#C7C3BC',
-  '--fld-bg': '#0A0F0A',
-  '--fld-pv': '#12FF4B',
-  '--fld-sp': '#FFD400',
-  '--fld-out': '#00E5FF',
-  '--fld-alarm': '#FF3B30',
-  '--fld-stale': '#7A8A7A',
-  '--fld-eu': '#9FB39F',
-  '--lamp-warn': '#FFC000',
-  '--lamp-alarm': '#E81123',
+  '--fld-sp': '#FFC24B',
+  '--fld-stale': '#6B7681',
+  '--warn': '#FFB300',
+  '--alarm': '#E53935',
+  '--svc-a': '#4A7FB5',
+  '--svc-b': '#8267AD',
+  '--svc-sample': '#B58141',
+  '--svc-cip': '#3F9E8C',
+});
+
+/**
+ * The cool-graphite chrome. HMI-2012 is ONE palette, so both theme entries below point at
+ * this single set; the pair survives because {@link exportPNG} still takes a theme and
+ * {@link readTokens} may only read the ACTIVE theme's values off the document element.
+ */
+const GRAPHITE = Object.freeze({
+  '--panel': '#2B3138',
+  '--panel-hi': '#333A42',
+  '--panel-lo': '#1B1F24',
+  '--edge': '#454E58',
+  '--edge-soft': '#383F47',
+  '--ink': '#E8ECF0',
+  '--ink-2': '#9AA5B1',
+  '--ink-3': '#6B7681',
+  '--accent': '#3D9BE9',
 });
 
 /** Chrome tokens per theme, used when `styles/tokens.css` has not loaded. */
-const FALLBACK_CHROME = Object.freeze({
-  light: {
-    '--screen': '#6E6E6E', '--face': '#C7C3BC', '--face-2': '#BFBBB4', '--face-3': '#D2CEC7',
-    '--bev-hi': '#FFFFFF', '--bev-lt': '#E6E2DA', '--bev-sh': '#85817B', '--bev-dk': '#4A4744',
-    '--ink': '#101010', '--ink-2': '#3A3A3A', '--ink-off': '#7A7A7A',
-  },
-  dark: {
-    '--screen': '#2A2A2A', '--face': '#4A4744', '--face-2': '#3E3B38', '--face-3': '#565250',
-    '--bev-hi': '#7A7672', '--bev-lt': '#605C58', '--bev-sh': '#2E2B29', '--bev-dk': '#1A1817',
-    '--ink': '#E8E4DC', '--ink-2': '#B8B4AC', '--ink-off': '#7A7A7A',
-  },
-});
+const FALLBACK_CHROME = Object.freeze({ light: GRAPHITE, dark: GRAPHITE });
 
 /** Every custom property the canvas painters resolve, read once per theme change. */
 const TOKEN_NAMES = Object.freeze(
@@ -228,33 +267,34 @@ const TOKEN_NAMES = Object.freeze(
 );
 
 /**
- * Phase-band tints. Keyed on BOTH the raw block type and the short kind slug a caller may
- * already have collapsed it to, so a band set built either way tints identically. On a
- * black well the tints are additive and deliberately faint.
+ * Phase-band tints, keyed on BOTH the raw block type and the short kind slug a caller may
+ * already have collapsed it to, so a band set built either way tints identically. Each entry
+ * names a SERVICE colour in the resolved map rather than an rgba literal: the band is
+ * painted through `globalAlpha`, so the tint follows the palette's desaturated service hues
+ * instead of shadowing them with a second, stale copy.
  */
-const TINT_LOAD = 'rgba(200,134,43,0.065)';
-const TINT_WASH = 'rgba(45,111,184,0.075)';
-const TINT_ELUTE = 'rgba(138,91,200,0.085)';
-const TINT_STRIP = 'rgba(31,169,140,0.065)';
 const BAND_TINT = Object.freeze({
-  LOAD: TINT_LOAD, load: TINT_LOAD,
-  WASH: TINT_WASH, wash: TINT_WASH,
-  ELUTION_ISOCRATIC: TINT_ELUTE,
-  ELUTION_LINEAR: TINT_ELUTE,
-  ELUTION_STEP: TINT_ELUTE,
-  elute: TINT_ELUTE,
-  STRIP: TINT_STRIP, CIP: TINT_STRIP, strip: TINT_STRIP,
+  LOAD: 'svcSample', load: 'svcSample',
+  WASH: 'svcA', wash: 'svcA',
+  ELUTION_ISOCRATIC: 'svcB',
+  ELUTION_LINEAR: 'svcB',
+  ELUTION_STEP: 'svcB',
+  elute: 'svcB',
+  STRIP: 'svcCip', CIP: 'svcCip', strip: 'svcCip',
 });
 
+/** Phase-band tint strength over the graphite well. */
+const BAND_TINT_ALPHA = 0.13;
 /**
- * Alternating band wash, so consecutive blocks are separable without colour. Kept very
- * faint: on a black well every wash is additive, and the graticule must survive it.
+ * Alternating band wash strengths, so consecutive blocks are separable without colour. Kept
+ * very faint: every wash is additive over the well, and the graticule must survive it.
  */
-const BAND_A = 'rgba(255,255,255,0.020)';
-const BAND_B = 'rgba(255,255,255,0.040)';
-/** Pooled-region wash and edge. */
-const POOL_FILL = 'rgba(255,212,0,0.10)';
-const POOL_EDGE = '#FFD400';
+const BAND_WASH_A = 0.022;
+const BAND_WASH_B = 0.042;
+/** Pooled-region wash strength; its edges are drawn solid in the SP amber. */
+const POOL_FILL_ALPHA = 0.13;
+/** Selection wash strength — the zoom rectangle and the history strip's window brush. */
+const SELECT_FILL_ALPHA = 0.16;
 
 /** name -> { unit, decimals } for every fixed numeric log channel. */
 const CHANNEL_META = (() => {
@@ -266,9 +306,13 @@ const CHANNEL_META = (() => {
   return m;
 })();
 
-/** Canvas font stacks. `ctx.font` is a CSS font shorthand and cannot resolve `var()`. */
-const FONT_UI = 'system-ui, -apple-system, "Segoe UI", Tahoma, Arial, sans-serif';
-const FONT_NUM = 'ui-monospace, Consolas, "Cascadia Mono", "Segoe UI Mono", Menlo, monospace';
+/**
+ * Canvas font stacks, mirroring `--font-ui` and `--font-num`. `ctx.font` is a CSS font
+ * shorthand and cannot resolve `var()`, so the stacks are repeated here. System fonts only —
+ * the trend never waits on a web font to paint an axis.
+ */
+const FONT_UI = '"Segoe UI", Roboto, system-ui, -apple-system, Arial, sans-serif';
+const FONT_NUM = '"Roboto Mono", Consolas, ui-monospace, "Cascadia Mono", Menlo, monospace';
 
 /* -------------------------------------------------------------------------- */
 /* 1. SMALL NUMERIC HELPERS                                                   */
@@ -360,21 +404,22 @@ function fmtBox(v, dec) {
 
 /**
  * The theme the document is currently showing.
+ *
+ * GRAPHITE is the default, because `styles/tokens.css` block 1 is `:root, [data-theme="dark"]`
+ * and no rule in that file is scoped to `prefers-color-scheme` — so with the attribute absent
+ * the chrome is graphite whatever the workstation is set to, and the painters must agree.
+ * `activeTheme()` in ui/format.js resolves the same way.
  * @returns {'dark'|'light'} Active theme name.
  */
 function activeTheme() {
   const attr = document.documentElement.getAttribute('data-theme');
-  if (attr === 'dark') return 'dark';
-  if (attr === 'light') return 'light';
-  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
-    ? 'dark'
-    : 'light';
+  return attr === 'light' ? 'light' : 'dark';
 }
 
 /**
  * Read every token the painters need off the document element. Called once per theme
  * change, never per frame: reading custom properties inside a frame is a layout-thrash
- * trap. Values absent from `styles/tokens.css` fall back to the FT-CLASSIC constants.
+ * trap. Values absent from `styles/tokens.css` fall back to the HMI-2012 constants above.
  * @param {'dark'|'light'|'current'} theme Theme to resolve.
  * @returns {object} `{ theme, <token>: value, ... }`.
  */
@@ -406,6 +451,11 @@ function readTokens(theme) {
 
 /**
  * Resolve the full colour map for one theme, including a stroke colour per pen.
+ *
+ * The three plot roles are DERIVED from the palette rather than given their own tokens, so
+ * the well can never drift away from the panels around it: the well is `--panel-lo`, the
+ * graticule is `--edge-soft` (a low-contrast cool grey, not a green CRT phosphor), the axis
+ * furniture — spines, frame, tick marks — is `--edge`, and every axis LABEL is `--ink-2`.
  * @param {'dark'|'light'|'current'} theme Theme to resolve.
  * @param {Array<object>} pens Pen list, for the per-pen tokens.
  * @returns {object} Colour map with a `pen[id]` stroke table.
@@ -414,23 +464,25 @@ function resolveColors(theme, pens) {
   const t = readTokens(theme);
   const c = {
     theme: t.theme,
-    face: t['--face'],
-    face2: t['--face-2'],
-    face3: t['--face-3'],
+    panel: t['--panel'],
+    panelHi: t['--panel-hi'],
+    edge: t['--edge'],
     ink: t['--ink'],
     ink2: t['--ink-2'],
-    inkOff: t['--ink-off'],
-    bevHi: t['--bev-hi'],
-    bevSh: t['--bev-sh'],
-    bevDk: t['--bev-dk'],
-    plotBg: t['--plot-bg'],
-    plotGrid: t['--plot-grid'],
-    plotAxis: t['--plot-axis'],
+    ink3: t['--ink-3'],
+    accent: t['--accent'],
+    plotBg: t['--panel-lo'],
+    plotGrid: t['--edge-soft'],
+    plotFrame: t['--edge'],
+    plotAxis: t['--ink-2'],
     fldSp: t['--fld-sp'],
-    fldEu: t['--fld-eu'],
     fldStale: t['--fld-stale'],
-    warn: t['--lamp-warn'],
-    alarm: t['--lamp-alarm'],
+    warn: t['--warn'],
+    alarm: t['--alarm'],
+    svcA: t['--svc-a'],
+    svcB: t['--svc-b'],
+    svcSample: t['--svc-sample'],
+    svcCip: t['--svc-cip'],
     pen: Object.create(null),
   };
   for (let i = 0; i < pens.length; i++) {
@@ -455,42 +507,60 @@ function resolveColors(theme, pens) {
 /* 3. STYLES                                                                  */
 /* -------------------------------------------------------------------------- */
 
-/** Raised bevel: outer highlight, outer shadow, inner highlight, inner shadow. */
+/**
+ * THE DEPTH RECIPE. Three declarations, applied nowhere else and never hand-rolled — and each
+ * one is now assembled entirely from the surface/border/elevation triples that
+ * `styles/tokens.css` §2 publishes, rather than from hand-rolled gradients and rgba opacities.
+ * That matters beyond tidiness: the black and white alphas this used to carry were tuned for
+ * graphite, so on STEEL a `rgba(0,0,0,.5)` inner shadow read as a smudge and a
+ * `rgba(255,255,255,.06)` highlight vanished. `--shade*` and `--spec*` invert with the theme;
+ * the literals could not. There is no colour literal left in this stylesheet.
+ */
 const RAISED =
-  'box-shadow:inset 1px 1px 0 var(--bev-hi,#FFFFFF),inset -1px -1px 0 var(--bev-dk,#4A4744),' +
-  'inset 2px 2px 0 var(--bev-lt,#E6E2DA),inset -2px -2px 0 var(--bev-sh,#85817B)';
-/** Sunken bevel: the raised recipe with the two pairs swapped. */
+  'background:var(--surface-raised);border:var(--border-edge);' +
+  'box-shadow:var(--elev-raised)';
+const PRESSED =
+  'background:var(--surface-pressed);border:var(--border-edge);' +
+  'box-shadow:var(--elev-pressed)';
 const SUNKEN =
-  'box-shadow:inset 1px 1px 0 var(--bev-dk,#4A4744),inset -1px -1px 0 var(--bev-hi,#FFFFFF),' +
-  'inset 2px 2px 0 var(--bev-sh,#85817B),inset -2px -2px 0 var(--bev-lt,#E6E2DA)';
+  'background:var(--fld-bg);border:var(--border-field);' +
+  'box-shadow:var(--elev-sunken)';
+/** The focus ring, identical on every focusable control in the trend. */
+const FOCUS = 'outline:2px solid var(--accent);outline-offset:-2px';
 
 const CHART_CSS = `
 .ftx{position:relative;display:flex;flex-direction:column;width:100%;height:100%;
-  min-height:150px;min-width:280px;background:var(--face,#C7C3BC);color:var(--ink,#101010);
-  font-family:var(--font-ui,system-ui,'Segoe UI',Tahoma,sans-serif);user-select:none;
-  overflow:hidden}
-.ftx *{box-sizing:border-box;border-radius:0}
-.ftx__bar{flex:0 0 auto;display:flex;align-items:center;gap:2px;height:26px;padding:0 3px;
-  background:var(--face-2,#BFBBB4);${RAISED}}
-.ftx__grp{display:flex;align-items:center;gap:2px}
-.ftx__sep{flex:0 0 auto;width:2px;height:18px;margin:0 3px;
-  box-shadow:inset 1px 0 0 var(--bev-sh,#85817B),inset -1px 0 0 var(--bev-hi,#FFFFFF)}
+  min-height:150px;min-width:280px;background:var(--panel);color:var(--ink);
+  font-family:var(--font-ui);user-select:none;overflow:hidden}
+.ftx *{box-sizing:border-box}
+.ftx__bar{flex:0 0 auto;display:flex;align-items:center;gap:3px;height:28px;padding:0 4px;
+  background:var(--surface-raised);
+  border-bottom:1px solid var(--edge)}
+.ftx__grp{display:flex;align-items:center;gap:3px}
+.ftx__sep{flex:0 0 auto;width:1px;height:16px;margin:0 4px;background:var(--edge-soft)}
 .ftx__sp{flex:1 1 auto}
-.ftx__btn{flex:0 0 auto;width:22px;height:22px;padding:0;display:inline-flex;
-  align-items:center;justify-content:center;border:0;background:var(--face,#C7C3BC);
-  color:var(--ink-2,#3A3A3A);cursor:pointer;${RAISED}}
-.ftx__btn:hover{color:var(--ink,#101010)}
-.ftx__btn:focus-visible{outline:2px solid #FFD400;outline-offset:-3px}
-.ftx__btn[aria-pressed="true"],.ftx__btn:active{color:var(--ink,#101010);${SUNKEN}}
-.ftx__btn[aria-pressed="true"] svg,.ftx__btn:active svg{transform:translate(1px,1px)}
-.ftx__btn[disabled]{color:var(--ink-off,#7A7A7A);cursor:default}
-.ftx__btn svg{display:block;fill:none;stroke:currentColor;stroke-width:1.4;
-  stroke-linecap:square;stroke-linejoin:miter}
+/* Width tracks --ctl-lg because styles/app.css names .ftx__btn in its own button group and
+   sets min-width on it; agreeing with that metric is cheaper than fighting it. */
+.ftx__btn{flex:0 0 auto;width:var(--ctl-lg);height:22px;padding:0;display:inline-flex;
+  align-items:center;justify-content:center;border-radius:2px;color:var(--ink-2);
+  cursor:pointer;transition:color var(--dur-2,100ms) linear;${RAISED}}
+.ftx__btn:hover{color:var(--ink)}
+.ftx__btn:focus-visible{${FOCUS}}
+.ftx__btn:active{color:var(--ink);${PRESSED}}
+.ftx__btn[aria-pressed="true"]{color:var(--accent);${PRESSED}}
+.ftx__btn[disabled]{color:var(--ink-3);cursor:default}
+.ftx__btn svg{display:block;width:14px;height:14px;fill:none;stroke:currentColor;
+  stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
 .ftx__btn svg [fill]{stroke:none}
-.ftx__body{flex:1 1 auto;display:flex;min-height:0;min-width:0;gap:2px;padding:2px}
+.ftx__body{flex:1 1 auto;display:flex;min-height:0;min-width:0;gap:4px;padding:4px}
+/* The well and the history strip take the SUNKEN recipe but fill with --panel-lo rather than
+   --fld-bg: they are recessed workspace, not value fields, and the canvas paints the same
+   --panel-lo underneath so the two can never disagree at the rounded corners. 3px radius. */
 .ftx__well{position:relative;flex:1 1 auto;min-width:120px;min-height:70px;
-  background:var(--plot-bg,#000000);${SUNKEN};cursor:crosshair;outline:none}
-.ftx__well:focus-visible{outline:2px solid #FFD400;outline-offset:-2px}
+  border-radius:var(--r-plot);
+  background:var(--panel-lo);border:var(--border-field);
+  box-shadow:var(--elev-sunken);cursor:crosshair;outline:none}
+.ftx__well:focus-visible{${FOCUS}}
 .ftx__well--pan{cursor:grab}
 .ftx__well--panning{cursor:grabbing}
 .ftx__well--pool{cursor:col-resize}
@@ -499,87 +569,87 @@ const CHART_CSS = `
 .ftx__layer--s{z-index:1}
 .ftx__layer--t{z-index:2}
 .ftx__layer--o{z-index:3;touch-action:none}
-.ftx__rail{flex:0 0 auto;width:174px;display:flex;flex-direction:column;min-height:0;
-  padding:2px;background:var(--face,#C7C3BC);${RAISED}}
-.ftx__railhd{flex:0 0 auto;display:grid;grid-template-columns:14px 1fr 15px;gap:1px 3px;
-  align-items:center;padding:0 1px 2px;font-size:9px;font-weight:700;line-height:1.2;
-  letter-spacing:.04em;text-transform:uppercase;color:var(--ink-2,#3A3A3A);
-  box-shadow:inset 0 -1px 0 var(--bev-sh,#85817B)}
-.ftx__railhd b{grid-column:2;grid-row:1;font-weight:700}
-.ftx__railhd i{grid-column:2/4;grid-row:2;display:flex;gap:2px;font-style:normal}
+.ftx__rail{flex:0 0 auto;width:182px;display:flex;flex-direction:column;min-height:0;
+  border-radius:2px;overflow:hidden;${RAISED}}
+.ftx__railhd{flex:0 0 auto;display:grid;grid-template-columns:16px 1fr 14px;gap:1px 4px;
+  align-items:center;padding:3px 5px;font-size:10px;font-weight:600;line-height:1.2;
+  letter-spacing:.02em;text-transform:uppercase;color:var(--ink-2);
+  background:var(--surface-raised);
+  border-bottom:1px solid var(--edge)}
+.ftx__railhd b{grid-column:2;grid-row:1;font-weight:600}
+.ftx__railhd i{grid-column:2/4;grid-row:2;display:flex;gap:3px;font-style:normal}
 .ftx__railhd i span{text-align:right}
 .ftx__railhd i span:first-child{flex:1.35 1 0}
 .ftx__railhd i span:last-child{flex:1 1 0}
 .ftx__rows{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden}
-.ftx__row{display:grid;grid-template-columns:14px 1fr 15px;gap:1px 3px;align-items:center;
-  padding:2px 1px;box-shadow:inset 0 1px 0 var(--bev-hi,#FFFFFF),
-  inset 0 -1px 0 var(--bev-sh,#85817B)}
-.ftx__row--focus{background:var(--face-3,#D2CEC7)}
-.ftx__row--off .ftx__tag{color:var(--ink-off,#7A7A7A)}
-.ftx__chip{grid-column:1;grid-row:1/3;align-self:center;position:relative;width:14px;
-  height:16px;background:var(--fld-bg,#0A0F0A);
-  box-shadow:inset 1px 1px 0 var(--bev-dk,#4A4744),inset -1px -1px 0 var(--bev-hi,#FFFFFF)}
+.ftx__row{display:grid;grid-template-columns:16px 1fr 14px;gap:2px 4px;align-items:center;
+  padding:3px 5px;border-bottom:1px solid var(--edge-soft)}
+.ftx__row--focus{background:var(--accent-soft)}
+.ftx__row--off .ftx__tag{color:var(--ink-3)}
+.ftx__row--off .ftx__chip{opacity:.4}
+.ftx__chip{grid-column:1;grid-row:1/3;align-self:center;position:relative;width:16px;
+  height:18px;border-radius:2px;background:var(--fld-bg);border:1px solid var(--fld-edge)}
 .ftx__chip i{position:absolute;left:2px;right:2px;display:block;font-style:normal}
 .ftx__chip i.pv{top:5px;height:2px;background:currentColor}
 .ftx__chip i.sp{top:10px;height:1px;
   background:repeating-linear-gradient(90deg,currentColor 0 3px,transparent 3px 6px)}
-.ftx__tag{grid-column:2;grid-row:1;font-size:10px;font-weight:700;letter-spacing:.04em;
-  color:var(--ink,#101010);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-  cursor:help}
+.ftx__tag{grid-column:2;grid-row:1;font-size:11px;font-weight:600;letter-spacing:.02em;
+  color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:help}
 .ftx__cb{grid-column:3;grid-row:1;appearance:none;-webkit-appearance:none;margin:0;
-  width:13px;height:13px;position:relative;background:var(--face-3,#D2CEC7);cursor:pointer;
-  box-shadow:inset 1px 1px 0 var(--bev-dk,#4A4744),inset -1px -1px 0 var(--bev-hi,#FFFFFF),
-  inset 2px 2px 0 var(--bev-sh,#85817B)}
-.ftx__cb:checked::after{content:'';position:absolute;left:3px;top:3px;width:7px;height:7px;
-  background:currentColor}
-.ftx__cb:focus-visible{outline:2px solid #FFD400;outline-offset:1px}
-.ftx__flds{grid-column:2/4;grid-row:2;display:flex;gap:2px;min-width:0}
-.ftx__fld{flex:1 1 0;min-width:0;display:flex;align-items:baseline;gap:2px;padding:1px 3px;
-  background:var(--fld-bg,#0A0F0A);overflow:hidden;
-  font:700 12px/1.2 var(--font-num,ui-monospace,Consolas,monospace);
-  font-variant-numeric:tabular-nums lining-nums;
-  box-shadow:inset 1px 1px 0 var(--bev-dk,#4A4744),inset -1px -1px 0 var(--bev-hi,#FFFFFF),
-  inset 2px 2px 0 var(--bev-sh,#85817B)}
+  width:13px;height:13px;position:relative;border-radius:2px;cursor:pointer;${SUNKEN}}
+.ftx__cb:checked::after{content:'';position:absolute;left:2px;top:2px;width:7px;height:7px;
+  border-radius:1px;background:currentColor}
+/* The one focus ring that sits OUTSIDE its control: a 2px inset ring on a 13px checkbox
+   would cover the tick it exists to reveal. Same width, same accent. */
+.ftx__cb:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.ftx__flds{grid-column:2/4;grid-row:2;display:flex;gap:3px;min-width:0}
+.ftx__fld{flex:1 1 0;min-width:0;display:flex;align-items:baseline;gap:3px;padding:1px 4px;
+  border-radius:2px;overflow:hidden;
+  font:500 12px/1.35 var(--font-num);font-variant-numeric:tabular-nums lining-nums;
+  letter-spacing:.01em;${SUNKEN}}
 .ftx__fld--pv{flex:1.35 1 0}
-.ftx__fld em{flex:0 0 auto;font-style:normal;font-size:8px;font-weight:700;
-  letter-spacing:.04em;color:var(--fld-eu,#9FB39F)}
-.ftx__fld b{flex:1 1 auto;font-weight:700;text-align:right;overflow:hidden;
-  color:var(--fld-pv,#12FF4B)}
-.ftx__fld u{flex:0 0 auto;text-decoration:none;font-size:80%;font-weight:400;
-  color:var(--fld-eu,#9FB39F)}
-.ftx__fld--sp b{color:var(--fld-sp,#FFD400)}
-.ftx__fld--x b{color:var(--fld-out,#00E5FF)}
-.ftx__fld--alarm b{color:var(--fld-alarm,#FF3B30)}
-.ftx__fld--stale b{color:var(--fld-stale,#7A8A7A)}
-.ftx__card{position:absolute;top:0;left:0;z-index:4;display:none;padding:2px;gap:2px;
-  background:var(--face,#C7C3BC);pointer-events:none;${RAISED}}
+.ftx__fld em{flex:0 0 auto;font-style:normal;font-size:9px;font-weight:600;
+  letter-spacing:.02em;color:var(--ink-3)}
+.ftx__fld b{flex:1 1 auto;font-weight:500;text-align:right;overflow:hidden;
+  color:var(--fld-pv)}
+.ftx__fld u{flex:0 0 auto;text-decoration:none;font-size:9px;font-weight:400;
+  letter-spacing:.02em;color:var(--ink-3)}
+.ftx__fld--sp b{color:var(--fld-sp)}
+.ftx__fld--x b{color:var(--fld-out)}
+.ftx__fld--alarm b{color:var(--fld-alarm)}
+.ftx__fld--stale b{color:var(--fld-stale)}
+.ftx__card{position:absolute;top:0;left:0;z-index:4;display:none;padding:3px;gap:3px;
+  border-radius:2px;pointer-events:none;${RAISED}}
 .ftx__card--on{display:flex}
-.ftx__card .ftx__fld{flex:0 0 auto;min-width:62px}
-.ftx__ov{flex:0 0 auto;position:relative;height:${OVERVIEW_H}px;margin:0 2px 2px 2px;
-  background:var(--plot-bg,#000000);cursor:ew-resize;${SUNKEN}}
-.ftx__ovhost{position:absolute;inset:3px}
+.ftx__card .ftx__fld{flex:0 0 auto;min-width:64px}
+.ftx__ov{flex:0 0 auto;position:relative;height:${OVERVIEW_H}px;margin:0 4px 4px 4px;
+  border-radius:var(--r-2);background:var(--panel-lo);border:var(--border-field);
+  box-shadow:var(--elev-sunken);cursor:ew-resize}
+.ftx__ovhost{position:absolute;inset:2px}
 .ftx__ovhost canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
-.ftx__table{display:none;flex:0 0 auto;max-height:172px;overflow:auto;margin:0 2px 2px 2px;
-  background:var(--fld-bg,#0A0F0A);${SUNKEN}}
+.ftx__table{display:none;flex:0 0 auto;max-height:172px;overflow:auto;margin:0 4px 4px 4px;
+  border-radius:2px;${SUNKEN}}
 .ftx__table--on{display:block}
 .ftx__table table{border-collapse:collapse;width:100%}
-.ftx__table th,.ftx__table td{padding:1px 6px;text-align:right;white-space:nowrap;
-  font:400 11px/1.35 var(--font-num,ui-monospace,Consolas,monospace);
-  font-variant-numeric:tabular-nums lining-nums;color:var(--fld-pv,#12FF4B)}
-.ftx__table th{position:sticky;top:0;z-index:1;background:var(--face-2,#BFBBB4);
-  color:var(--ink,#101010);font:700 9px/1.6 var(--font-ui,system-ui,sans-serif);
-  letter-spacing:.04em;text-transform:uppercase;box-shadow:inset 0 -1px 0 var(--bev-dk,#4A4744)}
-.ftx__table th small{display:block;font-size:8px;font-weight:400;color:var(--ink-2,#3A3A3A)}
-.ftx__table td:first-child,.ftx__table th:first-child{text-align:left;
-  color:var(--fld-out,#00E5FF)}
+.ftx__table th,.ftx__table td{padding:2px 7px;text-align:right;white-space:nowrap;
+  font:400 11px/1.4 var(--font-num);font-variant-numeric:tabular-nums lining-nums;
+  color:var(--fld-pv)}
+.ftx__table th{position:sticky;top:0;z-index:1;color:var(--ink-2);
+  background:var(--surface-raised);
+  font:600 10px/1.6 var(--font-ui);letter-spacing:.02em;text-transform:uppercase;
+  border-bottom:1px solid var(--edge)}
+.ftx__table th small{display:block;font-size:9px;font-weight:400;color:var(--ink-3)}
+.ftx__table td:first-child,.ftx__table th:first-child{text-align:left;color:var(--fld-out)}
 .ftx__sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
   clip:rect(0 0 0 0);white-space:nowrap;border:0}
+@media (prefers-reduced-motion:reduce){.ftx__btn{transition:none}}
 `;
 
 /**
- * Inject the chart stylesheet once. `styles/app.css` belongs to another owner, so the
- * trend carries its own scoped rules and consumes the FT-CLASSIC tokens through `var()`
- * with the palette's own values as fallbacks.
+ * Inject the chart stylesheet once. `styles/app.css` belongs to another owner, so the trend
+ * carries its own scoped rules and consumes the HMI-2012 tokens through `var()`. No colour
+ * literal appears above: the CSS side resolves every hue from `styles/tokens.css`, and only
+ * the canvas painters — which cannot resolve `var()` — keep a fallback table.
  * @returns {void}
  */
 function ensureStyles() {
@@ -956,6 +1026,14 @@ function toAxisValue(pen, a, v) {
  *
  * SP traces and alarm limits take part: an operator must never lose the setpoint or the
  * trip line off the top of the trend.
+ *
+ * AN AXIS WITH NOTHING TO MEASURE HOLDS. Before a run there are no samples, so no trace and
+ * possibly no limit contributes a bound. This used to substitute the axis' OWN current
+ * target as the measured maximum and then add 8 % headroom to it, which made an idle axis
+ * inflate by 8 % every 250 ms — a screen left sitting at the operator's desk reached 25
+ * million mAU inside a minute and read as a broken instrument. An unmeasured axis now keeps
+ * exactly the bounds it already has: the declared range at rest, the last good range if the
+ * operator pans off the data mid-run.
  * @param {object} chart The chart.
  * @param {number} now_ms Frame timestamp.
  * @returns {void}
@@ -987,8 +1065,10 @@ function measureAxes(chart, now_ms) {
       if (lv > hi) hi = lv;
     }
     if (!(lo <= hi)) {
-      lo = 0;
-      hi = a.mode === 'auto' ? 1 : Math.max(1, a.targetMax);
+      // Nothing measurable on this axis. Hold, and cancel any shrink still in flight so the
+      // bounds cannot drift while there is no data to justify the move.
+      a.easeT0 = 0;
+      continue;
     }
     const band = a.mode === 'auto-band';
     // Process axes are anchored at zero unless the data goes negative; a banded control
@@ -1868,7 +1948,7 @@ function paintBands(chart, ctx, g, colors) {
   ctx.beginPath();
   ctx.rect(g.px0, g.py0 - g.padT, g.plotW, g.plotH + g.padT);
   ctx.clip();
-  ctx.font = '700 9px ' + FONT_UI;
+  ctx.font = '600 10px ' + FONT_UI;
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
   for (let i = 0; i < bands.length; i++) {
@@ -1878,14 +1958,17 @@ function paintBands(chart, ctx, g, colors) {
     const a1 = Math.min(b.x1, chart.x1) * kx + bx;
     const w = a1 - a0;
     if (!(w > 0)) continue;
-    ctx.fillStyle = i % 2 === 0 ? BAND_A : BAND_B;
+    ctx.globalAlpha = i % 2 === 0 ? BAND_WASH_A : BAND_WASH_B;
+    ctx.fillStyle = colors.ink;
     ctx.fillRect(a0, g.py0, w, g.plotH);
     const tint = BAND_TINT[b.kind];
-    if (tint) {
-      ctx.fillStyle = tint;
+    if (tint && colors[tint]) {
+      ctx.globalAlpha = BAND_TINT_ALPHA;
+      ctx.fillStyle = colors[tint];
       ctx.fillRect(a0, g.py0, w, g.plotH);
     }
-    ctx.fillStyle = colors.plotGrid;
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = colors.plotFrame;
     ctx.fillRect(Math.round(a0), g.py0, 1, g.plotH);
     const label = b.label ? String(b.label).toUpperCase() : '';
     if (!label) continue;
@@ -1902,12 +1985,14 @@ function paintBands(chart, ctx, g, colors) {
 
 /**
  * Paint the pooled-fraction region: an amber wash with solid edges and a top drag handle.
+ * The amber is the SP amber, painted through `globalAlpha` rather than as a second literal.
  * @param {object} chart The chart.
  * @param {CanvasRenderingContext2D} ctx Static context.
  * @param {object} g Geometry in use.
+ * @param {object} colors Colour map in use.
  * @returns {void}
  */
-function paintPool(chart, ctx, g) {
+function paintPool(chart, ctx, g, colors) {
   const p = chart.pool;
   if (!p.on) return;
   const span = chart.x1 - chart.x0;
@@ -1916,9 +2001,11 @@ function paintPool(chart, ctx, g) {
   const a0 = clamp(p.x0 * kx + bx, g.px0, g.px1);
   const a1 = clamp(p.x1 * kx + bx, g.px0, g.px1);
   if (!(a1 > a0)) return;
-  ctx.fillStyle = POOL_FILL;
+  ctx.globalAlpha = POOL_FILL_ALPHA;
+  ctx.fillStyle = colors.fldSp;
   ctx.fillRect(a0, g.py0, a1 - a0, g.plotH);
-  ctx.strokeStyle = POOL_EDGE;
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = colors.fldSp;
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(Math.round(a0) + 0.5, g.py0);
@@ -1926,7 +2013,7 @@ function paintPool(chart, ctx, g) {
   ctx.moveTo(Math.round(a1) + 0.5, g.py0);
   ctx.lineTo(Math.round(a1) + 0.5, g.py1);
   ctx.stroke();
-  ctx.fillStyle = POOL_EDGE;
+  ctx.fillStyle = colors.fldSp;
   ctx.fillRect(a0, g.py0, a1 - a0, 3);
 }
 
@@ -1968,7 +2055,7 @@ function paintMarkers(chart, ctx, g, colors) {
     const px = m.x * kx + bx;
     tickIdx++;
     if (px < g.px0 - 1 || px > g.px1 + 1) continue;
-    ctx.strokeStyle = colors.plotAxis;
+    ctx.strokeStyle = colors.plotFrame;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(Math.round(px) + 0.5, g.py1 + 1);
@@ -2065,14 +2152,14 @@ function paintMarkers(chart, ctx, g, colors) {
     ctx.stroke();
     ctx.globalAlpha = 1;
     if (leader) {
-      ctx.strokeStyle = colors.plotAxis;
+      ctx.strokeStyle = colors.plotFrame;
       ctx.beginPath();
       ctx.moveTo(f.px, ly + 2);
       ctx.lineTo(f.px + 9, ly - 4);
       ctx.stroke();
     }
     if (typeof f.m.x0 === 'number' && typeof f.m.x1 === 'number') {
-      ctx.strokeStyle = colors.plotAxis;
+      ctx.strokeStyle = colors.plotFrame;
       ctx.globalAlpha = 0.6;
       ctx.setLineDash(MARKER_DASH);
       ctx.beginPath();
@@ -2095,9 +2182,14 @@ function paintMarkers(chart, ctx, g, colors) {
 }
 
 /**
- * Paint the well: black ground, the classic dark-green graticule, phase bands, pooled
- * region, fraction ticks and every axis. Repainted only on a window, zoom, theme, pen or
- * annotation change — a handful of times per second even during a run.
+ * Paint the well: the graphite ground, the cool-grey graticule, phase bands, pooled region,
+ * fraction ticks and every axis. Repainted only on a window, zoom, theme, pen or annotation
+ * change — a handful of times per second even during a run.
+ *
+ * EVERY ONE OF THOSE IS DRAWN WITH ZERO SAMPLES. An instrument at rest is not a blank box:
+ * it shows its graticule, its frame, both axes, their tick labels and their engineering
+ * units, at the bounds its axes declare. The only thing an empty log adds is one quiet
+ * caption at the foot of the plot — never a slab across the middle of it.
  * @param {object} chart The chart.
  * @param {object} rc Render target `{ ctx, geom, colors }`.
  * @returns {void}
@@ -2111,7 +2203,7 @@ function paintStatic(chart, rc) {
   ctx.fillRect(0, 0, g.cssW, g.cssH);
   prepareMapping(chart, g);
   paintBands(chart, ctx, g, colors);
-  paintPool(chart, ctx, g);
+  paintPool(chart, ctx, g, colors);
 
   const xp = xTickPlan(chart, g);
   const kx = g.plotW / (chart.x1 - chart.x0);
@@ -2142,7 +2234,7 @@ function paintStatic(chart, rc) {
 
   paintMarkers(chart, ctx, g, colors);
 
-  ctx.strokeStyle = colors.plotAxis;
+  ctx.strokeStyle = colors.plotFrame;
   ctx.lineWidth = 1;
   ctx.strokeRect(
     Math.round(g.px0) + 0.5, Math.round(g.py0) + 0.5,
@@ -2151,7 +2243,7 @@ function paintStatic(chart, rc) {
 
   // x tick labels, then the engineering unit hard against the right end
   ctx.fillStyle = colors.plotAxis;
-  ctx.font = '9px ' + FONT_NUM;
+  ctx.font = '10px ' + FONT_NUM;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   const euGuard = g.px1 - 26;
@@ -2161,19 +2253,32 @@ function paintStatic(chart, rc) {
     if (px < g.px0 - 1 || px > euGuard) continue;
     ctx.fillText(dv.toFixed(xp.decimals), px, g.py1 + 14);
   }
-  ctx.font = '700 9px ' + FONT_UI;
+  ctx.font = '600 10px ' + FONT_UI;
   ctx.textAlign = 'right';
   ctx.fillText(X_EU[chart.xMode], g.px1, g.py1 + 14);
 
   paintYAxes(chart, ctx, g, colors);
 
-  if (!chart.store || chart.store.n === 0) {
-    ctx.fillStyle = colors.fldStale;
-    ctx.font = '700 11px ' + FONT_UI;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('NO DATA', (g.px0 + g.px1) / 2, (g.py0 + g.py1) / 2);
-  }
+  if (!chart.store || chart.store.n === 0) paintRestCaption(ctx, g, colors);
+}
+
+/**
+ * The at-rest caption: one small, dim line at the foot of the plot saying the log is empty.
+ * It replaces the old centred `NO DATA` slab, which read as a disconnected instrument rather
+ * than a powered-on one — the scales around it were always there, and they say far more than
+ * the slab did. Sentence case, 10 px, tertiary ink, left-aligned inside the plot so it never
+ * lands on top of a pen the moment the first sample arrives.
+ * @param {CanvasRenderingContext2D} ctx Static context.
+ * @param {object} g Geometry in use.
+ * @param {object} colors Colour map in use.
+ * @returns {void}
+ */
+function paintRestCaption(ctx, g, colors) {
+  ctx.fillStyle = colors.ink3 || colors.fldStale;
+  ctx.font = '10px ' + FONT_UI;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(ellipsize(ctx, 'Standby — no samples logged', g.plotW - 12), g.px0 + 6, g.py1 - 5);
 }
 
 /**
@@ -2193,7 +2298,7 @@ function paintYAxes(chart, ctx, g, colors) {
     if (!a.visible) continue;
     const left = a.side === 'left';
     const spineX = Math.round(a.gutterX) + 0.5;
-    ctx.strokeStyle = colors.plotAxis;
+    ctx.strokeStyle = colors.plotFrame;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(spineX, g.py0);
@@ -2217,13 +2322,13 @@ function paintYAxes(chart, ctx, g, colors) {
     // A gutter serving exactly one pen is tinted with that pen, which is how an operator
     // finds the right scale without reading anything.
     const primaryInk = ownPen && !altPen ? colors.pen[ownPen.id] : colors.plotAxis;
-    ctx.font = '9px ' + FONT_NUM;
+    ctx.font = '10px ' + FONT_NUM;
     ctx.textAlign = left ? 'right' : 'left';
     for (let k = 0; k < yp.count; k++) {
       const v = yp.first + k * yp.step;
       const py = a.b - v * a.k;
       if (py < g.py0 - 1 || py > g.py1 + 1) continue;
-      ctx.strokeStyle = colors.plotAxis;
+      ctx.strokeStyle = colors.plotFrame;
       ctx.beginPath();
       ctx.moveTo(spineX, Math.round(py) + 0.5);
       ctx.lineTo(spineX + (left ? -3 : 3), Math.round(py) + 0.5);
@@ -2236,7 +2341,7 @@ function paintYAxes(chart, ctx, g, colors) {
       const span = a.aMax - a.aMin;
       const aspan = a.alt.max - a.alt.min;
       ctx.fillStyle = colors.pen[altPen.id];
-      ctx.font = '8px ' + FONT_NUM;
+      ctx.font = '9px ' + FONT_NUM;
       const off = showPrimary ? (left ? -28 : 28) : (left ? -5 : 5);
       for (let k = 0; k < yp.count; k++) {
         const v = yp.first + k * yp.step;
@@ -2248,7 +2353,7 @@ function paintYAxes(chart, ctx, g, colors) {
     }
 
     // engineering unit, at the top of its own gutter — never a sentence
-    ctx.font = '700 9px ' + FONT_UI;
+    ctx.font = '600 10px ' + FONT_UI;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
     ctx.fillStyle = primaryInk;
@@ -2284,7 +2389,7 @@ function paintOverlay(chart) {
   const bx = g.px0 - chart.x0 * kx;
 
   // alarm limits: dashed, 1 px, the pen's own hue, captioned with the threshold value
-  ctx.font = '8px ' + FONT_NUM;
+  ctx.font = '9px ' + FONT_NUM;
   ctx.textBaseline = 'bottom';
   ctx.textAlign = 'right';
   for (let i = 0; i < chart.pens.length; i++) {
@@ -2332,7 +2437,9 @@ function paintOverlay(chart) {
   if (chart.cursor.on && chart.cursor.x === chart.cursor.x) {
     const cx = chart.cursor.x * kx + bx;
     if (cx >= g.px0 - 1 && cx <= g.px1 + 1) {
-      ctx.strokeStyle = colors.plotAxis;
+      // The readout cursor is the one line that must survive crossing every pen, so it takes
+      // primary ink rather than the quieter axis grey.
+      ctx.strokeStyle = colors.ink;
       ctx.lineWidth = 1;
       ctx.setLineDash(CROSS_DASH);
       ctx.beginPath();
@@ -2356,16 +2463,18 @@ function paintOverlay(chart) {
     }
   }
 
-  // drag rectangle
+  // drag rectangle — a SELECTION, so it wears the accent, not the pooled-region amber
   const d = chart.drag;
   if (d.active && (d.mode === 'zoomX' || d.mode === 'zoomXY')) {
     const a0 = Math.min(d.px0, d.pxNow);
     const a1 = Math.max(d.px0, d.pxNow);
     const b0 = d.mode === 'zoomXY' ? Math.min(d.py0, d.pyNow) : g.py0;
     const b1 = d.mode === 'zoomXY' ? Math.max(d.py0, d.pyNow) : g.py1;
-    ctx.fillStyle = POOL_FILL;
+    ctx.globalAlpha = SELECT_FILL_ALPHA;
+    ctx.fillStyle = colors.accent;
     ctx.fillRect(a0, b0, a1 - a0, b1 - b0);
-    ctx.strokeStyle = POOL_EDGE;
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = colors.accent;
     ctx.lineWidth = 1;
     ctx.strokeRect(Math.round(a0) + 0.5, Math.round(b0) + 0.5, Math.round(a1 - a0), Math.round(b1 - b0));
   }
@@ -2375,14 +2484,14 @@ function paintOverlay(chart) {
     for (let i = 0; i < chart.bandLabelSpots.length; i++) {
       const sp = chart.bandLabelSpots[i];
       if (chart.hoverPx < sp.x0 || chart.hoverPx > sp.x1) continue;
-      ctx.font = '700 9px ' + FONT_UI;
+      ctx.font = '600 10px ' + FONT_UI;
       ctx.textBaseline = 'middle';
       ctx.textAlign = 'left';
       const w = ctx.measureText(sp.text).width + 8;
       const rx = clamp(sp.x0, g.px0, Math.max(g.px0, g.px1 - w));
-      ctx.fillStyle = colors.face;
+      ctx.fillStyle = colors.panelHi;
       ctx.fillRect(rx, g.py0 - 15, w, 14);
-      ctx.strokeStyle = colors.bevDk;
+      ctx.strokeStyle = colors.edge;
       ctx.lineWidth = 1;
       ctx.strokeRect(Math.round(rx) + 0.5, Math.round(g.py0 - 15) + 0.5, Math.round(w), 14);
       ctx.fillStyle = colors.ink;
@@ -2413,7 +2522,17 @@ function paintOverview(chart) {
   ctx.fillStyle = colors.plotBg;
   ctx.fillRect(0, 0, w, hgt);
   chart.ovDirty = false;
-  if (!chart.store || chart.store.n === 0) return;
+  if (!chart.store || chart.store.n === 0) {
+    // Empty, but not blank: one centre rule, so the strip reads as a powered instrument
+    // waiting for history rather than as a dead bar.
+    ctx.strokeStyle = colors.plotGrid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, Math.round(hgt / 2) + 0.5);
+    ctx.lineTo(w, Math.round(hgt / 2) + 0.5);
+    ctx.stroke();
+    return;
+  }
 
   const xName = xChannel(chart);
   const xcol = column(chart.store, xName);
@@ -2471,12 +2590,15 @@ function paintOverview(chart) {
     ctx.globalAlpha = 1;
   }
 
+  // The brush marks WHICH SLICE of the run is on screen — a selection, so it wears the accent
   const kx = (px1 - px0) / span;
   const a0 = clamp(px0 + (chart.x0 - full0) * kx, px0, px1);
   const a1 = clamp(px0 + (chart.x1 - full0) * kx, px0, px1);
-  ctx.fillStyle = POOL_FILL;
+  ctx.globalAlpha = SELECT_FILL_ALPHA;
+  ctx.fillStyle = colors.accent;
   ctx.fillRect(a0, 0, Math.max(2, a1 - a0), hgt);
-  ctx.strokeStyle = POOL_EDGE;
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = colors.accent;
   ctx.lineWidth = 1;
   ctx.strokeRect(Math.round(a0) + 0.5, 0.5, Math.max(2, Math.round(a1 - a0)), hgt - 1);
   chart.ovGeom = { px0, px1, full0, full1, kx };
@@ -2487,7 +2609,10 @@ function paintOverview(chart) {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Build one sunken label box: an optional caption, the digits, an optional EU suffix.
+ * Build one recessed value field: an optional caption, the digits, an optional EU suffix.
+ * The field carries the SUNKEN recipe and 2 px of radius; the digits are white for a PV,
+ * amber for an SP and cyan for the cursor card, and both the caption and the unit sit in
+ * tertiary ink so the number is the only thing that reads at a glance.
  * @param {string} kind Digit class suffix — `'pv'`, `'sp'` or `'x'`.
  * @param {string} caption Caption inside the box, uppercase, or `''`.
  * @param {string} eu Engineering unit suffix, or `''`.
@@ -2521,9 +2646,11 @@ function penTitle(pen) {
 }
 
 /**
- * Build the legend rail: one row per pen — colour chip, ISA tag, a live PV label box, an
- * SP or LIM box where one exists, the EU, and the pen's on/off checkbox. This rail is how
- * the operator reads the trend.
+ * Build the legend rail: one row per pen — colour chip carrying the pen's own solid/dashed
+ * signature, ISA tag, a live PV field, an SP or LIM field where one exists, the EU, and the
+ * pen's on/off checkbox. This rail is how the operator reads the trend, and it is fully
+ * populated before the first sample: an extinguished pen and an unstarted run both show a
+ * field of dashes in the stale ink, never an empty row.
  * @param {object} chart The chart.
  * @returns {void}
  */
@@ -4327,7 +4454,7 @@ export function exportPNG(chart, opts) {
   cv.height = height;
   const ctx = cv.getContext('2d');
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = colors.face;
+  ctx.fillStyle = colors.panel;
   ctx.fillRect(0, 0, width, height);
 
   const titleH = title ? 30 : 20;

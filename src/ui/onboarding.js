@@ -1,6 +1,6 @@
 /**
  * @file src/ui/onboarding.js — the six-step tour, the coach-hint scheduler, and the one-click
- *                             scenario launcher, in the FT-CLASSIC idiom.
+ *                             scenario launcher, in the HMI-2012 idiom.
  *
  * **The scenario picker is the ONLY UI surface that reaches `sim.loadScenario` and
  * `presets.listScenarios`.** Without this module the eight mandatory teaching scenarios ship
@@ -25,7 +25,7 @@
  * This module mutates nothing on `run` or `config`: it calls `core/sim.js` actions and surfaces
  * their `{ ok, reason }` verbatim.
  *
- * CSS CONTRACT — the classes this module emits. A complete beveled base sheet is injected once into
+ * CSS CONTRACT — the classes this module emits. A complete HMI-2012 base sheet is injected once into
  * `@layer chromaskid-onboarding`, so the window is correct with `styles/tokens.css` alone;
  * `styles/app.css` is unlayered and therefore overrides every rule here without a specificity fight.
  *   .onboarding (display:contents; the Panel `el`, contributing no layout)
@@ -60,36 +60,41 @@ const HINT_WARMUP_MS = 4000;
 const COND_FRONT_RISE_mScm = 2.0;
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * BASE STYLES — beveled, square-cornered, token-only
+ * BASE STYLES — HMI-2012: 1px edges, 2px radius, one subtle gradient, token-only
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
-const BEV_RAISED = 'inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),'
-  + 'inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)';
-const BEV_SUNKEN = 'inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),'
-  + 'inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt)';
-
 /* The ordering statement is emitted by BOTH this module and ui/overlay.js, so whichever stylesheet
-   the browser parses first fixes the same order: onboarding's rules win over the overlay base. */
+   the browser parses first fixes the same order: onboarding's rules win over the overlay base.
+
+   Every surface below is the RAISED recipe published by styles/tokens.css — var(--surface-raised)
+   over var(--border-edge) with var(--elev-raised) — and the speed chip is the SUNKEN one. Nothing
+   here hand-rolls a border, a gradient or a shadow. */
 const BASE_CSS = `@layer chromaskid-overlay, chromaskid-onboarding;
 @layer chromaskid-onboarding {
+.ob{display:flex;flex-direction:column;gap:8px;}
 .onboarding{display:contents;}
-.ob{display:flex;flex-direction:column;gap:6px;}
-.ob-lede{margin:0;font:400 11px/1.35 var(--font-ui);color:var(--ink-2);}
+.ob-lede{margin:0;font:400 var(--fs-11)/1.4 var(--font-ui);color:var(--ink-2);}
 /* Four fixed columns, so the eight scenarios always read as a 4x2 block however wide the window
    the host stylesheet gives the dialog. Two columns once there is no room for four. */
-.ob-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;}
+.ob-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;}
 @media (max-width:460px){.ob-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
-.ob-sc{display:flex;flex-direction:column;align-items:center;gap:4px;width:100%;min-height:66px;
-  padding:6px 4px 5px;background:var(--face);border:0;color:var(--ink);cursor:pointer;
-  box-shadow:${BEV_RAISED};font:700 9px/1.2 var(--font-ui);letter-spacing:.04em;
-  text-transform:uppercase;text-align:center;}
-.ob-sc:active{box-shadow:${BEV_SUNKEN};}
-.ob-sc:active .ob-sc__i,.ob-sc:active .ob-sc__c{transform:translate(1px,1px);}
-.ob-sc__i{display:block;color:var(--ink);}
-.ob-sc__c{display:block;min-height:22px;color:var(--ink);}
-.ob-sc__x{display:block;margin-top:auto;padding:0 3px;background:var(--fld-bg);
-  box-shadow:${BEV_SUNKEN};font:700 9px/1.5 var(--font-num);color:var(--fld-sp);
-  font-variant-numeric:tabular-nums;}
+.ob-sc{display:flex;flex-direction:column;align-items:center;gap:6px;width:100%;min-height:74px;
+  padding:8px 5px 6px;background:var(--surface-raised);border:var(--border-edge);
+  border-radius:var(--r-2);box-shadow:var(--elev-raised);color:var(--ink);cursor:pointer;
+  font:600 var(--fs-10)/1.25 var(--font-ui);letter-spacing:.02em;text-align:center;
+  transition:border-color var(--dur-1) var(--ease-out),color var(--dur-1) var(--ease-out);}
+.ob-sc:hover{border-color:var(--accent);}
+.ob-sc:active{background:var(--surface-pressed);box-shadow:none;}
+.ob-sc:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;}
+.ob-sc__i{display:block;color:var(--ink-2);transition:color var(--dur-1) var(--ease-out);}
+.ob-sc:hover .ob-sc__i{color:var(--ink);}
+.ob-sc__c{display:block;min-height:24px;color:var(--ink);}
+.ob-sc__x{display:block;margin-top:auto;padding:0 5px;background:var(--fld-bg);
+  border:var(--border-field);border-radius:var(--r-2);box-shadow:var(--elev-sunken);
+  font:500 var(--fs-9)/1.7 var(--font-num);color:var(--fld-sp);font-variant-numeric:tabular-nums;}
+@media (prefers-reduced-motion:reduce){
+  .ob-sc,.ob-sc__i{transition:none;}
+}
 }`;
 
 let baseCssInjected = false;
@@ -440,8 +445,8 @@ function captionFor(row) {
 }
 
 /**
- * Build the grid of eight scenario buttons: icon, caption, and the scenario's speed in a sunken
- * chip. One click loads the configuration, applies the fault and starts the run.
+ * Build the grid of eight scenario buttons: icon, caption, and the scenario's speed in a recessed
+ * amber chip. One click loads the configuration, applies the fault and starts the run.
  *
  * The explanation is not on the button — it is the button's `title`, which carries the scenario's
  * own `expectedOutcome` from `data/presets.js` verbatim.

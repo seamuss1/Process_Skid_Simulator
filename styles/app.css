@@ -1,20 +1,32 @@
 /* ============================================================================
-   Process Skid Simulator — APPLICATION STYLESHEET  ·  "FT-CLASSIC"
+   Process Skid Simulator — APPLICATION STYLESHEET  ·  "HMI-2012"
    ----------------------------------------------------------------------------
-   A Rockwell FactoryTalk View SE / Wonderware InTouch operator screen. Beveled
-   grey chrome, sunken near-black label boxes, ISA-5.1 bubbles, a black trend
-   with a green graticule, service-coloured pipes. Square corners everywhere
-   except lamps and instrument balloons.
+   An early-2010s operator screen: Wonderware InTouch 2012, FactoryTalk View SE
+   7, Ignition 7.x. Cool graphite chrome, 1px borders over a very subtle 180deg
+   gradient, recessed fields carrying WHITE PV digits and AMBER setpoints, and
+   saturated colour held back for state and alarms alone.
 
    RULES THIS FILE OBEYS
      · Not one colour literal. Every colour is var(--token) from tokens.css;
        `transparent` and `currentColor` are the only permitted keywords.
-     · border-radius is 0 except .lamp / .bub / .info-dot — and tokens.css pins
-       --r-1..--r-4 to 0 so the radii inside the JS-injected view stylesheets
-       collapse to square as well.
+     · Depth comes from --surface-raised / --border-edge / --elev-raised and
+       their sunken and pressed siblings. Never a hand-rolled bevel.
+     · Corners are 2px (--r-2) on panels, buttons, fields and chips, 3px on the
+       plot well, 50% on lamps and ISA balloons. Never 0.
+     · Labels are 10-11px at .02em in --ink-2. Values are 12-15px, tabular.
+       Nothing exceeds 16px.
      · No prose on screen. Buttons are icons; .btn--icon / .btn--toolbar keep
        their text label for assistive technology only.
-     · Bevels come from --bevel-raised / --bevel-sunken. Never an ad-hoc border.
+
+   THE BOTTOM VALUE STRIP IS GONE. It duplicated values that already sit beside
+   their instruments on the P&ID and in the trend's pen rail, and it stole
+   height from the two panels that matter. Nothing in src/ui emits .statusstrip
+   any more, so its rules — and the display:none guard that briefly stood in for
+   them — are deleted outright rather than left as a trap for the next reader.
+   Run state and quality now ride in the title bar beside the alarm summary.
+   No cosmetic rule in this file uses !important. The ones that remain are the
+   [hidden] and visually-hidden helpers and the reduced-motion overrides, where
+   beating an author style is the whole point of the rule.
 
    WHO OWNS WHAT
      This file owns the SHELL CHROME and the SHARED COMPONENT LIBRARY. The view
@@ -22,7 +34,7 @@
      after this file and win on any overlap — a module owns the surface it
      paints. What they do not define, they take from here plus the tokens:
        ui/overlay.js       .ov-*       popovers, modals, toasts, coach marks
-       ui/chart.js         .chart__*   canvas layers and the cursor card
+       ui/chart.js         .ftx__*     the trend: well, pen rail, cursor card
        ui/pid.js           .pid-*      the P&ID symbol library
        ui/view_run.js      .rv-*       the main screen
        ui/view_method.js   .vm-*       the method editor
@@ -32,23 +44,23 @@
 
    MAP
       0  reset, base, scrollbars, focus
-      1  bevel + type utilities
+      1  surface + type utilities
       2  shell and bands
       3  title strip
       4  toolbar: icon buttons, groups, speed chips, e-stop
       5  alarm banner
       6  workspace, panels, splitter
-      7  status strip
-      8  label boxes and tag blocks
-      9  lamps
-     10  ISA bubbles
-     11  dense tag grid
-     12  tables
-     13  form controls
-     14  floating windows: faceplates, modals, popovers, toasts
-     15  trend host
-     16  P&ID host
-     17  view containers and per-view furniture
+      7  label boxes and tag blocks
+      8  lamps and pills
+      9  ISA bubbles
+     10  dense tag grid
+     11  tables
+     12  form controls
+     13  floating windows: faceplates, modals, popovers, toasts
+     14  trend host
+     15  P&ID host
+     16  view containers and per-view furniture
+     17  the hmi.js widget kit
      18  boot notices and error surfaces
      19  shared state classes
      20  reduced motion / contrast / narrow viewport
@@ -75,6 +87,7 @@ body {
   color: var(--ink);
   font: 400 var(--fs-11) / var(--lh-base) var(--font-ui);
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
 }
 
 .app {
@@ -110,7 +123,7 @@ textarea {
 }
 
 a {
-  color: var(--accent);
+  color: var(--accent-ink);
   text-decoration: underline;
 }
 
@@ -122,43 +135,46 @@ samp {
 }
 
 ::selection {
-  background: var(--sel-bg);
+  background: var(--accent);
   color: var(--sel-ink);
 }
 
-/* Classic square scrollbars, beveled like everything else. */
+/* Thin scrollbars in chrome greys — furniture, not a feature. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--face) var(--face-3);
+  scrollbar-color: var(--edge) var(--panel-lo);
 }
 
 ::-webkit-scrollbar {
-  width: 14px;
-  height: 14px;
+  width: 11px;
+  height: 11px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--face-3);
-  box-shadow: var(--bevel-sunken-1);
+  background: var(--panel-lo);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--face);
-  box-shadow: var(--bevel-raised);
-  border-radius: 0;
+  background: var(--edge);
+  border: 2px solid var(--panel-lo);
+  border-radius: var(--r-3);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-3);
 }
 
 ::-webkit-scrollbar-corner {
-  background: var(--face-3);
+  background: var(--panel-lo);
 }
 
-/* Focus: a 2px amber ring, inset so it never enlarges dense chrome. */
+/* Focus: a 2px accent ring, inset so it never enlarges dense chrome. */
 :focus {
   outline: none;
 }
 
 :focus-visible {
-  outline: 2px solid var(--focus);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 
@@ -172,6 +188,7 @@ svg :focus-visible,
 .pid-sr,
 .rv-sr,
 .vm-sr,
+.ftx__sr,
 .chart__sr {
   position: absolute !important;
   width: 1px;
@@ -191,11 +208,12 @@ svg :focus-visible,
   left: var(--sp-4);
   z-index: var(--z-toast);
   padding: var(--sp-4) var(--sp-6);
-  background: var(--face);
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-float);
   color: var(--ink);
-  box-shadow: var(--bevel-raised);
-  font: 700 var(--fs-10) / 1 var(--font-ui);
-  text-transform: uppercase;
+  font: 600 var(--fs-11) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
   text-decoration: none;
 }
@@ -205,66 +223,70 @@ svg :focus-visible,
 }
 
 /* ==========================================================================
-   1. BEVEL + TYPE UTILITIES
-   The whole aesthetic is three classes. Use them; never hand-roll a border.
+   1. SURFACE + TYPE UTILITIES
+   The whole aesthetic is three classes. Use them; never hand-roll an edge.
    ========================================================================== */
 
 .raised {
-  background: var(--face);
-  box-shadow: var(--bevel-raised);
-  border: 0;
-  border-radius: 0;
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-raised);
 }
 
 .sunken {
-  background: var(--face-3);
-  box-shadow: var(--bevel-sunken);
-  border: 0;
-  border-radius: 0;
+  background: var(--fld-bg);
+  border: var(--border-field);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
 }
 
-.raised-1 { box-shadow: var(--bevel-raised-1); }
-.sunken-1 { box-shadow: var(--bevel-sunken-1); }
+/* A well is a sunken area that still holds chrome rather than digits. */
+.well {
+  background: var(--panel-lo);
+  border: var(--border-soft);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
+}
 
-/* A pressed control swaps raised for sunken and shifts content 1px down-right. */
+.raised-1 { border: var(--border-edge); border-radius: var(--r-2); }
+.sunken-1 { border: var(--border-field); border-radius: var(--r-2); }
+
+/* A pressed control flips the gradient and drops the outer shadow. */
 .pressed,
 .raised.is-active,
 .raised[aria-pressed="true"] {
-  box-shadow: var(--bevel-sunken);
-  background: var(--face-2);
+  background: var(--surface-pressed);
+  box-shadow: var(--elev-pressed);
 }
 
-.pressed > *,
-.raised.is-active > *,
-.raised[aria-pressed="true"] > * {
-  transform: translate(1px, 1px);
-}
-
-/* Group separators inside toolbars and strips: a 2px sunken groove. */
+/* Group separators inside toolbars and strips: one hairline rule. */
 .groove,
 .tb-sep,
 .toolbar__sep,
 .runbar__rule,
-.titlebar__sep {
-  flex: 0 0 2px;
-  align-self: stretch;
-  width: 2px;
-  min-width: 2px;
-  margin: var(--sp-2) var(--sp-4);
-  background: transparent;
-  box-shadow: var(--bevel-groove);
+.titlebar__sep,
+.ftx__sep {
+  flex: 0 0 1px;
+  align-self: center;
+  width: 1px;
+  min-width: 1px;
+  height: 20px;
+  margin: 0 var(--sp-5);
+  background: var(--edge-soft);
+  box-shadow: none;
 }
 
 .groove--h {
-  flex: 0 0 2px;
+  flex: 0 0 1px;
   width: auto;
-  height: 2px;
-  min-height: 2px;
-  margin: var(--sp-3) 0;
-  box-shadow: var(--bevel-groove-h);
+  height: 1px;
+  min-height: 1px;
+  margin: var(--sp-4) 0;
+  background: var(--edge-soft);
 }
 
-/* Type. Labels are 10px uppercase; numerics are tabular and bold. */
+/* Type. Labels are quiet and small; numerics are tabular. */
 .lbl,
 .tagblk__lbl,
 .statchip__label,
@@ -280,17 +302,17 @@ svg :focus-visible,
 .vm-stat__k,
 .rv-tag-l,
 .sv-tank__name {
-  font: 700 var(--fs-10) / 1.1 var(--font-ui);
+  font: 600 var(--fs-10) / 1.2 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
-  color: var(--ink);
+  color: var(--ink-2);
   white-space: nowrap;
 }
 
 .lbl--dim,
 .rv-hd-qf,
 .sv-tank__sub {
-  color: var(--ink-2);
+  color: var(--ink-3);
   font-weight: 400;
 }
 
@@ -313,7 +335,7 @@ svg :focus-visible,
 /* ==========================================================================
    2. SHELL AND BANDS
    Flex column, so the shell tolerates any subset of the bands app.js builds:
-   title strip, toolbar, alarm banner (conditional), workspace, status strip.
+   title strip, toolbar, alarm banner (conditional), workspace.
    ========================================================================== */
 
 .shell {
@@ -331,8 +353,7 @@ svg :focus-visible,
 .toolbar,
 .runbar,
 .alarmbar,
-.tabstrip,
-.statusstrip {
+.tabstrip {
   position: relative;
   display: flex;
   align-items: center;
@@ -346,7 +367,6 @@ svg :focus-visible,
 .runbar { flex-basis: var(--h-toolbar); height: var(--h-toolbar); }
 .alarmbar { flex-basis: var(--h-alarm); height: var(--h-alarm); }
 .tabstrip { flex-basis: var(--h-tabstrip); height: var(--h-tabstrip); }
-.statusstrip { flex-basis: var(--h-statusstrip); height: var(--h-statusstrip); }
 
 .workspace {
   position: relative;
@@ -358,19 +378,24 @@ svg :focus-visible,
 }
 
 /* ==========================================================================
-   3. TITLE STRIP  (26px) — unit name left, sim clock centre, alarm lamps right
+   3. TITLE STRIP  (28px)
+   Unit name left; sim clock, RUN STATE and DATA QUALITY centre-right; the
+   alarm summary right. The run-state and quality indication live here now
+   that the bottom strip is gone.
    ========================================================================== */
 
 .titlebar {
   gap: var(--sp-5);
-  padding: 0 var(--sp-5);
-  background: var(--face-2);
-  box-shadow: var(--bevel-raised-1);
+  padding: 0 var(--sp-6);
+  background: var(--surface-raised);
+  border-bottom: var(--border-edge);
 }
 
 .titlebar__brand,
 .titlebar__meta,
-.titlebar__actions {
+.titlebar__actions,
+.titlebar__group,
+.titlebar__state {
   display: flex;
   align-items: center;
   gap: var(--sp-4);
@@ -386,13 +411,12 @@ svg :focus-visible,
   width: 16px;
   height: 16px;
   flex: 0 0 16px;
-  color: var(--ink);
+  color: var(--accent);
 }
 
 .titlebar__name,
 .titlebar__title {
-  font: 700 var(--fs-11) / 1 var(--font-ui);
-  text-transform: uppercase;
+  font: 600 var(--fs-11) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
   color: var(--ink);
   white-space: nowrap;
@@ -401,30 +425,80 @@ svg :focus-visible,
 .titlebar__sub {
   font: 400 var(--fs-10) / 1 var(--font-ui);
   color: var(--ink-2);
+  letter-spacing: var(--ls-caps);
+  white-space: nowrap;
+}
+
+.titlebar__value,
+.titlebar__clock {
+  padding: 1px var(--sp-5);
+  background: var(--fld-bg);
+  border: var(--border-field);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
+  color: var(--fld-pv);
+  font: 500 var(--fs-12) / 1.4 var(--font-num);
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+/* The title bar carries readouts now, so a tag block laid out here goes ROW —
+   caption left of the field, not above it. That is the only way BLK, CLK and
+   the run state fit a 28px band, and it is the rule the deleted bottom strip
+   used to carry. */
+.titlebar .tagblk,
+.titlebar .statchip,
+.titlebar .chip,
+.titlebar .metric {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.titlebar .lbox,
+.titlebar .statchip__value,
+.titlebar .chip__value {
+  height: var(--ctl-sm);
+  font-size: var(--fs-12);
+  line-height: calc(var(--ctl-sm) - 2px);
+}
+
+/* Run state and data quality, as a lamp plus one word. */
+.titlebar__quality,
+.titlebar__runstate {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-4);
+  height: var(--ctl-sm);
+  padding: 0 var(--sp-5);
+  background: var(--panel-lo);
+  border: var(--border-soft);
+  border-radius: var(--r-2);
+  color: var(--ink-2);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
   white-space: nowrap;
 }
 
-.titlebar__value {
-  padding: 2px var(--sp-4);
-  background: var(--fld-bg);
-  box-shadow: var(--bevel-sunken-1);
-  color: var(--fld-pv);
-  font: 700 var(--fs-12) / 1 var(--font-num);
-  font-variant-numeric: tabular-nums lining-nums;
-}
+.titlebar__runstate.is-running { color: var(--ok-ink); }
+.titlebar__runstate.is-held,
+.titlebar__runstate.is-warn { color: var(--warn-ink); }
+.titlebar__runstate.is-fault,
+.titlebar__runstate.is-alarm { color: var(--alarm-ink); }
+.titlebar__quality.is-suspect { color: var(--warn-ink); }
+.titlebar__quality.is-invalid { color: var(--alarm-ink); }
 
 /* ==========================================================================
-   4. TOOLBAR  (40px) — beveled icon buttons, 34x34, grouped by 2px grooves
+   4. TOOLBAR  (40px) — icon buttons on the raised recipe, grouped by hairlines
    ========================================================================== */
 
 .toolbar,
 .runbar {
-  gap: var(--sp-2);
-  padding: 0 var(--sp-4);
-  background: var(--face);
-  box-shadow: var(--bevel-raised-1);
+  gap: var(--sp-3);
+  padding: 0 var(--sp-5);
+  background: var(--panel);
+  border-bottom: var(--border-edge);
+  box-shadow: 0 1px 2px var(--shade);
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
@@ -440,7 +514,7 @@ svg :focus-visible,
 .btn-row {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
   flex: 0 0 auto;
 }
 
@@ -456,35 +530,40 @@ svg :focus-visible,
 .iconbtn,
 .vm-btn,
 .ov-btn,
-.chart__btn {
+.chart__btn,
+.ftx__btn {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   height: var(--ctl-lg);
   min-width: var(--ctl-lg);
   padding: 0 var(--sp-5);
-  background: var(--face);
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-raised);
   color: var(--ink);
-  box-shadow: var(--bevel-raised);
-  border: 0;
-  border-radius: 0;
-  font: 700 var(--fs-10) / 1 var(--font-ui);
-  text-transform: uppercase;
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
   white-space: nowrap;
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
+  transition: background-color var(--dur-1) var(--ease-out),
+    border-color var(--dur-1) var(--ease-out);
 }
 
 .btn:hover:not(:disabled),
 .iconbtn:hover:not(:disabled),
 .vm-btn:hover:not(:disabled),
 .ov-btn:hover:not(:disabled),
-.chart__btn:hover:not(:disabled) {
-  background-image: linear-gradient(var(--hover-tint), var(--hover-tint));
+.chart__btn:hover:not(:disabled),
+.ftx__btn:hover:not(:disabled) {
+  background-image: linear-gradient(var(--hover-tint), var(--hover-tint)),
+    var(--surface-raised);
+  border-color: var(--ink-3);
 }
 
 .btn:active:not(:disabled),
@@ -492,28 +571,25 @@ svg :focus-visible,
 .vm-btn:active:not(:disabled),
 .ov-btn:active:not(:disabled),
 .chart__btn:active:not(:disabled),
+.ftx__btn:active:not(:disabled) {
+  background: var(--surface-pressed);
+  box-shadow: var(--elev-pressed);
+}
+
+/* A latched control reads as selected, not merely pushed in. */
 .btn.is-active,
 .iconbtn.is-active,
 .btn[aria-pressed="true"],
 .iconbtn[aria-pressed="true"],
 .vm-btn[aria-pressed="true"],
+.ftx__btn[aria-pressed="true"],
 .chart__live--on,
 .chart__table--on,
 .chart__card--on {
-  box-shadow: var(--bevel-sunken);
-  background-color: var(--face-2);
-}
-
-.btn:active:not(:disabled) > *,
-.iconbtn:active:not(:disabled) > *,
-.vm-btn:active:not(:disabled) > *,
-.ov-btn:active:not(:disabled) > *,
-.chart__btn:active:not(:disabled) > *,
-.btn.is-active > *,
-.iconbtn.is-active > *,
-.btn[aria-pressed="true"] > *,
-.iconbtn[aria-pressed="true"] > * {
-  transform: translate(1px, 1px);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: var(--elev-pressed);
+  color: var(--ink);
 }
 
 .btn:disabled,
@@ -521,22 +597,26 @@ svg :focus-visible,
 .vm-btn:disabled,
 .ov-btn:disabled,
 .chart__btn:disabled,
+.ftx__btn:disabled,
+.ftx__btn[disabled],
 .btn.is-disabled,
 .iconbtn.is-disabled {
-  color: var(--ink-off);
+  color: var(--ink-3);
   cursor: default;
-  box-shadow: var(--bevel-raised);
-  background-image: linear-gradient(var(--disabled-veil), var(--disabled-veil));
+  background: var(--panel);
+  border-color: var(--edge-soft);
+  box-shadow: none;
 }
 
 .btn:disabled svg,
 .iconbtn:disabled svg,
+.ftx__btn[disabled] svg,
 .btn.is-disabled svg,
 .iconbtn.is-disabled svg {
-  opacity: 0.45;
+  opacity: 0.5;
 }
 
-/* 34x34 square icon buttons: the toolbar's whole vocabulary. */
+/* Square icon buttons: the toolbar's whole vocabulary. */
 .btn--icon,
 .btn--toolbar,
 .iconbtn,
@@ -553,7 +633,7 @@ svg :focus-visible,
   height: var(--btn-icon-sm);
   min-width: var(--btn-icon-sm);
   padding: 0 var(--sp-4);
-  font-size: var(--fs-9);
+  font-size: var(--fs-10);
 }
 
 .btn--sm.btn--icon,
@@ -568,15 +648,16 @@ svg :focus-visible,
 .btn__glyph,
 .toast__glyph,
 .vm-btn svg,
-.ov-btn svg {
+.ov-btn svg,
+.ftx__btn svg {
   width: var(--icon);
   height: var(--icon);
   flex: 0 0 auto;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;
-  stroke-linecap: square;
-  stroke-linejoin: miter;
+  stroke-linecap: round;
+  stroke-linejoin: round;
   pointer-events: none;
 }
 
@@ -602,16 +683,16 @@ svg :focus-visible,
 }
 
 .btn__label {
-  font: 700 var(--fs-10) / 1 var(--font-ui);
-  text-transform: uppercase;
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
 }
 
-/* Severity buttons keep the bevel and change the face. */
+/* Severity buttons keep the recipe and change the face. */
 .btn--primary,
 .vm-btn--primary,
 .ov-btn--primary {
   background: var(--accent);
+  border-color: var(--accent);
   color: var(--text-inv);
 }
 
@@ -619,17 +700,19 @@ svg :focus-visible,
 .vm-btn--danger,
 .ov-btn--danger {
   background: var(--alarm);
+  border-color: var(--alarm);
   color: var(--on-alarm);
 }
 
 .btn--ghost {
   background: transparent;
+  border-color: transparent;
   box-shadow: none;
 }
 
 .btn--ghost:hover:not(:disabled) {
-  background: var(--face);
-  box-shadow: var(--bevel-raised-1);
+  background: var(--hover-tint);
+  border-color: var(--edge-soft);
 }
 
 /* E-STOP: mushroom red, the largest target in the toolbar. */
@@ -640,18 +723,21 @@ svg :focus-visible,
   min-width: var(--ctl-estop);
   padding: 0;
   background: var(--alarm);
+  border: 1px solid var(--alarm);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-raised), 0 0 0 3px var(--alarm-soft);
   color: var(--on-alarm);
-  box-shadow: var(--bevel-raised);
 }
 
 .btn--estop:hover:not(:disabled),
 .estop:hover:not(:disabled) {
   background-image: linear-gradient(var(--hover-tint), var(--hover-tint));
+  border-color: var(--alarm);
 }
 
 .runbar__group--estop,
 .toolbar__group--estop {
-  padding: 0 var(--sp-3);
+  padding: 0 var(--sp-4);
 }
 
 /* Hold-to-act ring drawn over a button face. */
@@ -664,8 +750,8 @@ svg :focus-visible,
   pointer-events: none;
 }
 
-.holdring__track { fill: none; stroke: var(--bev-sh); stroke-width: 2; }
-.holdring__fill { fill: none; stroke: var(--focus); stroke-width: 2; }
+.holdring__track { fill: none; stroke: var(--edge); stroke-width: 2; }
+.holdring__fill { fill: none; stroke: var(--accent); stroke-width: 2; }
 
 /* -- speed chips: the only numerals allowed on a button face --------------- */
 .speedchip,
@@ -678,12 +764,12 @@ svg :focus-visible,
   height: var(--chip-h);
   min-width: var(--chip-w);
   padding: 0 var(--sp-4);
-  background: var(--face);
-  color: var(--ink);
-  box-shadow: var(--bevel-raised);
-  border: 0;
-  border-radius: 0;
-  font: 700 var(--fs-10) / 1 var(--font-num);
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-raised);
+  color: var(--ink-2);
+  font: 600 var(--fs-10) / 1 var(--font-num);
   font-variant-numeric: tabular-nums lining-nums;
   cursor: pointer;
 }
@@ -694,14 +780,15 @@ svg :focus-visible,
 .segmented__btn[aria-pressed="true"],
 .segmented__input:checked + .segmented__opt,
 .seg.is-active {
-  background: var(--fld-bg);
-  color: var(--fld-sp);
-  box-shadow: var(--bevel-sunken);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: var(--elev-pressed);
+  color: var(--ink);
 }
 
 .speedchip:disabled,
 .segmented__btn:disabled {
-  color: var(--ink-off);
+  color: var(--ink-3);
   cursor: default;
 }
 
@@ -711,8 +798,9 @@ svg :focus-visible,
   align-items: center;
   gap: var(--sp-1);
   padding: 1px;
-  background: var(--face-2);
-  box-shadow: var(--bevel-sunken-1);
+  background: var(--panel-lo);
+  border: var(--border-soft);
+  border-radius: var(--r-2);
 }
 
 .segmented__input {
@@ -727,16 +815,17 @@ svg :focus-visible,
   justify-content: center;
   height: var(--chip-h);
   padding: 0 var(--sp-5);
-  background: var(--face);
-  box-shadow: var(--bevel-raised);
-  font: 700 var(--fs-10) / 1 var(--font-ui);
-  text-transform: uppercase;
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  color: var(--ink-2);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
   cursor: pointer;
 }
 
 .segmented__input:focus-visible + .segmented__opt {
-  outline: 2px solid var(--focus);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 
@@ -748,14 +837,16 @@ svg :focus-visible,
   height: var(--sp-6);
   min-width: 60px;
   background: var(--fld-bg);
-  box-shadow: var(--bevel-sunken);
+  border: var(--border-field);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
   overflow: hidden;
 }
 
 .runbar__progress-fill,
 .progress__fill {
   height: 100%;
-  background: var(--fld-pv);
+  background: var(--accent);
 }
 
 .runbar__stack {
@@ -771,9 +862,8 @@ svg :focus-visible,
 .runbar__speed-note,
 .runbar__method,
 .runbar__block {
-  font: 400 var(--fs-9) / 1.1 var(--font-ui);
+  font: 400 var(--fs-10) / 1.2 var(--font-ui);
   color: var(--ink-2);
-  text-transform: uppercase;
   letter-spacing: var(--ls-caps);
   white-space: nowrap;
   overflow: hidden;
@@ -783,12 +873,12 @@ svg :focus-visible,
 .runbar__counters {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
 }
 
 /* ==========================================================================
    5. ALARM BANNER  (24px, only while an alarm is active)
-   Sunken band: blinking lamp + tag + short code. aria-live lives on it.
+   A tinted band: blinking lamp + tag + short code. aria-live lives on it.
    ========================================================================== */
 
 .alarmbar,
@@ -798,12 +888,11 @@ svg :focus-visible,
   gap: var(--sp-5);
   height: var(--h-alarm);
   min-height: var(--h-alarm);
-  padding: 0 var(--sp-5);
-  background: var(--face-2);
-  box-shadow: var(--bevel-sunken);
+  padding: 0 var(--sp-6);
+  background: var(--panel-lo);
+  border-bottom: var(--border-edge);
   color: var(--ink);
-  font: 700 var(--fs-10) / 1 var(--font-ui);
-  text-transform: uppercase;
+  font: 600 var(--fs-11) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
 }
 
@@ -819,8 +908,10 @@ svg :focus-visible,
 }
 
 .banner__bar {
-  flex: 0 0 4px;
+  flex: 0 0 3px;
   align-self: stretch;
+  margin: var(--sp-3) 0;
+  border-radius: var(--r-2);
   background: var(--lamp-off);
 }
 
@@ -834,7 +925,7 @@ svg :focus-visible,
 .banner__id,
 .alarmbar__tag,
 .rv-alm-id {
-  font: 700 var(--fs-11) / 1 var(--font-num);
+  font: 600 var(--fs-11) / 1 var(--font-num);
   letter-spacing: var(--ls-num);
   color: var(--ink);
 }
@@ -866,19 +957,26 @@ svg :focus-visible,
   justify-content: center;
   min-width: 18px;
   height: var(--ctl-sm);
-  padding: 0 var(--sp-3);
+  padding: 0 var(--sp-4);
   background: var(--fld-bg);
+  border: var(--border-field);
+  border-radius: var(--r-2);
   color: var(--fld-sp);
-  box-shadow: var(--bevel-sunken-1);
-  font: 700 var(--fs-10) / 1 var(--font-num);
+  font: 600 var(--fs-10) / 1 var(--font-num);
 }
 
 .banner__actions {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   margin-left: auto;
 }
+
+.banner--alarm,
+.banner--critical,
+.banner--fault { background: var(--alarm-soft); }
+.banner--warn { background: var(--warn-soft); }
+.banner--info { background: var(--info-soft); }
 
 .banner--alarm .banner__bar,
 .banner--critical .banner__bar,
@@ -888,15 +986,15 @@ svg :focus-visible,
 
 .banner--alarm .banner__id,
 .banner--critical .banner__id,
-.banner--fault .banner__id { color: var(--alarm); }
-.banner--warn .banner__id { color: var(--warn); }
+.banner--fault .banner__id { color: var(--alarm-ink); }
+.banner--warn .banner__id { color: var(--warn-ink); }
 
 .rv-alm {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   height: var(--row-h);
-  padding: 0 var(--sp-4);
+  padding: 0 var(--sp-5);
   border-bottom: 1px solid var(--rule);
 }
 
@@ -921,7 +1019,7 @@ svg :focus-visible,
   display: none !important;
 }
 
-/* Panel: raised face, sunken body well, 20px face-2 header. */
+/* Panel: the raised slab everything else sits on. */
 .panel,
 .card,
 .vm-panel,
@@ -932,13 +1030,15 @@ svg :focus-visible,
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  background: var(--face);
-  box-shadow: var(--bevel-raised);
-  border-radius: 0;
+  background: var(--panel);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-raised);
 }
 
 .panel--plain {
   background: transparent;
+  border-color: transparent;
   box-shadow: none;
 }
 
@@ -953,19 +1053,20 @@ svg :focus-visible,
 .vm-sec__hd,
 .rv-rail-hd,
 .vm-watch__hd,
-.vm-issue__hd {
+.vm-issue__hd,
+.ftx__bar {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   flex: 0 0 auto;
   height: var(--panel-header);
   min-height: var(--panel-header);
-  margin: 2px 2px 0;
-  padding: 0 var(--sp-4);
-  background: var(--face-2);
-  box-shadow: var(--bevel-raised-1);
-  color: var(--ink);
-  font: 700 var(--fs-10) / 1 var(--font-ui);
+  padding: 0 var(--sp-5);
+  background: var(--surface-header);
+  border-bottom: var(--border-edge);
+  border-radius: var(--r-2) var(--r-2) 0 0;
+  color: var(--ink-2);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
   white-space: nowrap;
@@ -985,7 +1086,7 @@ svg :focus-visible,
 .chart__tools {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
   margin-left: auto;
 }
 
@@ -996,10 +1097,9 @@ svg :focus-visible,
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
-  margin: 2px;
   padding: var(--panel-pad);
-  background: var(--face-3);
-  box-shadow: var(--bevel-sunken);
+  background: var(--panel);
+  border-radius: 0 0 var(--r-2) var(--r-2);
   overflow: auto;
 }
 
@@ -1012,15 +1112,15 @@ svg :focus-visible,
   overflow: hidden;
 }
 
-/* Splitter: a 6px raised bar with a sunken grip, between P&ID and trend. */
+/* Splitter: a 6px bar carrying one hairline grip. */
 .splitter {
   position: relative;
   flex: 0 0 var(--splitter-hit);
   align-self: stretch;
   padding: 0;
   border: 0;
-  background: var(--face);
-  box-shadow: var(--bevel-raised-1);
+  border-radius: var(--r-2);
+  background: transparent;
   z-index: var(--z-splitter);
   touch-action: none;
 }
@@ -1043,53 +1143,22 @@ svg :focus-visible,
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: var(--bev-sh);
-  box-shadow: 1px 1px 0 var(--bev-hi);
+  border-radius: var(--r-2);
+  background: var(--edge);
+  transition: background-color var(--dur-1) var(--ease-out);
 }
 
-.splitter--h::before { width: 28px; height: 2px; }
-.splitter--v::before { width: 2px; height: 28px; }
+.splitter--h::before { width: 34px; height: 2px; }
+.splitter--v::before { width: 2px; height: 34px; }
 
-.splitter:hover,
-.splitter.is-dragging { background: var(--face-2); }
-.splitter.is-dragging::before { background: var(--focus); }
+.splitter:hover::before { background: var(--ink-3); }
+.splitter.is-dragging::before { background: var(--accent); }
 
 /* ==========================================================================
-   7. STATUS STRIP  (24px) — a row of sunken label boxes plus the state lamp
-   ========================================================================== */
-
-.statusstrip {
-  gap: var(--sp-3);
-  padding: 0 var(--sp-4);
-  background: var(--face);
-  box-shadow: var(--bevel-raised-1);
-  overflow: hidden;
-}
-
-.statusstrip__spacer {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.statusstrip .statchip,
-.statusstrip .tagblk {
-  flex-direction: row;
-  align-items: center;
-  gap: var(--sp-3);
-}
-
-.statusstrip .lbox,
-.statusstrip .statchip__value {
-  height: var(--lbox-h);
-  font-size: var(--fs-12);
-}
-
-/* ==========================================================================
-   8. LABEL BOXES AND TAG BLOCKS
-   The workhorse of the design: [TAG] over a sunken near-black field holding a
-   right-aligned tabular value and an 80% engineering-unit suffix.
-   Digit-role modifiers: PV lime (default), SP amber, OUT cyan, alarm red,
-   stale grey-green.
+   7. LABEL BOXES AND TAG BLOCKS
+   The workhorse of the design: [tag] over a recessed field holding a
+   right-aligned tabular value and a smaller, dimmer engineering unit.
+   Digit roles: PV white (default), SP amber, OUT cyan, alarm red, stale grey.
    ========================================================================== */
 
 .lbox,
@@ -1100,18 +1169,21 @@ svg :focus-visible,
 .readout,
 .rv-tag-v,
 .vm-stat__v,
-.chart__card-val {
+.chart__card-val,
+.ftx__fld {
   display: inline-flex;
   align-items: baseline;
   justify-content: flex-end;
-  gap: 2px;
+  gap: var(--sp-3);
   min-width: var(--lbox-min);
   height: var(--lbox-h);
-  padding: 2px;
+  padding: 0 var(--sp-4);
   background: var(--fld-bg);
-  box-shadow: var(--bevel-sunken);
+  border: var(--border-field);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
   color: var(--fld-pv);
-  font: 700 var(--fs-13) / 1 var(--font-num);
+  font: 500 var(--fs-13) / calc(var(--lbox-h) - 2px) var(--font-num);
   font-variant-numeric: tabular-nums lining-nums;
   letter-spacing: var(--ls-num);
   text-align: right;
@@ -1121,7 +1193,8 @@ svg :focus-visible,
 
 .lbox--lg {
   height: var(--lbox-h-lg);
-  font-size: var(--fs-18);
+  font-size: var(--fs-15);
+  line-height: calc(var(--lbox-h-lg) - 2px);
 }
 
 .lbox--wide { min-width: 84px; }
@@ -1129,16 +1202,19 @@ svg :focus-visible,
 
 /* Digit roles. */
 .lbox--sp,
-.rv-sp { color: var(--fld-sp); }
+.rv-sp,
+.ftx__fld--sp { color: var(--fld-sp); }
 
 .lbox--out,
 .lbox--manual,
-.lbox.is-manual { color: var(--fld-out); }
+.lbox.is-manual,
+.ftx__fld--x { color: var(--fld-out); }
 
 .lbox.is-alarm,
 .statchip.is-alarm .statchip__value,
 .chip.is-alarm .chip__value,
-.rv-tag.is-alarm .rv-tag-v { color: var(--fld-alarm); }
+.rv-tag.is-alarm .rv-tag-v,
+.ftx__fld--alarm { color: var(--fld-alarm); }
 
 .lbox.is-warn,
 .statchip.is-warn .statchip__value,
@@ -1149,9 +1225,10 @@ svg :focus-visible,
 .lbox.is-invalid,
 .lbox.is-limited,
 .statchip.is-invalid .statchip__value,
-.rv-tag.is-invalid .rv-tag-v { color: var(--fld-stale); }
+.rv-tag.is-invalid .rv-tag-v,
+.ftx__fld--stale { color: var(--fld-stale); }
 
-/* The engineering unit rides right of the value at 80%, dimmer. */
+/* The engineering unit rides right of the value, smaller and dimmer. */
 .lbox__eu,
 .statchip__unit,
 .rv-tag-u,
@@ -1159,17 +1236,17 @@ svg :focus-visible,
 .chart__card-unit {
   flex: 0 0 auto;
   font-family: var(--font-num);
-  font-size: 80%;
+  font-size: var(--fs-10);
   font-weight: 400;
   color: var(--fld-eu);
 }
 
-/* Units rendered outside a field sit in ink, not field green. */
+/* Units rendered outside a field sit in secondary ink, not field ink. */
 .chip__unit,
 .counter__unit,
 .metric__unit {
   font-family: var(--font-num);
-  font-size: 80%;
+  font-size: var(--fs-10);
   font-weight: 400;
   color: var(--ink-2);
 }
@@ -1185,6 +1262,7 @@ svg :focus-visible,
 .lbox__rule {
   width: 1px;
   align-self: stretch;
+  margin: 2px 0;
   background: var(--fld-rule);
 }
 
@@ -1201,7 +1279,7 @@ svg :focus-visible,
   flex-direction: column;
   align-items: stretch;
   justify-content: center;
-  gap: 1px;
+  gap: 2px;
   min-width: 0;
   flex: 0 0 auto;
 }
@@ -1214,7 +1292,7 @@ svg :focus-visible,
 .vm-tg {
   flex-direction: row;
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
 }
 
 .tagblk--row > .tagblk__lbl,
@@ -1223,32 +1301,35 @@ svg :focus-visible,
   flex: 0 0 auto;
 }
 
-/* Hero readout: the trend's focused PV. The one place 20px is allowed. */
+/* Hero readout: the trend's focused PV. 15px is the ceiling. */
 .chip--hero .chip__value,
 .lbox--hero {
   min-width: 92px;
   height: var(--lbox-h-lg);
-  font-size: var(--fs-20);
+  font-size: var(--fs-15);
+  line-height: calc(var(--lbox-h-lg) - 2px);
 }
 
 .chip--quiet .chip__value { color: var(--fld-stale); }
 
 .metric--truth .metric__value { color: var(--fld-out); }
-.metric__delta { font: 700 var(--fs-10) / 1 var(--font-num); color: var(--ink-2); }
+.metric__delta { font: 500 var(--fs-10) / 1 var(--font-num); color: var(--ink-2); }
 .metric__truthnote,
-.glossary__typical { font: 400 var(--fs-9) / 1.2 var(--font-ui); color: var(--ink-2); }
+.glossary__typical { font: 400 var(--fs-10) / 1.3 var(--font-ui); color: var(--ink-2); }
 
 .metrics,
 .systemview__cards,
 .vm-prev__stats {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   min-width: 0;
 }
 
 /* ==========================================================================
-   9. STATUS LAMPS — round, glassy: filled circle, 1px ring, top-left arc
+   8. STATUS LAMPS AND PILLS
+   Round: a filled disc, a 1px dark ring, a soft top highlight, and — while
+   lit — a matching outer glow at 25%.
    ========================================================================== */
 
 .lamp,
@@ -1259,15 +1340,16 @@ svg :focus-visible,
 .ov-coach__dot,
 .blockrow__dot {
   --lamp-c: var(--lamp-off);
+  --lamp-glow: transparent;
   display: inline-block;
   flex: 0 0 auto;
   width: var(--lamp-d);
   height: var(--lamp-d);
   border-radius: var(--r-round);
   background:
-    radial-gradient(circle at 34% 28%, var(--lamp-gloss) 0 14%, transparent 46%),
+    radial-gradient(circle at 38% 26%, var(--lamp-gloss) 0 18%, transparent 60%),
     var(--lamp-c);
-  box-shadow: 0 0 0 1px var(--lamp-ring);
+  box-shadow: 0 0 0 1px var(--lamp-ring), 0 0 6px 1px var(--lamp-glow);
 }
 
 .lamp--lg { width: var(--lamp-d-lg); height: var(--lamp-d-lg); }
@@ -1276,45 +1358,49 @@ svg :focus-visible,
 .lamp.is-run,
 .lamp.is-running,
 .lamp.is-ok,
-.vm-dot--ok { --lamp-c: var(--lamp-run); }
+.vm-dot--ok { --lamp-c: var(--lamp-run); --lamp-glow: var(--glow-run); }
 
 .lamp--warn,
 .lamp.is-warn,
-.vm-dot--warn { --lamp-c: var(--lamp-warn); }
+.vm-dot--warn { --lamp-c: var(--lamp-warn); --lamp-glow: var(--glow-warn); }
 
 .lamp--alarm,
 .lamp.is-alarm,
 .lamp.is-fault,
-.vm-dot--err { --lamp-c: var(--lamp-alarm); }
+.vm-dot--err { --lamp-c: var(--lamp-alarm); --lamp-glow: var(--glow-alarm); }
+
+.lamp--info,
+.lamp.is-info { --lamp-c: var(--lamp-info); --lamp-glow: var(--glow-info); }
 
 .lamp--off,
-.lamp.is-off { --lamp-c: var(--lamp-off); }
+.lamp.is-off { --lamp-c: var(--lamp-off); --lamp-glow: transparent; }
 
-.lamp--sp { --lamp-c: var(--fld-sp); }
-.lamp--out { --lamp-c: var(--fld-out); }
+.lamp--sp { --lamp-c: var(--fld-sp); --lamp-glow: var(--glow-warn); }
+.lamp--out { --lamp-c: var(--fld-out); --lamp-glow: var(--glow-info); }
 
 .lamp.is-blink,
 .lamp--alarm.is-unacked {
-  animation: ft-blink var(--blink) steps(1, end) infinite;
+  animation: hmi-blink var(--blink) steps(1, end) infinite;
 }
 
-@keyframes ft-blink {
-  0%, 49% { opacity: 1; }
-  50%, 100% { opacity: 0.20; }
+@keyframes hmi-blink {
+  0%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0.18; }
 }
 
-/* A lamp sunk into its own bezel, for the strips. */
+/* A lamp sunk into its own bezel, for the title strip. */
 .lampwell {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 16px;
   height: 16px;
-  background: var(--face-2);
-  box-shadow: var(--bevel-sunken-1);
+  background: var(--panel-lo);
+  border: var(--border-soft);
+  border-radius: var(--r-2);
 }
 
-/* Pills: lamp + one uppercase word. The run-state indicator. */
+/* Pills: lamp + one uppercase word. */
 .state-pill,
 .pill,
 .rv-chip,
@@ -1323,14 +1409,14 @@ svg :focus-visible,
 .tab__badge {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   height: var(--ctl-sm);
-  padding: 0 var(--sp-4);
-  background: var(--face-2);
-  color: var(--ink);
-  box-shadow: var(--bevel-sunken-1);
-  border-radius: 0;
-  font: 700 var(--fs-10) / 1 var(--font-ui);
+  padding: 0 var(--sp-5);
+  background: var(--panel-lo);
+  border: var(--border-soft);
+  border-radius: var(--r-2);
+  color: var(--ink-2);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
   white-space: nowrap;
@@ -1338,22 +1424,22 @@ svg :focus-visible,
 
 .state-pill::before { content: ""; }
 
-.state-pill.is-running::before { --lamp-c: var(--lamp-run); }
+.state-pill.is-running::before { --lamp-c: var(--lamp-run); --lamp-glow: var(--glow-run); }
 .state-pill.is-alarm::before,
-.state-pill.is-fault::before { --lamp-c: var(--lamp-alarm); }
-.state-pill.is-warn::before { --lamp-c: var(--lamp-warn); }
-.state-pill.is-finished::before { --lamp-c: var(--fld-out); }
+.state-pill.is-fault::before { --lamp-c: var(--lamp-alarm); --lamp-glow: var(--glow-alarm); }
+.state-pill.is-warn::before { --lamp-c: var(--lamp-warn); --lamp-glow: var(--glow-warn); }
+.state-pill.is-finished::before { --lamp-c: var(--lamp-info); --lamp-glow: var(--glow-info); }
 
 .pill--ok,
-.vm-pill--ok { color: var(--ok); }
+.vm-pill--ok { color: var(--ok-ink); }
 .pill--warn,
-.vm-pill--warn { color: var(--warn); }
+.vm-pill--warn { color: var(--warn-ink); }
 .pill--alarm,
-.vm-pill--err { color: var(--alarm); }
+.vm-pill--err { color: var(--alarm-ink); }
 .pill--info,
-.vm-pill--info { color: var(--accent); }
+.vm-pill--info { color: var(--accent-ink); }
 .pill--neutral,
-.vm-pill--mute { color: var(--ink-2); }
+.vm-pill--mute { color: var(--ink-3); }
 .pill--lg { height: var(--ctl-md); font-size: var(--fs-11); }
 
 .kbd,
@@ -1363,15 +1449,26 @@ svg :focus-visible,
   justify-content: center;
   min-width: 18px;
   height: var(--ctl-sm);
-  padding: 0 var(--sp-3);
-  background: var(--face);
-  box-shadow: var(--bevel-raised);
+  padding: 0 var(--sp-4);
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-raised);
   color: var(--ink);
-  font: 700 var(--fs-10) / 1 var(--font-num);
+  font: 500 var(--fs-10) / 1 var(--font-num);
+}
+
+/* The shortcut list is a two-column read: every key cap in a group must be the same width or
+   the labels beside them stop lining up and the list stops being scannable. ui/overlay.js asks
+   for 80px, but its sheet is inside @layer chromaskid-overlay and this file is unlayered, so
+   the 18px above wins on cascade layer alone and collapses the column. Restate it here, where
+   the winning rule lives. */
+.ov-cheat__key {
+  min-width: 80px;
 }
 
 /* ==========================================================================
-   10. ISA-5.1 INSTRUMENT BUBBLES
+   9. ISA-5.1 INSTRUMENT BUBBLES
    Round balloon: function letters over the loop number. HTML and SVG variants.
    ========================================================================== */
 
@@ -1385,17 +1482,17 @@ svg :focus-visible,
   width: var(--bubble-d);
   height: var(--bubble-d);
   border-radius: var(--r-round);
-  background: var(--face-3);
+  background: var(--bubble-fill);
   color: var(--ink);
-  box-shadow: 0 0 0 1px var(--ink);
-  font: 700 var(--fs-9) / 1 var(--font-ui);
+  box-shadow: 0 0 0 1px var(--equip-edge);
+  font: 600 var(--fs-9) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
 }
 
 .bub__fn,
 .bubble-name,
 .pid-tag-name {
-  font: 700 var(--fs-9) / 1 var(--font-ui);
+  font: 600 var(--fs-9) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
 }
 
@@ -1407,8 +1504,8 @@ svg :focus-visible,
 /* SVG bubbles drawn by pid.js. */
 .bubble-box,
 .pid-bubble-box {
-  fill: var(--face-3);
-  stroke: var(--ink);
+  fill: var(--bubble-fill);
+  stroke: var(--equip-edge);
   stroke-width: 1;
 }
 
@@ -1416,19 +1513,19 @@ svg :focus-visible,
 .pid-leader,
 .pid-bracket-line {
   fill: none;
-  stroke: var(--ink);
+  stroke: var(--edge);
   stroke-width: 1;
 }
 
 .bubble-value,
 .pid-tag-value {
   fill: var(--fld-pv);
-  font: 700 var(--fs-11) / 1 var(--font-num);
+  font: 500 var(--fs-11) / 1 var(--font-num);
 }
 
 .pid-tag-value-sm {
   fill: var(--fld-pv);
-  font: 700 var(--fs-9) / 1 var(--font-num);
+  font: 500 var(--fs-9) / 1 var(--font-num);
 }
 
 .bubble-unit,
@@ -1443,7 +1540,7 @@ svg :focus-visible,
 .bubble.is-alarm .bubble-value { fill: var(--fld-alarm); }
 
 /* ==========================================================================
-   11. DENSE TAG GRID — the packing rule for blocks of label boxes
+   10. DENSE TAG GRID — the packing rule for blocks of label boxes
    ========================================================================== */
 
 .grid-tags,
@@ -1453,7 +1550,7 @@ svg :focus-visible,
 .rv-caps {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
-  gap: var(--sp-2);
+  gap: var(--sp-4);
   align-content: start;
   min-width: 0;
 }
@@ -1462,7 +1559,7 @@ svg :focus-visible,
 .grid-tags--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid-tags--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .grid-tags--6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
-.grid-tags--tight { gap: 1px; }
+.grid-tags--tight { gap: var(--sp-2); }
 .grid-tags--wide { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
 
 /* A framed group of tags: a plate screwed onto the panel. */
@@ -1470,20 +1567,20 @@ svg :focus-visible,
 .fieldset {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
   min-width: 0;
   margin: 0;
-  padding: var(--sp-3);
-  border: 0;
-  background: var(--face);
-  box-shadow: var(--bevel-raised);
+  padding: var(--sp-5);
+  background: var(--panel-lo);
+  border: var(--border-soft);
+  border-radius: var(--r-2);
 }
 
 .tagset__cap,
 .fieldset__legend {
   padding: 0 var(--sp-2);
-  color: var(--ink);
-  font: 700 var(--fs-10) / 1 var(--font-ui);
+  color: var(--ink-2);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
 }
@@ -1491,12 +1588,12 @@ svg :focus-visible,
 .fieldgroup {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   min-width: 0;
 }
 
 /* ==========================================================================
-   12. TABLES — sunken well, face-2 header row, 22px rows, 1px rule
+   11. TABLES — recessed well, raised header row, 22px rows, 1px rule
    ========================================================================== */
 
 .table-wrap,
@@ -1504,6 +1601,7 @@ svg :focus-visible,
 .vm-listwrap,
 .sv-scroll,
 .chart__table,
+.ftx__table,
 .logtable,
 .scenario-list,
 .blocklist__items,
@@ -1511,9 +1609,10 @@ svg :focus-visible,
   position: relative;
   min-height: 0;
   min-width: 0;
-  padding: 2px;
-  background: var(--face-3);
-  box-shadow: var(--bevel-sunken);
+  background: var(--panel-lo);
+  border: var(--border-soft);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
   overflow: auto;
 }
 
@@ -1521,7 +1620,7 @@ svg :focus-visible,
   width: 100%;
   border-collapse: collapse;
   border-spacing: 0;
-  background: var(--face-3);
+  background: transparent;
   color: var(--ink);
   font: 400 var(--fs-11) / 1 var(--font-ui);
 }
@@ -1532,11 +1631,11 @@ svg :focus-visible,
   top: 0;
   z-index: var(--z-sticky);
   height: var(--head-h);
-  padding: 0 var(--sp-4);
-  background: var(--face-2);
-  box-shadow: var(--bevel-raised-1);
-  color: var(--ink);
-  font: 700 var(--fs-10) / 1 var(--font-ui);
+  padding: 0 var(--sp-5);
+  background: var(--panel-hi);
+  border-bottom: var(--border-edge);
+  color: var(--ink-2);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   text-align: left;
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
@@ -1549,7 +1648,7 @@ svg :focus-visible,
 
 .table tbody td {
   height: var(--row-h);
-  padding: 0 var(--sp-4);
+  padding: 0 var(--sp-5);
   border-bottom: 1px solid var(--rule);
   white-space: nowrap;
   overflow: hidden;
@@ -1557,7 +1656,7 @@ svg :focus-visible,
 }
 
 .table tbody tr:nth-child(even) td {
-  background: var(--face);
+  background: var(--neutral-soft);
 }
 
 .table tbody tr:hover td {
@@ -1566,8 +1665,9 @@ svg :focus-visible,
 
 .table tbody tr.is-selected td,
 .table tbody tr[aria-selected="true"] td {
-  background: var(--sel-bg);
-  color: var(--sel-ink);
+  background: var(--accent-soft);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 .table td.num,
@@ -1602,24 +1702,24 @@ svg :focus-visible,
 
 /* Severity rows in the alarm summary grid. */
 .table tbody tr.is-alarm td,
-.rv-alm.is-alarm { color: var(--alarm); }
+.rv-alm.is-alarm { color: var(--alarm-ink); }
 .table tbody tr.is-warn td,
-.rv-alm.is-warn { color: var(--warn); }
-.table tbody tr.is-off td { color: var(--ink-off); }
+.rv-alm.is-warn { color: var(--warn-ink); }
+.table tbody tr.is-off td { color: var(--ink-3); }
 
 .filterbar {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   flex: 0 0 auto;
   height: var(--panel-header);
-  padding: 0 var(--sp-3);
-  background: var(--face-2);
-  box-shadow: var(--bevel-raised-1);
+  padding: 0 var(--sp-4);
+  background: var(--surface-header);
+  border-bottom: var(--border-edge);
 }
 
 /* ==========================================================================
-   13. FORM CONTROLS — sunken fields; entry digits are cyan, like an OUT value
+   12. FORM CONTROLS — recessed fields; entry digits are cyan, like an OUT value
    ========================================================================== */
 
 .input,
@@ -1635,33 +1735,42 @@ textarea,
 .sv-search {
   height: var(--ctl-md);
   min-width: 0;
-  padding: 0 var(--sp-3);
+  padding: 0 var(--sp-4);
   background: var(--fld-bg);
   color: var(--fld-out);
-  box-shadow: var(--bevel-sunken);
-  border: 0;
-  border-radius: 0;
-  font: 700 var(--fs-12) / 1 var(--font-num);
+  border: var(--border-field);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
+  font: 500 var(--fs-12) / 1 var(--font-num);
   font-variant-numeric: tabular-nums lining-nums;
   -webkit-appearance: none;
   appearance: none;
+}
+
+.input:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 textarea,
 .vm-ta {
   height: auto;
   min-height: 48px;
-  padding: var(--sp-3);
-  line-height: 1.3;
+  padding: var(--sp-4);
+  line-height: 1.35;
   resize: vertical;
 }
 
 select,
 .vm-sel {
-  padding-right: var(--sp-5);
-  background: var(--face-3);
+  padding-right: var(--sp-6);
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  box-shadow: var(--elev-raised);
   color: var(--ink);
-  box-shadow: var(--bevel-raised);
   font-family: var(--font-ui);
   font-size: var(--fs-11);
 }
@@ -1674,7 +1783,7 @@ textarea::placeholder {
 input:disabled,
 select:disabled,
 textarea:disabled {
-  color: var(--ink-off);
+  color: var(--ink-3);
   background-image: linear-gradient(var(--disabled-veil), var(--disabled-veil));
 }
 
@@ -1682,14 +1791,14 @@ textarea:disabled {
 .vm-field {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   min-width: 0;
 }
 
 .field--row {
   flex-direction: row;
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
 }
 
 .field__hint,
@@ -1697,7 +1806,7 @@ textarea:disabled {
 .hint__body,
 .rv-note,
 .vm-note {
-  font: 400 var(--fs-9) / 1.25 var(--font-ui);
+  font: 400 var(--fs-10) / 1.35 var(--font-ui);
   color: var(--ink-2);
 }
 
@@ -1706,8 +1815,8 @@ textarea:disabled {
 .vm-field__msg,
 .validation__item,
 .vm-issue__msg {
-  font: 700 var(--fs-9) / 1.25 var(--font-ui);
-  color: var(--alarm);
+  font: 600 var(--fs-10) / 1.35 var(--font-ui);
+  color: var(--alarm-ink);
 }
 
 .numfield,
@@ -1730,11 +1839,13 @@ textarea:disabled {
 .vm-nf__usel {
   display: inline-flex;
   align-items: center;
-  padding: 0 var(--sp-3);
-  background: var(--face-2);
-  box-shadow: var(--bevel-raised-1);
+  padding: 0 var(--sp-4);
+  background: var(--panel-hi);
+  border: var(--border-edge);
+  border-left: 0;
+  border-radius: 0 var(--r-2) var(--r-2) 0;
   color: var(--ink-2);
-  font: 700 var(--fs-10) / 1 var(--font-ui);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   text-transform: uppercase;
 }
 
@@ -1752,16 +1863,17 @@ textarea:disabled {
   width: 16px;
   flex: 1 1 50%;
   padding: 0;
-  border: 0;
-  background: var(--face);
-  box-shadow: var(--bevel-raised);
-  color: var(--ink);
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  color: var(--ink-2);
   cursor: pointer;
 }
 
 .numfield__step:active,
 .vm-nf__step:active {
-  box-shadow: var(--bevel-sunken);
+  background: var(--surface-pressed);
+  box-shadow: var(--elev-pressed);
 }
 
 .numfield--invalid .numfield__input,
@@ -1769,14 +1881,15 @@ textarea:disabled {
 input.is-invalid,
 select.is-invalid {
   color: var(--fld-alarm);
-  box-shadow: var(--bevel-sunken), inset 0 0 0 2px var(--alarm);
+  border-color: var(--alarm);
+  box-shadow: var(--elev-sunken), 0 0 0 2px var(--alarm-soft);
 }
 
-/* Toggle: a beveled two-position switch, not an iOS pill. */
+/* Toggle: a two-position switch, sized like the rest of the chrome. */
 .toggle {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   min-width: 0;
   cursor: pointer;
 }
@@ -1793,40 +1906,49 @@ select.is-invalid {
   width: 34px;
   height: var(--ctl-sm);
   flex: 0 0 auto;
-  background: var(--face-2);
-  box-shadow: var(--bevel-sunken);
+  background: var(--panel-lo);
+  border: var(--border-field);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
 }
 
 .toggle__knob {
   position: absolute;
-  top: 2px;
-  left: 2px;
+  top: 1px;
+  left: 1px;
   width: 14px;
   height: calc(var(--ctl-sm) - 4px);
-  background: var(--face);
-  box-shadow: var(--bevel-raised);
-  transition: left var(--dur-1) var(--ease-out);
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  transition: left var(--dur-2) var(--ease-out);
 }
 
-.toggle__input:checked + .toggle__track { background: var(--fld-bg); }
+.toggle__input:checked + .toggle__track {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
 .toggle__input:checked + .toggle__track .toggle__knob {
-  left: 18px;
+  left: 17px;
   background: var(--ok);
+  border-color: var(--ok);
 }
 
 .toggle__input:focus-visible + .toggle__track {
-  outline: 2px solid var(--focus);
+  outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
 .toggle__label {
-  font: 700 var(--fs-10) / 1 var(--font-ui);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
 }
 
 input[type="checkbox"],
-input[type="radio"] {
+input[type="radio"],
+.ftx__cb {
   width: 13px;
   height: 13px;
   flex: 0 0 auto;
@@ -1846,24 +1968,26 @@ input[type="range"] {
   align-items: center;
   justify-content: center;
   min-height: 48px;
-  padding: var(--sp-5);
-  background: var(--face-3);
-  box-shadow: var(--bevel-sunken);
+  padding: var(--sp-6);
+  background: var(--panel-lo);
+  border: 1px dashed var(--edge);
+  border-radius: var(--r-2);
   color: var(--ink-2);
-  font: 700 var(--fs-10) / 1 var(--font-ui);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
 }
 
 .dropzone.is-over,
 .vm-drop.is-over {
-  box-shadow: var(--bevel-sunken), inset 0 0 0 2px var(--focus);
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 /* ==========================================================================
-   14. FLOATING WINDOWS — faceplates, modals, popovers, toasts
-   A faceplate is a title-barred window with a hard-edged drop shadow. Prose
-   is legal HERE and in tooltips only; never on the process screens.
+   13. FLOATING WINDOWS — faceplates, modals, popovers, toasts
+   A faceplate is a title-barred window with a soft drop shadow. Prose is legal
+   HERE and in tooltips only; never on the process screens.
    ========================================================================== */
 
 .overlay-host,
@@ -1898,9 +2022,10 @@ input[type="range"] {
   max-width: min(92vw, 640px);
   max-height: 86vh;
   z-index: var(--z-modal);
-  background: var(--face);
-  box-shadow: var(--bevel-raised), var(--shadow-window);
-  border-radius: 0;
+  background: var(--panel);
+  border: var(--border-edge);
+  border-radius: var(--r-3);
+  box-shadow: var(--elev-float);
 }
 
 .faceplate--tag { min-width: 280px; }
@@ -1910,13 +2035,13 @@ input[type="range"] {
 .ov-modal__head {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   flex: 0 0 auto;
   height: var(--h-titlebar);
-  margin: 2px 2px 0;
-  padding: 0 var(--sp-3) 0 var(--sp-5);
-  background: var(--face-2);
-  box-shadow: var(--bevel-raised-1);
+  padding: 0 var(--sp-4) 0 var(--sp-6);
+  background: var(--surface-header);
+  border-bottom: var(--border-edge);
+  border-radius: var(--r-3) var(--r-3) 0 0;
 }
 
 .faceplate__title,
@@ -1926,8 +2051,7 @@ input[type="range"] {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--ink);
-  font: 700 var(--fs-11) / 1 var(--font-ui);
-  text-transform: uppercase;
+  font: 600 var(--fs-11) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
 }
 
@@ -1942,26 +2066,31 @@ input[type="range"] {
   min-width: var(--ctl-md);
   margin-left: auto;
   padding: 0;
-  border: 0;
-  background: var(--face);
-  box-shadow: var(--bevel-raised);
-  color: var(--ink);
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  color: var(--ink-2);
   cursor: pointer;
 }
 
+.modal__close:hover,
+.ov-modal__close:hover,
+.ov-toast__close:hover { color: var(--ink); }
+
 .modal__close:active,
 .ov-modal__close:active,
-.ov-toast__close:active { box-shadow: var(--bevel-sunken); }
+.ov-toast__close:active {
+  background: var(--surface-pressed);
+  box-shadow: var(--elev-pressed);
+}
 
 .faceplate__body,
 .modal__body,
 .ov-modal__body {
   flex: 1 1 auto;
   min-height: 0;
-  margin: 2px;
-  padding: var(--sp-5);
-  background: var(--face-3);
-  box-shadow: var(--bevel-sunken);
+  padding: var(--sp-6);
+  background: var(--panel);
   overflow: auto;
   font-size: var(--fs-11);
   line-height: var(--lh-base);
@@ -1975,10 +2104,12 @@ input[type="range"] {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   flex: 0 0 auto;
-  padding: var(--sp-3) var(--sp-4);
-  background: var(--face);
+  padding: var(--sp-4) var(--sp-5);
+  background: var(--panel);
+  border-top: var(--border-soft);
+  border-radius: 0 0 var(--r-3) var(--r-3);
 }
 
 /* Popovers: glossary and tooltips. The explanation lives here. */
@@ -1991,10 +2122,12 @@ input[type="range"] {
   position: absolute;
   z-index: var(--z-popover);
   max-width: 300px;
-  padding: var(--sp-4) var(--sp-5);
-  background: var(--face);
+  padding: var(--sp-5) var(--sp-6);
+  background: var(--panel-hi);
+  border: var(--border-edge);
+  border-radius: var(--r-3);
+  box-shadow: var(--elev-float);
   color: var(--ink);
-  box-shadow: var(--bevel-raised), var(--shadow-window);
   font: 400 var(--fs-11) / var(--lh-base) var(--font-ui);
   user-select: text;
   -webkit-user-select: text;
@@ -2004,9 +2137,9 @@ input[type="range"] {
 .ov-gloss__h,
 .rv-pop-h,
 .hint__title {
-  margin-bottom: var(--sp-3);
+  margin-bottom: var(--sp-4);
   color: var(--ink);
-  font: 700 var(--fs-10) / 1.2 var(--font-ui);
+  font: 600 var(--fs-10) / 1.2 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
 }
@@ -2024,15 +2157,15 @@ input[type="range"] {
 }
 
 .popover__section {
-  margin-top: var(--sp-4);
-  padding-top: var(--sp-4);
-  box-shadow: var(--bevel-groove-h);
+  margin-top: var(--sp-5);
+  padding-top: var(--sp-5);
+  border-top: var(--border-soft);
 }
 
 .popover__actions {
   display: flex;
-  gap: var(--sp-3);
-  margin-top: var(--sp-4);
+  gap: var(--sp-4);
+  margin-top: var(--sp-5);
 }
 
 .popover__arrow,
@@ -2040,8 +2173,8 @@ input[type="range"] {
   position: absolute;
   width: 8px;
   height: 8px;
-  background: var(--face);
-  box-shadow: var(--bevel-raised-1);
+  background: var(--panel-hi);
+  border: var(--border-edge);
 }
 
 .ov-gloss__chip,
@@ -2051,17 +2184,17 @@ input[type="range"] {
   font-family: var(--font-num);
 }
 
-.ov-gloss__see { color: var(--accent); }
+.ov-gloss__see { color: var(--accent-ink); }
 
 /* Toasts: transient, stacked, still icon-first. */
 .toast-stack,
 .ov-toasts {
   position: absolute;
-  right: var(--sp-5);
-  bottom: var(--sp-5);
+  right: var(--sp-6);
+  bottom: var(--sp-6);
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   z-index: var(--z-toast);
   pointer-events: none;
 }
@@ -2072,14 +2205,15 @@ input[type="range"] {
 .vm-fallback-toast {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   min-height: var(--ctl-lg);
-  padding: var(--sp-3) var(--sp-5);
-  background: var(--face);
+  padding: var(--sp-4) var(--sp-6);
+  background: var(--panel-hi);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-float);
   color: var(--ink);
-  box-shadow: var(--bevel-raised), var(--shadow-window);
-  font: 700 var(--fs-10) / 1.2 var(--font-ui);
-  text-transform: uppercase;
+  font: 600 var(--fs-10) / 1.3 var(--font-ui);
   letter-spacing: var(--ls-caps);
   pointer-events: auto;
 }
@@ -2091,9 +2225,9 @@ input[type="range"] {
   text-overflow: ellipsis;
 }
 
-.ov-toast--warn { color: var(--warn); }
-.ov-toast--blocked { color: var(--alarm); }
-.ov-toast--info { color: var(--accent); }
+.ov-toast--warn { color: var(--warn-ink); border-color: var(--warn); }
+.ov-toast--blocked { color: var(--alarm-ink); border-color: var(--alarm); }
+.ov-toast--info { color: var(--info-ink); border-color: var(--info); }
 
 /* Coach marks and the key sheet: help, deliberately off the process screen. */
 .coach,
@@ -2102,10 +2236,12 @@ input[type="range"] {
 .ov-cheat,
 .onboard,
 .onboarding {
-  padding: var(--sp-6);
-  background: var(--face);
+  padding: var(--sp-8);
+  background: var(--panel);
+  border: var(--border-edge);
+  border-radius: var(--r-3);
+  box-shadow: var(--elev-float);
   color: var(--ink);
-  box-shadow: var(--bevel-raised), var(--shadow-window);
   font: 400 var(--fs-11) / var(--lh-base) var(--font-ui);
   user-select: text;
   -webkit-user-select: text;
@@ -2115,9 +2251,8 @@ input[type="range"] {
 .ov-coach__title,
 .cheatsheet__heading,
 .ov-cheat__group {
-  margin-bottom: var(--sp-4);
-  font: 700 var(--fs-11) / 1.2 var(--font-ui);
-  text-transform: uppercase;
+  margin-bottom: var(--sp-5);
+  font: 600 var(--fs-12) / 1.2 var(--font-ui);
   letter-spacing: var(--ls-caps);
 }
 
@@ -2130,23 +2265,23 @@ input[type="range"] {
 .ov-coach__actions {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
-  margin-top: var(--sp-5);
+  gap: var(--sp-5);
+  margin-top: var(--sp-6);
 }
 
 .coach__dots,
 .ov-coach__dots {
   display: flex;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   margin-right: auto;
 }
 
 .coach__dot.is-active,
-.ov-coach__dot--on { --lamp-c: var(--fld-sp); }
+.ov-coach__dot--on { --lamp-c: var(--accent); --lamp-glow: var(--accent-soft); }
 
 .coach__step,
 .ov-coach__step {
-  font: 700 var(--fs-10) / 1 var(--font-num);
+  font: 500 var(--fs-10) / 1 var(--font-num);
   color: var(--ink-2);
 }
 
@@ -2154,14 +2289,14 @@ input[type="range"] {
 .ov-cheat__row {
   display: flex;
   align-items: center;
-  gap: var(--sp-5);
+  gap: var(--sp-6);
   height: var(--row-h);
   border-bottom: 1px solid var(--rule);
 }
 
 .cheatsheet__keys {
   display: flex;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
   flex: 0 0 120px;
 }
 
@@ -2169,15 +2304,18 @@ input[type="range"] {
 .ov-cheat__label { color: var(--ink-2); }
 
 /* ==========================================================================
-   15. TREND HOST — black plot, green graticule, stacked canvas layers
-   chart.js injects #chart-css for the internals; this is the frame.
+   14. TREND HOST — dark plot, graphite graticule, stacked canvas layers
+   ui/chart.js injects #ftx-css for the internals; this is the frame plus a
+   base rule for every .ftx__* hook so nothing is unstyled if that sheet
+   changes. The plot well is the one 3px corner in the design.
    ========================================================================== */
 
 .chart,
 .chart__card,
 .rv-chart,
 .rv-chartroot,
-.rv-chart-host {
+.rv-chart-host,
+.ftx {
   position: relative;
   display: flex;
   flex-direction: column;
@@ -2186,23 +2324,46 @@ input[type="range"] {
   min-width: 0;
 }
 
+.ftx__body {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--gap);
+  min-height: 0;
+  min-width: 0;
+  padding: var(--gap);
+}
+
 .chart__plot,
-.chart__ov {
+.chart__ov,
+.ftx__well,
+.ftx__ov {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
   background: var(--plot-bg);
-  box-shadow: var(--bevel-sunken);
+  border: 1px solid var(--plot-frame);
+  border-radius: var(--r-3);
+  box-shadow: var(--elev-sunken);
   overflow: hidden;
   cursor: crosshair;
 }
 
-.chart__plot--pan { cursor: grab; }
-.chart__plot--panning { cursor: grabbing; }
-.chart__plot--pool { cursor: col-resize; }
+.ftx__ov {
+  flex: 0 0 auto;
+  height: var(--h-overview);
+  cursor: ew-resize;
+}
 
-.chart__layer {
+.chart__plot--pan,
+.ftx__well--pan { cursor: grab; }
+.chart__plot--panning,
+.ftx__well--panning { cursor: grabbing; }
+.chart__plot--pool,
+.ftx__well--pool { cursor: col-resize; }
+
+.chart__layer,
+.ftx__layer {
   position: absolute;
   inset: 0;
   display: block;
@@ -2210,9 +2371,102 @@ input[type="range"] {
   height: 100%;
 }
 
-.chart__layer--static { z-index: 1; }
-.chart__layer--traces { z-index: 2; }
-.chart__layer--overlay { z-index: 3; }
+.chart__layer--static,
+.ftx__layer--s { z-index: 1; }
+.chart__layer--traces,
+.ftx__layer--t { z-index: 2; }
+.chart__layer--overlay,
+.ftx__layer--o { z-index: 3; }
+
+/* The pen rail: one row per signal, live even with zero samples. */
+.ftx__rail {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--sp-3);
+  background: var(--panel);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+}
+
+.ftx__railhd {
+  flex: 0 0 auto;
+  color: var(--ink-2);
+  font: 600 var(--fs-9) / 1.3 var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-caps);
+  border-bottom: var(--border-soft);
+}
+
+.ftx__rows { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+
+.ftx__row {
+  padding: var(--sp-3) var(--sp-2);
+  border-bottom: 1px solid var(--edge-soft);
+}
+
+.ftx__row--focus { background: var(--accent-soft); }
+.ftx__row--off .ftx__tag { color: var(--ink-3); }
+
+/* The rail's pen swatch: a recessed chip carrying the PV and SP strokes. */
+.ftx__chip {
+  position: relative;
+  background: var(--fld-bg);
+  border: var(--border-field);
+  border-radius: var(--r-2);
+}
+
+.ftx__tag {
+  color: var(--ink);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
+  letter-spacing: var(--ls-caps);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: help;
+}
+
+.ftx__card {
+  position: absolute;
+  z-index: 4;
+  padding: var(--sp-3);
+  background: var(--panel-hi);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-float);
+  pointer-events: none;
+}
+
+.ftx__table th {
+  background: var(--panel-hi);
+  border-bottom: var(--border-edge);
+  color: var(--ink-2);
+  font: 600 var(--fs-9) / 1.6 var(--font-ui);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+}
+
+.ftx__table td {
+  color: var(--fld-pv);
+  font: 400 var(--fs-11) / 1.4 var(--font-num);
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+/* A trend at rest still shows its graticule, axes and rail — this is the
+   quiet caption that replaces the old "NO DATA" slab. */
+.chart__idle,
+.ftx__idle {
+  position: absolute;
+  left: 50%;
+  bottom: var(--sp-6);
+  transform: translateX(-50%);
+  z-index: 4;
+  color: var(--ink-3);
+  font: 400 var(--fs-10) / 1 var(--font-ui);
+  letter-spacing: var(--ls-caps);
+  pointer-events: none;
+}
 
 /* Pen swatch in a legend row: the pen colour as a 12x3 bar. */
 .chart__sw,
@@ -2222,20 +2476,20 @@ input[type="range"] {
   width: 12px;
   height: 3px;
   flex: 0 0 auto;
+  border-radius: var(--r-2);
   background: currentColor;
 }
 
 .chart__card-lab,
 .rv-lg {
-  color: var(--ink);
-  font: 700 var(--fs-10) / 1 var(--font-ui);
-  text-transform: uppercase;
+  color: var(--ink-2);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
 }
 
 .chart__card-x {
   color: var(--ink-2);
-  font: 700 var(--fs-10) / 1 var(--font-num);
+  font: 500 var(--fs-10) / 1 var(--font-num);
 }
 
 /* Pen colour hooks: a legend row, a tag block or a swatch carries its pen. */
@@ -2258,9 +2512,11 @@ input[type="range"] {
 .lbox.pen-temp, .pen-temp > .lbox { color: var(--pen-temp); }
 
 /* ==========================================================================
-   16. P&ID HOST — inline SVG on a light well, service-coloured pipes
-   pid.js injects #pid-styles for the symbol internals; this is the frame plus
-   the shared line vocabulary, so nothing is unstyled if that sheet changes.
+   15. P&ID HOST — inline SVG on a recessed well, service-coloured pipes
+   ui/pid.js injects #pid-styles for the symbol internals; this is the frame
+   plus the shared line vocabulary, so nothing is unstyled if that sheet
+   changes. Vessels fill with the equipment gradient and carry a 1px specular
+   highlight down their inside left edge.
    ========================================================================== */
 
 .pid,
@@ -2271,8 +2527,10 @@ input[type="range"] {
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
-  background: var(--face-3);
-  box-shadow: var(--bevel-sunken);
+  background: var(--panel-lo);
+  border: var(--border-soft);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
   overflow: hidden;
 }
 
@@ -2285,7 +2543,7 @@ input[type="range"] {
 
 .pid text,
 .pid-svg text {
-  fill: var(--ink);
+  fill: var(--ink-2);
   font-family: var(--font-ui);
   user-select: none;
   -webkit-user-select: none;
@@ -2297,7 +2555,7 @@ input[type="range"] {
   display: block;
 }
 
-/* Pipes. Service colour plus marching white dashes while flowing. */
+/* Pipes. Service colour plus marching dashes while flowing. */
 .seg,
 .pid-pipes path,
 .pid-pipes line {
@@ -2316,10 +2574,10 @@ input[type="range"] {
   stroke: var(--flow-dash);
   stroke-width: 1.5;
   stroke-dasharray: 4 8;
-  animation: ft-march var(--march) linear infinite;
+  animation: hmi-march var(--march) linear infinite;
 }
 
-@keyframes ft-march {
+@keyframes hmi-march {
   to { stroke-dashoffset: -12; }
 }
 
@@ -2331,11 +2589,11 @@ input[type="range"] {
 .svc-waste { stroke: var(--svc-waste); }
 .svc-idle { stroke: var(--pipe-idle); }
 
-/* Valves, tanks, vessels, machines: outlined in ink on a face fill. */
+/* Valves, tanks, vessels, machines: equipment grey outlined in equipment edge. */
 .valve-body,
 .pid-valve-body {
   fill: var(--valve-closed);
-  stroke: var(--ink);
+  stroke: var(--equip-edge);
   stroke-width: 1;
 }
 
@@ -2367,8 +2625,18 @@ input[type="range"] {
 .pid-collector-body,
 .pid-det-body,
 .pid-rotary-body {
-  fill: var(--face);
-  stroke: var(--ink);
+  fill: var(--equip-top);
+  stroke: var(--equip-edge);
+  stroke-width: 1;
+}
+
+/* The inside-left specular highlight every vessel carries. */
+.pid-vessel-spec,
+.pid-tank-spec,
+.pid-col-spec,
+.vessel-spec {
+  fill: none;
+  stroke: var(--spec-edge);
   stroke-width: 1;
 }
 
@@ -2382,20 +2650,20 @@ input[type="range"] {
 .pid-tank-men,
 .pid-trap-men { stroke-width: 1.5; }
 
-.tank.is-empty .tank-body { fill: var(--face-3); }
+.tank.is-empty .tank-body { fill: var(--equip-bot); }
 
 .tank-name,
 .pid-tank-name,
 .pid-frac-head {
-  fill: var(--ink);
-  font: 700 var(--fs-9) / 1 var(--font-ui);
+  fill: var(--ink-2);
+  font: 600 var(--fs-9) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
 }
 
 .column-glass,
 .pid-col-tube {
   fill: var(--col-glass);
-  stroke: var(--ink);
+  stroke: var(--equip-edge);
   stroke-width: 1.5;
 }
 
@@ -2403,33 +2671,33 @@ input[type="range"] {
 .pid-col-adapter,
 .pid-col-frit,
 .instrument {
-  fill: var(--face-2);
-  stroke: var(--ink);
+  fill: var(--equip-bot);
+  stroke: var(--equip-edge);
   stroke-width: 1;
 }
 
 .pid-filter-mesh,
 .pid-mixer-zig {
   fill: none;
-  stroke: var(--ink-2);
+  stroke: var(--ink-3);
   stroke-width: 1;
 }
 
 .ruler-tick,
 .pid-ruler line,
 .pid-vent-tick {
-  stroke: var(--ink-2);
+  stroke: var(--ink-3);
   stroke-width: 1;
 }
 
 .ruler-label,
 .pid-frac-label {
-  fill: var(--ink-2);
+  fill: var(--ink-3);
   font: 400 var(--fs-8) / 1 var(--font-ui);
 }
 
 .pid-profile-line { fill: none; stroke: var(--pen-uv); stroke-width: 1.5; }
-.pid-profile-axis { stroke: var(--bev-sh); stroke-width: 1; }
+.pid-profile-axis { stroke: var(--edge); stroke-width: 1; }
 
 .pid-hazard-bg,
 .pid-fault-bg { fill: var(--alarm); }
@@ -2437,12 +2705,12 @@ input[type="range"] {
 .pid-fault-fg { fill: var(--on-alarm); }
 
 .pid-balloon-body {
-  fill: var(--face);
-  stroke: var(--ink);
+  fill: var(--bubble-fill);
+  stroke: var(--equip-edge);
   stroke-width: 1;
 }
 
-.pid-balloon-t1 { fill: var(--ink); font: 700 var(--fs-9) / 1 var(--font-ui); }
+.pid-balloon-t1 { fill: var(--ink); font: 600 var(--fs-9) / 1 var(--font-ui); }
 .pid-balloon-t2 { fill: var(--ink-2); font: 400 var(--fs-8) / 1 var(--font-num); }
 
 .impeller,
@@ -2453,10 +2721,10 @@ input[type="range"] {
 
 .pid.is-running .impeller,
 .pid-root.is-running .pid-impeller {
-  animation: ft-spin 1.4s linear infinite;
+  animation: hmi-spin 1.4s linear infinite;
 }
 
-@keyframes ft-spin {
+@keyframes hmi-spin {
   to { transform: rotate(360deg); }
 }
 
@@ -2468,7 +2736,7 @@ input[type="range"] {
 .pid--thumb .bubble-unit { display: none; }
 
 /* ==========================================================================
-   17. VIEW CONTAINERS AND PER-VIEW FURNITURE
+   16. VIEW CONTAINERS AND PER-VIEW FURNITURE
    ========================================================================== */
 
 .view--run,
@@ -2518,15 +2786,17 @@ input[type="range"] {
 .rv-frac-body { height: var(--rv-frac-h); min-height: 0; }
 .rv-frac-h { height: var(--rv-frac-h); }
 
-/* Fraction rail and vials: sunken well, square vials, product-green fill. */
+/* Fraction rail and vials: a recessed well, product-green fill. */
 .rv-frac-rail,
 .rv-vials,
 .rv-rail,
 .poolbar {
   position: relative;
   min-width: 0;
-  background: var(--face-3);
-  box-shadow: var(--bevel-sunken);
+  background: var(--panel-lo);
+  border: var(--border-soft);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
   overflow: hidden;
 }
 
@@ -2534,30 +2804,33 @@ input[type="range"] {
 .vial {
   position: relative;
   background: var(--fld-bg);
-  box-shadow: var(--bevel-sunken-1);
+  border: var(--border-field);
+  border-radius: var(--r-2);
 }
 
 .rv-vial-f,
 .rv-vial-b { background: var(--svc-product); }
 .rv-vial.is-pooling,
 .is-pooling .rv-vial-f { background: var(--fld-sp); }
-.rv-vial-id { font: 700 var(--fs-8) / 1 var(--font-num); color: var(--ink-2); }
+/* The vial id is information, not furniture: secondary ink, never tertiary. */
+.rv-vial-id { font: 500 var(--fs-9) / 1 var(--font-num); color: var(--ink-2); }
 
 .rv-blocks,
 .rail__block,
 .rv-blk {
-  background: var(--face-2);
-  box-shadow: var(--bevel-raised-1);
-  color: var(--ink);
-  font: 700 var(--fs-9) / 1 var(--font-ui);
+  background: var(--panel-hi);
+  border: var(--border-soft);
+  border-radius: var(--r-2);
+  color: var(--ink-2);
+  font: 600 var(--fs-9) / 1 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
 }
 
 .rv-blk.is-active {
-  background: var(--fld-bg);
-  color: var(--fld-sp);
-  box-shadow: var(--bevel-sunken-1);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--ink);
 }
 
 .rv-blk-t,
@@ -2573,7 +2846,7 @@ input[type="range"] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   min-width: 0;
 }
 
@@ -2583,12 +2856,12 @@ input[type="range"] {
 .rv-seg,
 .rv-notes { min-width: 0; }
 
-/* Method editor rows: beveled list items on a sunken well. */
+/* Method editor rows: raised list items on a recessed well. */
 .blocklist,
 .vm-list {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: var(--sp-2);
   min-height: 0;
 }
 
@@ -2599,11 +2872,12 @@ input[type="range"] {
 .vm-issue {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   min-height: var(--ctl-lg);
-  padding: var(--sp-2) var(--sp-4);
-  background: var(--face);
-  box-shadow: var(--bevel-raised-1);
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
   cursor: pointer;
 }
 
@@ -2611,24 +2885,25 @@ input[type="range"] {
 .vm-row.is-selected,
 .scenario.is-selected,
 .vm-card.is-selected {
-  background: var(--face-2);
-  box-shadow: var(--bevel-sunken-1), inset 3px 0 0 var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .blockrow.is-active,
 .vm-row.is-active {
-  box-shadow: var(--bevel-sunken-1), inset 3px 0 0 var(--ok);
+  box-shadow: inset 3px 0 0 var(--ok);
 }
 
 .blockrow.is-dragging,
 .vm-row.is-dragging {
-  box-shadow: var(--bevel-raised), var(--shadow-window);
+  box-shadow: var(--elev-float);
 }
 
 .blockrow__handle,
 .vm-row__grip {
   flex: 0 0 auto;
-  color: var(--ink-2);
+  color: var(--ink-3);
   cursor: grab;
 }
 
@@ -2640,7 +2915,7 @@ input[type="range"] {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--ink);
-  font: 700 var(--fs-11) / 1.1 var(--font-ui);
+  font: 600 var(--fs-11) / 1.2 var(--font-ui);
 }
 
 .blockrow__summary,
@@ -2654,34 +2929,34 @@ input[type="range"] {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--ink-2);
-  font: 400 var(--fs-9) / 1.2 var(--font-ui);
+  font: 400 var(--fs-10) / 1.3 var(--font-ui);
 }
 
 .blockrow__icon,
 .vm-row__code,
 .vm-issue__code {
   color: var(--ink-2);
-  font: 700 var(--fs-10) / 1 var(--font-num);
+  font: 500 var(--fs-10) / 1 var(--font-num);
 }
 
 .vm-row__right,
 .vm-row__top {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   min-width: 0;
 }
 
-.vm-row__bar { height: 4px; background: var(--accent); }
+.vm-row__bar { height: 3px; border-radius: var(--r-2); background: var(--accent); }
 
 .blocklist__insert,
-.vm-insert { height: 2px; background: var(--focus); }
+.vm-insert { height: 2px; border-radius: var(--r-2); background: var(--accent); }
 
 .blockeditor,
 .vm-sec {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   min-width: 0;
 }
 
@@ -2690,7 +2965,7 @@ input[type="range"] {
   display: grid;
   grid-template-columns: minmax(90px, 140px) minmax(0, 1fr);
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   min-width: 0;
 }
 
@@ -2700,24 +2975,26 @@ input[type="range"] {
 .vm-info,
 .vm-prev {
   color: var(--ink-2);
-  font: 400 var(--fs-10) / 1.3 var(--font-num);
+  font: 400 var(--fs-10) / 1.35 var(--font-num);
 }
 
-.vm-sec__caret { color: var(--ink-2); }
+.vm-sec__caret { color: var(--ink-3); }
 
 .vm-bar,
 .vm-tg__tr {
   height: 6px;
   background: var(--fld-bg);
-  box-shadow: var(--bevel-sunken-1);
+  border: var(--border-field);
+  border-radius: var(--r-2);
+  overflow: hidden;
 }
 
 .vm-bar__sp { height: 100%; background: var(--fld-sp); }
-.vm-bar__msg { color: var(--ink-2); font-size: var(--fs-9); }
+.vm-bar__msg { color: var(--ink-2); font-size: var(--fs-10); }
 
-.vm-issue__mk { color: var(--alarm); }
+.vm-issue__mk { color: var(--alarm-ink); }
 .vm-issue__where,
-.vm-issue__tx { color: var(--ink-2); font-size: var(--fs-9); }
+.vm-issue__tx { color: var(--ink-2); font-size: var(--fs-10); }
 .vm-watch__id { color: var(--ink); font-family: var(--font-num); }
 
 .vm-empty,
@@ -2727,17 +3004,15 @@ input[type="range"] {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   min-height: 48px;
-  color: var(--ink-off);
-  font: 700 var(--fs-10) / 1 var(--font-ui);
-  text-transform: uppercase;
+  color: var(--ink-3);
+  font: 400 var(--fs-10) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
 }
 
 .empty__title {
-  font: 700 var(--fs-11) / 1 var(--font-ui);
-  text-transform: uppercase;
+  font: 600 var(--fs-11) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
 }
 
@@ -2746,8 +3021,10 @@ input[type="range"] {
 .tank,
 .tank-body {
   position: relative;
-  background: var(--face-3);
-  box-shadow: var(--bevel-sunken);
+  background: var(--surface-equip);
+  border: 1px solid var(--equip-edge);
+  border-radius: var(--r-2);
+  box-shadow: inset 1px 0 0 var(--spec-edge), inset 0 -6px 10px -6px var(--shade-deep);
 }
 
 .sv-level,
@@ -2756,14 +3033,13 @@ input[type="range"] {
 .sv-status {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
 }
 
 /* Results view: verdicts, notes, mass balance. */
 .verdict {
   color: var(--ink);
-  font: 700 var(--fs-11) / 1 var(--font-ui);
-  text-transform: uppercase;
+  font: 600 var(--fs-12) / 1 var(--font-ui);
   letter-spacing: var(--ls-caps);
 }
 
@@ -2777,7 +3053,7 @@ input[type="range"] {
   min-width: 0;
   color: var(--ink-2);
   font-size: var(--fs-10);
-  line-height: 1.3;
+  line-height: 1.35;
 }
 
 .info-dot {
@@ -2787,10 +3063,10 @@ input[type="range"] {
   width: 13px;
   height: 13px;
   border-radius: var(--r-round);
-  background: var(--face-2);
-  box-shadow: 0 0 0 1px var(--ink-2);
+  background: var(--panel-hi);
+  box-shadow: 0 0 0 1px var(--ink-3);
   color: var(--ink-2);
-  font: 700 var(--fs-8) / 1 var(--font-ui);
+  font: 600 var(--fs-8) / 1 var(--font-ui);
   cursor: help;
 }
 
@@ -2798,30 +3074,33 @@ input[type="range"] {
 .shapepreview {
   display: block;
   background: var(--plot-bg);
-  box-shadow: var(--bevel-sunken);
+  border: 1px solid var(--plot-frame);
+  border-radius: var(--r-3);
 }
 
 .preview__totals,
 .preview__total {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   color: var(--ink);
   font-family: var(--font-num);
 }
 
-/* Perf overlay: a small sunken telemetry plate over the workspace. */
+/* Perf overlay: a small recessed telemetry plate over the workspace. */
 .perf,
 .perf-overlay {
   position: absolute;
-  top: var(--sp-4);
-  right: var(--sp-4);
+  top: var(--sp-5);
+  right: var(--sp-5);
   z-index: var(--z-perf);
-  padding: var(--sp-3);
+  padding: var(--sp-4);
   background: var(--fld-bg);
-  box-shadow: var(--bevel-sunken);
+  border: var(--border-field);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
   color: var(--fld-pv);
-  font: 400 var(--fs-9) / 1.3 var(--font-num);
+  font: 400 var(--fs-10) / 1.35 var(--font-num);
   pointer-events: none;
 }
 
@@ -2829,7 +3108,7 @@ input[type="range"] {
 .perf-overlay__row {
   display: flex;
   justify-content: space-between;
-  gap: var(--sp-5);
+  gap: var(--sp-6);
 }
 
 .perf__key,
@@ -2839,29 +3118,29 @@ input[type="range"] {
 
 /* Tab strip, if a build emits one alongside the toolbar's nav icons. */
 .tabstrip {
-  gap: var(--sp-2);
-  padding: 0 var(--sp-4);
-  background: var(--face-2);
-  box-shadow: var(--bevel-raised-1);
+  gap: var(--sp-3);
+  padding: 0 var(--sp-5);
+  background: var(--panel);
+  border-bottom: var(--border-edge);
 }
 
 .tabstrip__list {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
 }
 
 .tab {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   height: var(--ctl-md);
-  padding: 0 var(--sp-5);
-  border: 0;
-  background: var(--face);
-  box-shadow: var(--bevel-raised);
-  color: var(--ink);
-  font: 700 var(--fs-10) / 1 var(--font-ui);
+  padding: 0 var(--sp-6);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-2);
+  color: var(--ink-2);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
   cursor: pointer;
@@ -2869,37 +3148,54 @@ input[type="range"] {
 
 .tab.is-active,
 .tab[aria-selected="true"] {
-  background: var(--face-2);
-  box-shadow: var(--bevel-sunken);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--ink);
 }
 
-/* -- shared HMI primitives (ui/hmi.js) --------------------------------------
+/* ==========================================================================
+   17. THE hmi.js WIDGET KIT
    That module ships its own sheet; these base rules mean the primitives still
-   read as FT-CLASSIC if it is trimmed, and they keep the two vocabularies
-   pointing at exactly the same bevel recipes. */
-.hmi-raised { background: var(--face); box-shadow: var(--bevel-raised); border-radius: 0; }
-.hmi-sunken { background: var(--face-3); box-shadow: var(--bevel-sunken); border-radius: 0; }
+   read as HMI-2012 if it is trimmed, and they keep the two vocabularies
+   pointing at exactly the same recipes.
+   ========================================================================== */
+
+.hmi-raised {
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-raised);
+}
+
+.hmi-sunken {
+  background: var(--fld-bg);
+  border: var(--border-field);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
+}
 
 .hmi-panel {
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  background: var(--face);
-  box-shadow: var(--bevel-raised);
+  background: var(--panel);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-raised);
 }
 
 .hmi-panel-hd {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   flex: 0 0 auto;
   height: var(--panel-header);
-  margin: 2px 2px 0;
-  padding: 0 var(--sp-4);
-  background: var(--face-2);
-  box-shadow: var(--bevel-raised-1);
-  font: 700 var(--fs-10) / 1 var(--font-ui);
+  padding: 0 var(--sp-5);
+  background: var(--surface-header);
+  border-bottom: var(--border-edge);
+  color: var(--ink-2);
+  font: 600 var(--fs-10) / 1 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
 }
@@ -2907,18 +3203,16 @@ input[type="range"] {
 .hmi-panel-bd {
   flex: 1 1 auto;
   min-height: 0;
-  margin: 2px;
   padding: var(--panel-pad);
-  background: var(--face-3);
-  box-shadow: var(--bevel-sunken);
+  background: var(--panel);
   overflow: auto;
 }
 
-.hmi-lb { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.hmi-lb { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 
 .hmi-lb-tag {
-  color: var(--ink);
-  font: 700 var(--fs-10) / 1.1 var(--font-ui);
+  color: var(--ink-2);
+  font: 600 var(--fs-10) / 1.2 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: var(--ls-caps);
 }
@@ -2927,24 +3221,26 @@ input[type="range"] {
   display: inline-flex;
   align-items: baseline;
   justify-content: flex-end;
-  gap: 2px;
+  gap: var(--sp-3);
   min-width: var(--lbox-min);
   height: var(--lbox-h);
-  padding: 2px;
+  padding: 0 var(--sp-4);
   background: var(--fld-bg);
-  box-shadow: var(--bevel-sunken);
+  border: var(--border-field);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
   overflow: hidden;
 }
 
 .hmi-lb-val {
   color: var(--fld-pv);
-  font: 700 var(--fs-13) / 1 var(--font-num);
+  font: 500 var(--fs-13) / calc(var(--lbox-h) - 2px) var(--font-num);
   font-variant-numeric: tabular-nums lining-nums;
 }
 
 .hmi-lb-eu {
   color: var(--fld-eu);
-  font: 400 80% / 1 var(--font-num);
+  font: 400 var(--fs-10) / 1 var(--font-num);
 }
 
 .hmi-btn {
@@ -2953,28 +3249,32 @@ input[type="range"] {
   justify-content: center;
   height: var(--btn-icon);
   min-width: var(--btn-icon);
-  border: 0;
-  border-radius: 0;
-  background: var(--face);
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-raised);
   color: var(--ink);
-  box-shadow: var(--bevel-raised);
   cursor: pointer;
 }
 
-.hmi-btn:active:not(:disabled) { box-shadow: var(--bevel-sunken); }
-.hmi-btn:disabled { color: var(--ink-off); cursor: default; }
-.hmi-btn--danger { background: var(--lamp-alarm); color: var(--estop-ink); }
-.hmi-btn-txt { font: 700 var(--fs-10) / 1 var(--font-num); }
+.hmi-btn:active:not(:disabled) {
+  background: var(--surface-pressed);
+  box-shadow: var(--elev-pressed);
+}
+
+.hmi-btn:disabled { color: var(--ink-3); cursor: default; }
+.hmi-btn--danger { background: var(--alarm); border-color: var(--alarm); color: var(--estop-ink); }
+.hmi-btn-txt { font: 600 var(--fs-10) / 1 var(--font-num); }
 .hmi-icon { width: var(--icon); height: var(--icon); fill: none; stroke: currentColor; }
 
 .hmi-lamp-body { fill: var(--lamp-off); }
 .hmi-lamp-ring { fill: none; stroke: var(--lamp-ring); stroke-width: 1; }
 .hmi-lamp-gloss { fill: var(--lamp-gloss); }
-.hmi-isa-ring { fill: var(--bubble-fill); stroke: var(--ink); stroke-width: 1.25; }
-.hmi-isa-line { stroke: var(--ink); stroke-width: 1; fill: none; }
-.hmi-isa-fn { fill: var(--ink); font: 700 var(--fs-9) / 1 var(--font-ui); }
+.hmi-isa-ring { fill: var(--bubble-fill); stroke: var(--equip-edge); stroke-width: 1.25; }
+.hmi-isa-line { stroke: var(--equip-edge); stroke-width: 1; fill: none; }
+.hmi-isa-fn { fill: var(--ink); font: 600 var(--fs-9) / 1 var(--font-ui); }
 .hmi-isa-loop { fill: var(--ink-2); font: 400 var(--fs-9) / 1 var(--font-num); }
-.hmi-sym-fill { fill: var(--face); stroke: var(--ink); stroke-width: 1; }
+.hmi-sym-fill { fill: var(--equip-top); stroke: var(--equip-edge); stroke-width: 1; }
 
 .hmi-chip {
   display: inline-flex;
@@ -2982,9 +3282,11 @@ input[type="range"] {
   justify-content: center;
   height: var(--chip-h);
   min-width: var(--chip-w);
-  background: var(--face);
-  box-shadow: var(--bevel-raised);
-  font: 700 var(--fs-10) / 1 var(--font-num);
+  background: var(--surface-raised);
+  border: var(--border-edge);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-raised);
+  font: 600 var(--fs-10) / 1 var(--font-num);
   cursor: pointer;
 }
 
@@ -3000,23 +3302,25 @@ input[type="range"] {
   max-width: 640px;
   margin: var(--sp-10) auto;
   padding: var(--sp-9);
-  background: var(--face);
+  background: var(--panel);
+  border: var(--border-edge);
+  border-radius: var(--r-3);
+  box-shadow: var(--elev-float);
   color: var(--ink);
-  box-shadow: var(--bevel-raised);
   font: 400 var(--fs-12) / var(--lh-base) var(--font-ui);
   user-select: text;
   -webkit-user-select: text;
 }
 
 .bootnote--error {
-  box-shadow: var(--bevel-raised), inset 0 0 0 3px var(--alarm);
+  border-color: var(--alarm);
+  box-shadow: var(--elev-float), inset 0 0 0 1px var(--alarm);
 }
 
 .bootnote__title,
 .shell-error__msg {
   margin-bottom: var(--sp-6);
-  font: 700 var(--fs-15) / 1.2 var(--font-ui);
-  text-transform: uppercase;
+  font: 600 var(--fs-15) / 1.25 var(--font-ui);
   letter-spacing: var(--ls-caps);
 }
 
@@ -3029,9 +3333,11 @@ input[type="range"] {
   margin: var(--sp-5) 0;
   padding: var(--sp-5);
   background: var(--fld-bg);
+  border: var(--border-field);
+  border-radius: var(--r-2);
+  box-shadow: var(--elev-sunken);
   color: var(--fld-pv);
-  box-shadow: var(--bevel-sunken);
-  font: 400 var(--fs-12) / 1.4 var(--font-num);
+  font: 400 var(--fs-12) / 1.45 var(--font-num);
   overflow-x: auto;
 }
 
@@ -3048,23 +3354,23 @@ input[type="range"] {
    ========================================================================== */
 
 .is-off,
-.is-empty { color: var(--ink-off); }
+.is-empty { color: var(--ink-3); }
 .is-ok,
-.is-finished { color: var(--ok); }
+.is-finished { color: var(--ok-ink); }
 .is-warn,
-.is-limited { color: var(--warn); }
+.is-limited { color: var(--warn-ink); }
 .is-alarm,
-.is-fault { color: var(--alarm); }
+.is-fault { color: var(--alarm-ink); }
 .is-manual { color: var(--fld-out); }
 
 .is-disabled,
 [aria-disabled="true"] {
-  color: var(--ink-off);
+  color: var(--ink-3);
   cursor: default;
 }
 
 .has-alarms .lamp--alarm {
-  animation: ft-blink var(--blink) steps(1, end) infinite;
+  animation: hmi-blink var(--blink) steps(1, end) infinite;
 }
 
 /* ==========================================================================
@@ -3111,7 +3417,7 @@ input[type="range"] {
 
 @media (prefers-contrast: more) {
   .table tbody td {
-    border-bottom-color: var(--bev-dk);
+    border-bottom-color: var(--edge);
   }
 
   :focus-visible {
@@ -3133,16 +3439,22 @@ input[type="range"] {
     grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
   }
 
-  .statusstrip {
-    gap: var(--sp-2);
-    padding: 0 var(--sp-3);
-  }
-
+  .titlebar { padding: 0 var(--sp-4); gap: var(--sp-4); }
   .titlebar__sub { display: none; }
 }
 
 @media (max-width: 620px) {
-  .titlebar__name { font-size: var(--fs-10); }
+  /* The quality verdict STAYS at every width. It and the run state are the two things the
+     title bar took over when the bottom strip was deleted, and an operator must be able to
+     see both without opening a popover. At 620px the unit NAME gives up its width instead —
+     the name is the one thing on this bar that never changes. */
+  .titlebar__name {
+    font-size: var(--fs-10);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
 
   .grid-tags,
   .dense-grid {

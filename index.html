@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -9,19 +9,21 @@
 
 <link rel="stylesheet" href="./styles/tokens.css">
 <link rel="stylesheet" href="./styles/app.css">
-<!-- Favicon: an ISA-5.1 balloon on a grey panel plate — the mark of the whole HMI. -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%236E6E6E'/%3E%3Crect x='2' y='2' width='28' height='28' fill='%23C7C3BC'/%3E%3Crect x='2' y='2' width='28' height='2' fill='%23FFFFFF'/%3E%3Crect x='2' y='2' width='2' height='28' fill='%23FFFFFF'/%3E%3Crect x='2' y='28' width='28' height='2' fill='%234A4744'/%3E%3Crect x='28' y='2' width='2' height='28' fill='%234A4744'/%3E%3Ccircle cx='16' cy='16' r='9' fill='%230A0F0A' stroke='%23101010' stroke-width='2'/%3E%3Cpath d='M7.5 16h17' stroke='%2312FF4B' stroke-width='2'/%3E%3C/svg%3E">
+<!-- Favicon: an ISA-5.1 balloon on a graphite panel plate — the mark of the whole HMI. The
+     palette is the HMI-2012 one: --screen behind, --panel plate, 1px --edge border, a --fld-bg
+     recessed balloon, and the tag line in --ink white rather than the old CRT lime. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2321262C'/%3E%3Crect x='2.5' y='2.5' width='27' height='27' rx='2' fill='%232B3138' stroke='%23454E58'/%3E%3Ccircle cx='16' cy='16' r='8.5' fill='%23171B20' stroke='%23566171'/%3E%3Cpath d='M8 16h16' stroke='%23E8ECF0' stroke-width='2'/%3E%3C/svg%3E">
 
 <script>
 /* Pre-paint theme stamp, so there is no flash of the wrong theme.
-   FT-CLASSIC is a LIGHT design — classic beveled grey chrome — so the stamp is
-   an unconditional 'light' rather than a reading of the OS preference: a plant
-   HMI does not change its face because the workstation was set to dark mode.
-   There is no localStorage in this build (architecture-v2 §12, D26a); the theme
-   button in ui/app.js rewrites this same attribute for the session, and
-   styles/tokens.css carries a complete dark variant for it to switch to. */
+   HMI-2012 is a GRAPHITE design — cool dark chrome, --screen #21262C — so the
+   stamp is an unconditional 'dark' rather than a reading of the OS preference:
+   a plant HMI does not change its face because the workstation was set to light
+   mode. There is no localStorage in this build (architecture-v2 §12, D26a); the
+   theme button in ui/app.js rewrites this same attribute for the session, and
+   styles/tokens.css carries a complete light variant for it to switch to. */
 (function stampTheme() {
-  document.documentElement.setAttribute('data-theme', 'light');
+  document.documentElement.setAttribute('data-theme', 'dark');
 })();
 
 /* Boot diagnostics. ES modules are CORS-blocked on the file:// scheme, which is
@@ -73,21 +75,28 @@
      THE SHELL IS BUILT BY JAVASCRIPT — THIS ELEMENT IS DELIBERATELY EMPTY.
 
      `src/ui/app.js` OWNS the chrome. `boot(#app)` empties this element and
-     constructs the five FT-CLASSIC bands itself (buildShell):
+     constructs the four HMI-2012 bands itself (buildShell):
 
-       1. title strip   26 px — unit name, sim clock, alarm-summary lamps
+       1. title strip   26 px — unit name, sim clock, run-state chip, quality
+                                lamp, alarm-summary lamps. The status line.
        2. icon toolbar  40 px — transport, E-stop, speed chips, screen nav
-       3. alarm banner  24 px — present only while an alarm is active
-       4. workspace           — P&ID pane over TREND pane, draggable splitter
-       5. status strip  24 px — sunken label boxes and the run-state lamp
+       3. alarm banner  24 px — present only while an alarm is active, tinted
+                                by the severity it is carrying
+       4. workspace           — P&ID pane over TREND pane, draggable splitter.
+                                The last band, and the only one that grows.
 
      plus the skip link and the Ctrl+Alt+P performance overlay, both out of flow.
+
+     There is no fifth band. The bottom value strip of FLOW %B P1 dP UV COND pH
+     CV boxes was deleted: every one of those numbers already sits beside its own
+     instrument on the P&ID and in the trend's pen rail, so the strip was
+     duplication charging the workspace 24 px for it.
 
      Do NOT author shell markup here. buildShell() removes every child of #app
      before it builds, so anything placed here is destroyed at boot and is
      styled by nothing: styles/app.css targets the class vocabulary app.js
-     emits (.shell, .titlebar, .toolbar, .alarmbar, .workspace, .statusstrip,
-     .iconbtn, .tagbox, .field, .lamp …), not ids.
+     emits (.shell, .titlebar, .toolbar, .alarmbar, .workspace, .iconbtn,
+     .tagblk, .lbox, .lamp, .state-pill …), not ids.
 
      The screen panels are created by app.js's mountPanels() and handed to the
      panel factories in src/ui/ (P&ID, trend, method, results, config).

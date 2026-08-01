@@ -948,29 +948,47 @@ export function reconcileList(container, items, keyFn, createFn, updateFn) {
  * @type {readonly string[]}
  */
 export const THEME_TOKEN_NAMES = Object.freeze([
-  // FT-CLASSIC chrome — the eleven theme-dependent tokens, plus the field, lamp, plot and pen
-  // families that sit on them. These are the names `styles/tokens.css` actually declares; the
-  // block below is the legacy bridge kept so older injected stylesheets keep resolving.
-  '--screen', '--face', '--face-2', '--face-3',
+  // HMI-2012 chrome — the theme-dependent panel, ink and edge tokens, plus the field, lamp,
+  // plot and pen families that sit on them. `--face*` and `--bev-*` below are the LEGACY
+  // BRIDGE (tokens.css §2 re-points them) and are kept so older injected sheets keep
+  // resolving; `--panel*`, `--edge*` and `--ink-3` are the names the re-skin actually uses.
+  '--screen', '--panel', '--panel-hi', '--panel-lo', '--edge', '--edge-soft',
+  '--ink-3',
+  '--face', '--face-2', '--face-3',
   '--bev-hi', '--bev-lt', '--bev-sh', '--bev-dk',
   '--ink', '--ink-2', '--ink-off',
   '--fld-bg', '--fld-pv', '--fld-sp', '--fld-out', '--fld-alarm', '--fld-stale',
   '--fld-eu', '--fld-rule',
-  '--lamp-off', '--lamp-run', '--lamp-warn', '--lamp-alarm', '--lamp-ring', '--lamp-gloss',
-  '--plot-bg', '--plot-grid', '--plot-axis',
+  '--lamp-off', '--lamp-run', '--lamp-warn', '--lamp-alarm', '--lamp-info',
+  '--lamp-ring', '--lamp-gloss',
+  '--glow-run', '--glow-warn', '--glow-alarm', '--glow-info',
+  '--plot-bg', '--plot-grid', '--plot-grid-strong', '--plot-axis', '--plot-frame',
   '--pen-flow', '--pen-pctb', '--pen-press', '--pen-uv', '--pen-cond', '--pen-ph', '--pen-temp',
   '--pen-uv2', '--pen-uv3', '--pen-dp', '--pen-cursor',
   '--svc-a', '--svc-b', '--svc-sample', '--svc-cip', '--svc-product', '--svc-waste',
   '--focus-ring', '--estop-ink', '--bubble-fill',
+  // equipment — the P&ID's vessel bodies and their outline
+  '--equip-top', '--equip-bot', '--equip-edge', '--fld-edge',
   // surfaces and lines
   '--bg-0', '--bg-1', '--surface-1', '--surface-2', '--surface-3', '--overlay',
   '--line', '--line-soft', '--line-strong',
+  // THE DEPTH RECIPE (tokens.css §2). Composite values, not colours — a canvas cannot use
+  // them, but an injected stylesheet built by JS can, and several now do.
+  '--surface-raised', '--surface-pressed', '--surface-header', '--surface-equip',
+  '--border-edge', '--border-soft', '--border-field',
+  '--elev-raised', '--elev-sunken', '--elev-pressed', '--elev-float', '--elev-flat',
+  // ...and the achromatic atoms they are built from, which painters DO resolve directly.
+  '--spec', '--spec-edge', '--shade', '--shade-deep', '--shade-press', '--shade-float',
   // text
   '--text-1', '--text-2', '--text-3', '--text-inv',
   // accent and status
   '--accent', '--accent-hover', '--accent-press', '--accent-soft',
   '--ok', '--warn', '--alarm', '--info',
-  '--ok-soft', '--warn-soft', '--alarm-soft', '--focus',
+  '--ok-soft', '--warn-soft', '--alarm-soft', '--info-soft', '--neutral-soft', '--focus',
+  // The same states as SMALL TEXT. Every `color:` rule reaches for these, never the fills
+  // above — see tokens.css §1. A painter labelling a value must do the same.
+  '--ok-ink', '--warn-ink', '--alarm-ink', '--info-ink', '--accent-ink',
+  '--on-alarm', '--on-warn', '--on-ok',
   // chart furniture. The phase-band tints are named `--phase-band-*` in
   // styles/tokens.css (all four theme blocks); `--band-1..4` below are the
   // separate P&ID species bands and are NOT the same tokens.
@@ -986,11 +1004,13 @@ export const THEME_TOKEN_NAMES = Object.freeze([
   '--ch-ph', '--ch-pctb', '--ch-press', '--ch-flow',
   // typography, spacing and motion (theme-independent, but canvas text needs them)
   '--font-ui', '--font-num',
-  '--fs-9', '--fs-10', '--fs-11', '--fs-12', '--fs-13', '--fs-15', '--fs-18', '--fs-24', '--fs-32',
-  '--lh-tight', '--lh-base',
+  '--fs-8', '--fs-9', '--fs-10', '--fs-11', '--fs-12', '--fs-13', '--fs-14', '--fs-15',
+  '--fs-16', '--fs-18', '--fs-24', '--fs-32',
+  '--lh-tight', '--lh-base', '--ls-caps', '--ls-num',
   '--sp-1', '--sp-2', '--sp-3', '--sp-4', '--sp-5',
   '--sp-6', '--sp-7', '--sp-8', '--sp-9', '--sp-10',
-  '--r-1', '--r-2', '--r-3', '--r-4', '--r-pill',
+  '--r-1', '--r-2', '--r-3', '--r-4', '--r-pill', '--r-round',
+  '--r-ctl', '--r-panel', '--r-field', '--r-plot',
   '--dur-1', '--dur-2', '--dur-3', '--ease-out', '--ease-inout',
 ]);
 
@@ -1070,17 +1090,18 @@ function primeThemeTokens() {
 
 /** Which theme the document is actually showing right now. */
 function activeTheme() {
-  // FT-CLASSIC is a LIGHT design: block 1 of styles/tokens.css is `:root` and carries the light
-  // values, so LIGHT is what the document shows whenever nothing says otherwise. Defaulting to
-  // 'dark' here would hand the canvas painters a dark token map while the CSS chrome around them
-  // stayed grey. `activeTheme()` in ui/chart.js resolves the same way.
-  if (typeof document === 'undefined' || !document.documentElement) return 'light';
+  // HMI-2012 is a GRAPHITE design. Block 1 of styles/tokens.css is `:root, [data-theme="dark"]`
+  // and carries the DARK values, so graphite is what the document shows whenever nothing says
+  // otherwise — and the OS preference does not enter into it, because no rule in that file is
+  // scoped to `prefers-color-scheme`. A plant HMI does not change its face because the
+  // workstation was set to light mode; index.html stamps 'dark' before first paint for the same
+  // reason. Answering 'light' from here would hand the canvas painters a pale token map to paint
+  // with while the CSS chrome around them stayed graphite. `activeTheme()` in ui/chart.js
+  // resolves the same way.
+  if (typeof document === 'undefined' || !document.documentElement) return 'dark';
   const attr = document.documentElement.getAttribute('data-theme');
   if (attr === 'light' || attr === 'dark') return attr;
-  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-  }
-  return 'light';
+  return 'dark';
 }
 
 /**

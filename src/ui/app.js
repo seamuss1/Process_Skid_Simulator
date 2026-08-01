@@ -1,29 +1,39 @@
 /**
- * @file src/ui/app.js — the composition root, the FT-CLASSIC shell, and the program's ONLY
+ * @file src/ui/app.js — the composition root, the HMI-2012 shell, and the program's ONLY
  * `requestAnimationFrame` loop.
  *
- * THE SCREEN. A classic Rockwell FactoryTalk View SE / Wonderware InTouch operator screen: beveled
- * grey chrome, sunken near-black label boxes, icon-only controls, square corners. Five bands:
+ * THE SCREEN. An early-2010s industrial HMI — Wonderware InTouch 2012, FactoryTalk View SE 7,
+ * Ignition 7.x — and the High-Performance HMI thinking that arrived with them: cool graphite
+ * chrome, 1 px borders over a shallow vertical gradient, recessed fields with WHITE PV digits,
+ * 2 px corners, and saturated colour reserved for state and alarms.
+ *
+ * FOUR bands. The fifth — the bottom value strip of FLOW %B P1 dP UV COND pH CV boxes — is gone.
+ * Every number it carried already sits beside its own instrument on the P&ID and in the trend's
+ * pen rail, so the band was duplication that cost the workspace 24 px; the workspace has that
+ * height back. Its run-state and data-quality indication moved UP into band 1, which already
+ * carried the alarm summary and is therefore the screen's one status line.
  *
  *   1. TITLE STRIP  26 px — unit name (the SIMULATED honesty note lives behind it), the block
- *                           counter, the sim clock with the method-progress bar, and the
- *                           alarm-summary lamps with the active-alarm count.
- *   2. TOOLBAR      40 px — 34×34 beveled icon buttons in groups split by 2 px sunken grooves:
+ *                           counter, the sim clock with the method-progress bar, the run-state
+ *                           chip and the data-quality lamp, and the alarm-summary lamps with the
+ *                           active-alarm count.
+ *   2. TOOLBAR      40 px — 34×34 gradient-and-border icon buttons in groups split by grooves:
  *                           [run][hold][continue][skip][stop][reset] ‖ [estop] ‖
  *                           speed chips 1× … 1000× + [pause] + LIMITED lamp + SPD box ‖
  *                           [P&ID][TREND][METHOD][RESULTS][CONFIG] ‖
  *                           [ack][manual][scenarios][help][theme]
  *   3. ALARM BANNER 24 px — present only while an alarm is active or a shell error is showing:
  *                           blinking lamp, severity code, ISA tag, alarm code, trip condition,
- *                           acknowledge and silence. Carries the two `aria-live` regions.
- *   4. WORKSPACE          — one `.view` per screen, stacked and shown one at a time. The MAIN
- *                           screen is `ui/view_run.js`, which holds the P&ID panel over the trend
- *                           panel with the draggable splitter between them: the P&ID and TREND nav
- *                           buttons therefore select the SAME screen and only hint which pane to
- *                           favour, because the co-visibility of schematic and trend is the
+ *                           acknowledge and silence. The band is TINTED BY SEVERITY through an
+ *                           `.banner--*` modifier, never flat. Carries the two `aria-live`
+ *                           regions.
+ *   4. WORKSPACE          — everything below the banner, the 24 px the value strip used to hold
+ *                           included. One `.view` per screen, stacked and shown one at a time. The
+ *                           MAIN screen is `ui/view_run.js`, which holds the P&ID panel over the
+ *                           trend panel with the draggable splitter between them: the P&ID and
+ *                           TREND nav buttons therefore select the SAME screen and only hint which
+ *                           pane to favour, because the co-visibility of schematic and trend is the
  *                           requirement and no navigation may take it away.
- *   5. STATUS STRIP 24 px — sunken label boxes FLOW %B P1 dP UV COND pH CV, then the run-state
- *                           lamp with its STATE box and the data-quality lamp with its QUAL box.
  *
  * NO PROSE ON A NORMAL SCREEN. Every control is an icon with `title` + `aria-label`; every number
  * sits in a label box carrying its tag and its engineering unit. Sentences live in tooltips, in the
@@ -55,18 +65,20 @@
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * CSS CONTRACT — the class vocabulary this module emits, all of it styled in `styles/app.css`:
  *   .shell (.is-manual .is-narrow) .skip-link .sr-only
- *   .titlebar .titlebar__brand .titlebar__name .titlebar__spacer .titlebar__meta .titlebar__actions
+ *   .titlebar .titlebar__brand .titlebar__name .titlebar__spacer .titlebar__meta .titlebar__sep
+ *   .titlebar__state .titlebar__runstate (.is-running .is-held .is-alarm .is-fault)
+ *   .titlebar__quality (.is-suspect .is-invalid) .titlebar__actions
  *   .toolbar .toolbar__group (.toolbar__group--estop) .toolbar__sep .toolbar__spacer
  *   .iconbtn (.is-active .iconbtn--sm .btn--estop) .holdring .holdring__track .holdring__fill
  *   .segmented .speedchip (.is-active)
  *   .lamp .lamp--off|run|warn|alarm (.is-blink)
- *   .tagblk .tagblk__lbl .lbox (.lbox--wide .lbox--narrow .is-alarm .is-warn .is-stale)
+ *   .tagblk .tagblk__lbl .lbox (.lbox--narrow .is-alarm .is-warn .is-stale)
  *   .lbox__v .lbox__eu
  *   .progress .progress__fill
- *   .alarmbar .banner__sev .alarmbar__tag .alarmbar__code .banner__detail .banner__actions
+ *   .alarmbar (.banner--info|warn|alarm|critical|fault) .banner__bar
+ *   .banner__sev .alarmbar__tag .banner__id .alarmbar__code .banner__detail .banner__actions
  *   .banner__count
  *   .workspace .view .view--main|method|results|config
- *   .statusstrip .statusstrip__spacer
  *   .perf .perf__row .perf__key .perf__value
  * Buttons and glyphs come from `ui/hmi.js` (`iconButton`, `icon`); the label boxes, lamps and bands
  * are built here against the classes above. Every icon name used is one of `hmi.ICON_NAMES`.
@@ -133,31 +145,36 @@ const LEGACY_NAV = {
 };
 
 /**
- * The status strip, left to right.
+ * The `sensorQuality` channels the title strip's quality lamp rolls up, worst-wins: an INVALID on
+ * any one of them makes the lamp red, any other non-OK verdict makes it amber.
  *
- * `signals` are the `AlarmDef.signal` names and `evals` the `AlarmDef.evalKey` names that turn the
- * digits red — an alarm table row watches a tag through one or the other, never both, so a box that
- * only matched `signal` would stay lime while its own custom-evaluator alarm was standing.
- * `sensor` is the `sensorQuality` channel that turns the digits stale.
+ * The lamp's popover lists these same four channels one per line, so the summary an operator sees
+ * and the detail they press for can never disagree about which sensors were consulted.
  */
-const STATUS_FIELDS = [
-  { key: 'flow', tag: 'FLOW', isa: 'FIC-101', kind: 'flow', gloss: 'FT-101', sensor: null,
-    signals: ['FLOW'], evals: ['flowDeviation', 'dryRun', 'cavitation'] },
-  { key: 'pctb', tag: '%B', isa: 'AIC-101', kind: 'pct', gloss: 'pctB', sensor: null,
-    signals: [], evals: [] },
-  { key: 'p1', tag: 'P1', isa: 'PT-101', kind: 'pressure', gloss: 'PT-101', sensor: 'PRESS',
-    signals: ['P1'], evals: [] },
-  { key: 'dp', tag: 'dP', isa: 'PDT-101', kind: 'pressure', gloss: 'PDT-101', sensor: 'PRESS',
-    signals: ['DP'], evals: [] },
-  { key: 'uv', tag: 'UV', isa: 'UV-101', kind: 'abs', gloss: 'UV-101', sensor: 'UV',
-    signals: ['UV'], evals: ['uvOverrange', 'uvLampFault', 'azUnstable'] },
-  { key: 'cond', tag: 'COND', isa: 'CE-101', kind: 'cond', gloss: 'CE-101', sensor: 'COND',
-    signals: ['COND'], evals: ['condRange'] },
-  { key: 'ph', tag: 'pH', isa: 'AE-101', kind: 'ph', gloss: 'AE-101', sensor: 'PH',
-    signals: ['PH'], evals: ['phRange', 'phDegraded'] },
-  { key: 'cv', tag: 'CV', isa: '', kind: 'cv', gloss: 'cv', sensor: null,
-    signals: [], evals: ['cvMismatch'] },
-];
+const QUALITY_SENSORS = ['UV', 'COND', 'PH', 'PRESS'];
+
+/**
+ * Run state → the `.titlebar__runstate` modifier that colours the WORD. The chip's lamp is driven
+ * separately by {@link stateLamp}, so a state with no word colour of its own (IDLE, READY, ENDED)
+ * still shows the right lamp: colour is never the only thing carrying the state anyway, because the
+ * word itself is on the chip.
+ */
+const STATE_WORD = {
+  IDLE: '', READY: '', RUNNING: 'is-running', HELD: 'is-held', PAUSED: 'is-held',
+  ALARM: 'is-alarm', ENDED: '', FAULT: 'is-fault',
+};
+
+/** Every `.titlebar__runstate` modifier, so exactly one can be left standing. */
+const STATE_WORD_CLASSES = ['is-running', 'is-held', 'is-warn', 'is-alarm', 'is-fault'];
+
+/** Data-quality verdict → the short code the quality chip shows beside its lamp. */
+const QUALITY_CODE = { OK: 'OK', SUSPECT: 'SUS', INVALID: 'INV', BYPASSED: 'BYP' };
+
+/** Data-quality verdict → the `.titlebar__quality` modifier that colours the code. */
+const QUALITY_WORD = { OK: '', SUSPECT: 'is-suspect', BYPASSED: 'is-suspect', INVALID: 'is-invalid' };
+
+/** Every `.titlebar__quality` modifier, so exactly one can be left standing. */
+const QUALITY_WORD_CLASSES = ['is-suspect', 'is-invalid'];
 
 /** Allowed axial grid sizes for the startup benchmark. Downgrade only. */
 const NZ_LADDER = [100, 200, 400, 800];
@@ -196,6 +213,18 @@ const SEVERITY_CODE = { INFO: 'INFO', WARN: 'WARN', ALARM: 'ALRM', CRITICAL: 'CR
 /** Lamp colour per severity. */
 const SEVERITY_LAMP = { INFO: 'run', WARN: 'warn', ALARM: 'alarm', CRITICAL: 'alarm', FAULT: 'alarm' };
 
+/**
+ * Banner tint per severity. The band is never flat: `styles/app.css` washes it and its severity
+ * rail with the matching state colour, so an ALARM row and a WARN row are distinguishable before a
+ * single word is read.
+ */
+const SEVERITY_BAND = {
+  INFO: 'info', WARN: 'warn', ALARM: 'alarm', CRITICAL: 'critical', FAULT: 'fault',
+};
+
+/** Every tint the alarm band can wear, so exactly one `.banner--*` can be left standing. */
+const BAND_TONES = ['info', 'warn', 'alarm', 'critical', 'fault'];
+
 /** Event types that change list content and therefore demand a `structural` frame. */
 const STRUCTURAL_EVENT_TYPES = {
   BLOCK_START: 1, BLOCK_END: 1, FRACTION_START: 1, FRACTION_END: 1,
@@ -223,11 +252,15 @@ const QF_LABELS = [
   [QF.BED_COLLAPSED, 'Bed collapsed'],
 ];
 
-/** Three-letter quality codes for the QUAL box. */
-const QUALITY_CODE = { OK: 'OK', SUSPECT: 'SUS', INVALID: 'INV', BYPASSED: 'BYP' };
-
 /** The inline reset an interactive label box needs, since `.tagblk` is not a button class. */
 const BARE_BUTTON = { appearance: 'none', background: 'none', border: '0', padding: '0', cursor: 'pointer' };
+
+/**
+ * The inline reset a CHIP that is also a button needs. Deliberately smaller than
+ * {@link BARE_BUTTON}: the chip's own class supplies the background, border, padding, colour and
+ * font, and an inline value would beat the stylesheet and undo the skin.
+ */
+const CHIP_BUTTON = { appearance: 'none', cursor: 'pointer' };
 
 /**
  * The global keyboard registry.
@@ -295,8 +328,8 @@ export const KEYMAP = {
 let app = null;
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * WIDGETS — icon buttons and glyphs come from ui/hmi.js; label boxes and lamps are built here
- * against the FT-CLASSIC classes styles/app.css defines.
+ * WIDGETS — icon buttons and glyphs come from ui/hmi.js; label boxes, chips and lamps are built
+ * here against the HMI-2012 classes styles/app.css defines.
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
@@ -327,11 +360,11 @@ function button(className, label, onClick, attrs) {
 }
 
 /**
- * Build one 34×34 beveled icon button through `hmi.iconButton`, carrying the shell's own `.iconbtn`
- * class so `styles/app.css` and the kit's own rules agree on its geometry.
+ * Build one 34×34 icon button through `hmi.iconButton`, carrying the shell's own `.iconbtn` class
+ * so `styles/app.css` and the kit's own rules agree on its geometry.
  *
  * The face never carries a word: the meaning is in `title` (hover) and `aria-label` (assistive
- * technology), exactly as an FT-CLASSIC toolbar does it.
+ * technology), exactly as an HMI-2012 toolbar does it.
  *
  * @param {{icon:string, label:string, title?:string, cls?:string, danger?:boolean, sm?:boolean,
  *          pressed?:boolean, onClick?:function(MouseEvent):void}} spec the button
@@ -384,24 +417,22 @@ function setLamp(el, tone, label, blink) {
 }
 
 /**
- * Build a label box: a 10 px uppercase tag beside a sunken near-black field holding right-aligned
- * tabular digits and a smaller, dimmer engineering unit. This is the workhorse of the design —
+ * Build a label box: a 10 px uppercase tag beside a recessed field holding right-aligned tabular
+ * digits in white and a smaller, dimmer engineering unit. This is the workhorse of the design —
  * every number in the chrome lives in one.
  *
  * The box becomes a real button when there is something behind it (a glossary entry, or an explicit
  * handler), so the explanation is reachable from the keyboard. A box with nothing behind it stays a
  * span: a dead button is worse than a label.
  *
- * @param {{tag:string, eu?:string, title?:string, wide?:boolean, narrow?:boolean, gloss?:string,
+ * @param {{tag:string, eu?:string, title?:string, narrow?:boolean, gloss?:string,
  *          onClick?:function(MouseEvent):void}} spec the box
  * @returns {{el:HTMLElement, val:Element, eu:Element, box:Element}} the box and its live nodes
  */
 function labelBox(spec) {
   const val = h('span', { class: 'lbox__v' }, fmt.NO_VALUE);
   const eu = h('span', { class: 'lbox__eu' }, spec.eu || '');
-  const box = h('span', {
-    class: `lbox${spec.wide ? ' lbox--wide' : ''}${spec.narrow ? ' lbox--narrow' : ''}`,
-  }, val, eu);
+  const box = h('span', { class: `lbox${spec.narrow ? ' lbox--narrow' : ''}` }, val, eu);
   const tag = h('span', { class: 'tagblk__lbl' }, spec.tag);
 
   const entry = spec.gloss ? glossaryFor(spec.gloss) : null;
@@ -436,7 +467,7 @@ function setBox(rec, text, euText) {
 }
 
 /**
- * Colour a label box's digits: alarm red beats stale grey-green beats the normal PV lime.
+ * Colour a label box's digits: alarm red beats stale grey beats the normal white PV.
  * @param {{box:Element}} rec a {@link labelBox} record
  * @param {boolean} inAlarm true when the tag is in alarm
  * @param {boolean} stale true when the sensor quality is SUSPECT, INVALID or BYPASSED
@@ -462,11 +493,36 @@ function setEnabled(el, enabled, whyDisabled, whenEnabled) {
   fmt.setAttr(el, 'title', enabled ? whenEnabled : whyDisabled);
 }
 
-/** @returns {Element} a 2 px sunken groove between two toolbar groups */
+/** @returns {Element} a groove between two toolbar groups */
 function toolbarSep() {
   return h('span', {
     class: 'toolbar__sep', role: 'separator', 'aria-orientation': 'vertical',
   });
+}
+
+/**
+ * Tint the alarm band. Exactly one `.banner--*` modifier is ever set, so the band is washed with
+ * the colour of the severity it is carrying rather than staying a flat grey rail that an operator
+ * has to read before they know how bad it is.
+ * @param {Element} el the alarm band
+ * @param {string} tone one of {@link BAND_TONES}, or `''` for no tint
+ * @returns {void}
+ */
+function setBandTone(el, tone) {
+  if (!el) return;
+  for (const t of BAND_TONES) fmt.cls(el, `banner--${t}`, t === tone);
+}
+
+/**
+ * Leave exactly one modifier standing on a chip, from a closed vocabulary.
+ * @param {Element} el the chip
+ * @param {string[]} all every modifier the chip may wear
+ * @param {string} want the one it should wear now, or `''` for none
+ * @returns {void}
+ */
+function setModifier(el, all, want) {
+  if (!el) return;
+  for (const c of all) fmt.cls(el, c, c === want);
 }
 
 /**
@@ -554,8 +610,8 @@ export function boot(rootEl) {
     overlayHost: null,
     glossaryHandle: null,         // the ONE open glossary popover, or null — see showGlossary
     onboarding: null,
-    // FT-CLASSIC is a light design; index.html stamps light before first paint.
-    theme: document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light',
+    // HMI-2012 is a graphite design; index.html stamps dark before first paint.
+    theme: document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark',
     rafId: 0,
     tPrev: 0,
     structural: true,
@@ -725,12 +781,16 @@ function mountScreens(a) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * SHELL CONSTRUCTION — the five FT-CLASSIC bands, built once
+ * SHELL CONSTRUCTION — the four HMI-2012 bands, built once
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
- * Empty `#app` and build the shell: title strip 26 px, toolbar 40 px, alarm banner 24 px,
- * workspace, status strip 24 px — plus the out-of-flow skip link and perf overlay.
+ * Empty `#app` and build the shell: title strip 26 px, toolbar 40 px, alarm banner 24 px and the
+ * workspace — plus the out-of-flow skip link and perf overlay.
+ *
+ * The workspace is the LAST band, and the only one that grows: there is no bottom value strip to
+ * take a fixed 24 px off it.
+ *
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -748,8 +808,6 @@ function buildShell(a) {
   const workspace = h('main', { class: 'workspace' });
   a.el.workspace = workspace;
   shell.appendChild(workspace);
-
-  shell.appendChild(buildStatusStrip(a));
 
   const perf = h('div', { class: 'perf', role: 'status', 'aria-label': 'Performance' });
   perf.hidden = true;
@@ -769,8 +827,15 @@ function buildShell(a) {
 }
 
 /**
- * Band 1 — the 26 px title strip: unit name (the honesty note is behind it), the block counter, the
- * sim clock with the method-progress bar, and the alarm-summary lamps.
+ * Band 1 — the 26 px title strip, and the screen's ONLY status line: unit name (the honesty note is
+ * behind it), the block counter, the sim clock with the method-progress bar, then the run-state chip
+ * and the data-quality lamp, then the alarm-summary lamps with the active-alarm count.
+ *
+ * State and quality read left of the alarm summary, so the band runs state → quality → alarms and
+ * the alarm tally stays anchored at the far right where an operator's eye already goes. They were
+ * the two indications on the deleted bottom strip that an operator must never lose; the eight
+ * process values that sat beside them were duplicates of the P&ID and the pen rail and are gone.
+ *
  * @param {object} a the application instance
  * @returns {Element} the title strip
  */
@@ -815,6 +880,35 @@ function buildTitleBar(a) {
 
   bar.appendChild(h('span', { class: 'titlebar__spacer' }));
 
+  // Both indications are a lamp plus one word: the word is the information, the lamp is the
+  // pre-attentive cue. The words live in text NODES so writing them cannot remove the lamp.
+  const status = h('div', { class: 'titlebar__state', 'data-tour': 'status' });
+
+  a.el.stateLamp = lamp('Run state: IDLE');
+  a.el.stateWord = document.createTextNode('IDLE');
+  a.el.stateChip = h('span', {
+    class: 'titlebar__runstate', title: `Run state: IDLE — ${stateExplanation('IDLE')}`,
+  }, a.el.stateLamp, a.el.stateWord);
+  status.appendChild(a.el.stateChip);
+
+  // The quality chip is a real button, so the per-sensor verdicts the QUAL box used to open stay
+  // one press away. Everything visual comes from `.titlebar__quality`, so the inline reset is only
+  // what a `<button>` needs to stop looking like one.
+  a.el.qualLamp = lamp('Data quality: OK');
+  a.el.qualWord = document.createTextNode(QUALITY_CODE.OK);
+  a.el.qualBtn = button('titlebar__quality', '', () => showQualityPopover(a, a.el.qualBtn), {
+    style: CHIP_BUTTON,
+    'aria-label': 'Data quality: OK — press for the per-sensor verdicts',
+  });
+  a.el.qualBtn.appendChild(a.el.qualLamp);
+  a.el.qualBtn.appendChild(a.el.qualWord);
+  status.appendChild(a.el.qualBtn);
+  bar.appendChild(status);
+
+  bar.appendChild(h('span', {
+    class: 'titlebar__sep', role: 'separator', 'aria-orientation': 'vertical',
+  }));
+
   const actions = h('div', { class: 'titlebar__actions' });
   a.el.lampCrit = lamp('Critical alarms: none');
   a.el.lampAlarm = lamp('Alarms: none');
@@ -830,8 +924,9 @@ function buildTitleBar(a) {
 }
 
 /**
- * Band 2 — the 40 px icon toolbar. Five groups split by 2 px grooves: transport, emergency stop,
- * simulation speed, screen navigation, system. Every control is icon-only.
+ * Band 2 — the 40 px icon toolbar. Five groups split by grooves: transport, emergency stop,
+ * simulation speed, screen navigation, system. Every control is icon-only, and the active
+ * navigation button wears `.is-active`, which `styles/app.css` paints with `--accent`.
  * @param {object} a the application instance
  * @returns {Element} the toolbar
  */
@@ -1016,7 +1111,10 @@ function buildSkipButton(a) {
  * Band 3 — the 24 px alarm banner and the two screen-reader live regions.
  *
  * One row serves two jobs. An active alarm owns it; when there is none, a caught shell error takes
- * the same slots, so a failure is always visible without a sixth band ever existing.
+ * the same slots, so a failure is always visible without a fifth band ever existing.
+ *
+ * The band is tinted by what it is carrying — `setBandTone` writes one `.banner--*` modifier —
+ * because a flat grey rail makes an operator read before they can rank.
  *
  * @param {object} a the application instance
  * @returns {Element} the alarm band
@@ -1032,9 +1130,13 @@ function buildAlarmBar(a) {
   bar.appendChild(a.el.alarmAssertive);
   bar.appendChild(a.el.alarmPolite);
 
+  // A 3 px rail down the leading edge, coloured by `.banner--*` — the tint an operator reads from
+  // the corner of the eye before the words resolve.
+  bar.appendChild(h('span', { class: 'banner__bar', 'aria-hidden': 'true' }));
+
   a.el.alarmLamp = lamp('Alarm');
   a.el.alarmSev = h('span', { class: 'banner__sev' }, '');
-  a.el.alarmTag = h('span', { class: 'alarmbar__tag' }, '');
+  a.el.alarmTag = h('span', { class: 'alarmbar__tag banner__id' }, '');
   a.el.alarmCode = h('span', { class: 'alarmbar__code' }, '');
   a.el.alarmCond = h('span', { class: 'banner__detail' }, '');
   bar.appendChild(a.el.alarmLamp);
@@ -1080,48 +1182,6 @@ function buildAlarmBar(a) {
 
   a.el.alarmBar = bar;
   return bar;
-}
-
-/**
- * Band 5 — the 24 px status strip: the eight sunken label boxes, then the run-state lamp with its
- * STATE box and the data-quality lamp with its QUAL box. This is the redundant copy of process
- * state that survives a screen change.
- * @param {object} a the application instance
- * @returns {Element} the status strip
- */
-function buildStatusStrip(a) {
-  const strip = h('footer', {
-    class: 'statusstrip', 'aria-label': 'Live process values', 'data-tour': 'status',
-  });
-  a.el.fields = {};
-  for (const spec of STATUS_FIELDS) {
-    const entry = glossaryFor(spec.gloss);
-    const rec = labelBox({
-      tag: spec.tag,
-      eu: fmt.unitLabel(spec.kind),
-      gloss: spec.gloss,
-      title: `${spec.isa ? `${spec.isa} · ` : ''}${entry ? entry.term : spec.tag}`,
-    });
-    a.el.fields[spec.key] = rec;
-    strip.appendChild(rec.el);
-  }
-
-  strip.appendChild(h('span', { class: 'statusstrip__spacer' }));
-
-  a.el.stateLamp = lamp('Run state: IDLE');
-  strip.appendChild(a.el.stateLamp);
-  a.el.stateBox = labelBox({ tag: 'STATE', gloss: 'run-state', title: 'Run state', wide: true });
-  strip.appendChild(a.el.stateBox.el);
-
-  a.el.qualLamp = lamp('Data quality: OK');
-  strip.appendChild(a.el.qualLamp);
-  a.el.qualBox = labelBox({
-    tag: 'QUAL', narrow: true, title: 'Data quality — press for the per-sensor verdicts',
-    onClick: () => showQualityPopover(a, a.el.qualBox.el),
-  });
-  strip.appendChild(a.el.qualBox.el);
-
-  return strip;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1501,7 +1561,7 @@ function refreshNav(a) {
 }
 
 /**
- * Flip between the classic grey and the dark panel, and tell every canvas painter to re-read its
+ * Flip between the graphite panel and the light one, and tell every canvas painter to re-read its
  * tokens. `index.html` stamps an explicit `data-theme` before first paint, so there is no third
  * state to carry here; reading CSS custom properties per frame is a layout-thrash trap.
  * @param {object} a the application instance
@@ -1523,8 +1583,9 @@ function applyTheme(a, theme, announce) {
   document.documentElement.setAttribute('data-theme', a.theme);
   if (a.el.themeBtn) {
     fmt.setAttr(a.el.themeBtn, 'aria-pressed', a.theme === 'dark' ? 'true' : 'false');
-    fmt.setAttr(a.el.themeBtn, 'title',
-      a.theme === 'dark' ? 'Dark panel — switch to the classic grey' : 'Classic grey — switch to dark');
+    fmt.setAttr(a.el.themeBtn, 'title', a.theme === 'dark'
+      ? 'Graphite panel — switch to the light panel'
+      : 'Light panel — switch to graphite');
     fmt.cls(a.el.themeBtn, 'is-active', a.theme === 'dark');
   }
   try {
@@ -1571,17 +1632,17 @@ function closeGlossary(a) {
 }
 
 /**
- * The QUAL box's popover: every `run.qualityFlags` bit currently set, and the per-sensor verdict
- * behind them.
+ * The quality lamp's popover: every `run.qualityFlags` bit currently set, and the per-sensor verdict
+ * behind them. This is where the verdict the lamp summarises in one colour is spelled out in words.
  * @param {object} a the application instance
- * @param {Element} anchorEl the box
+ * @param {Element} anchorEl the lamp's button
  * @returns {void}
  */
 function showQualityPopover(a, anchorEl) {
   const run = a.ctx.run;
   const body = h('div', { class: 'glossary' }, h('strong', {}, 'Data quality'));
   const ul = h('ul', {});
-  for (const sensor of ['UV', 'COND', 'PH', 'PRESS']) {
+  for (const sensor of QUALITY_SENSORS) {
     ul.appendChild(h('li', {}, `${sensor}: ${sensorQuality(run, sensor)}`));
   }
   body.appendChild(ul);
@@ -1781,13 +1842,9 @@ function wireBus(a) {
   bus.on('show-glossary', (payload) => {
     if (payload && payload.anchorEl && payload.id) showGlossary(a, payload.anchorEl, payload.id);
   });
-  bus.on('display-units-changed', () => {
-    a.structural = true;
-    for (const spec of STATUS_FIELDS) {
-      const rec = a.el.fields[spec.key];
-      if (rec) fmt.setText(rec.eu, fmt.unitLabel(spec.kind));
-    }
-  });
+  // The shell carries no engineering-unit suffix of its own any more — the value strip that did is
+  // gone — so a unit change only has to force the panels a structural frame.
+  bus.on('display-units-changed', () => { a.structural = true; });
 }
 
 /**
@@ -2042,7 +2099,6 @@ function refreshShell(a, structural) {
   collectAlarms(a, config, run);
   refreshTitleBar(a, config, run);
   refreshToolbar(a, config, run);
-  refreshStatusStrip(a, config, run);
   refreshAlarmBar(a);
   if (a.skipHold.active) advanceSkipHold(a);
 }
@@ -2097,7 +2153,8 @@ function collectAlarms(a, config, run) {
 }
 
 /**
- * Repaint the title strip: unit, block counter, clock, progress and the alarm-summary lamps.
+ * Repaint the title strip: unit, block counter, clock, progress, the run-state chip, the quality
+ * lamp and the alarm-summary lamps.
  * @param {object} a the application instance
  * @param {object} config the frozen config
  * @param {object} run the run state
@@ -2131,6 +2188,8 @@ function refreshTitleBar(a, config, run) {
     fmt.setAttr(el.progressTrack, 'aria-valuetext',
       `${pct} % of the method, ${(run.V_tot_mL / config.column.V_mL).toFixed(2)} column volumes delivered`);
   }
+
+  refreshStatusIndication(a, run);
 
   // Counted over every raised row, silenced ones included: a summary lamp that a silenced banner
   // could switch off would be a lie.
@@ -2264,46 +2323,34 @@ function methodFraction(a, config, run) {
 }
 
 /**
- * Repaint the status strip. Each box carries its sensor's `sensorQuality` verdict and its alarm
- * state as classes, which `styles/app.css` renders as digit colour; the QUAL box states the verdict
- * as a code, so the information is never colour alone.
+ * Repaint the title strip's two status indications: the run-state chip and the data-quality chip.
+ *
+ * These are the whole of what the deleted bottom strip contributed that was not already on the
+ * P&ID or in the pen rail, so they are the whole of what moved up here. Each is a lamp beside a
+ * WORD — `RUNNING`, `HELD`, `OK`, `SUS` — so neither is ever colour alone, and each carries the
+ * long form in its tooltip and accessible name.
+ *
  * @param {object} a the application instance
- * @param {object} config the frozen config
  * @param {object} run the run state
  * @returns {void}
  */
-function refreshStatusStrip(a, config, run) {
-  const f = a.el.fields;
-  writeField(f.flow, 'flow', run.Q_actual_mLs, config);
-  writeField(f.pctb, 'pct', run.pctB_actual, config);
-  writeField(f.p1, 'pressure', run.press.P1disp_bar, config);
-  writeField(f.dp, 'pressure', run.dP_bar, config);
-  writeField(f.uv, 'abs', run.uv.Afilt[0], config);
-  writeField(f.cond, 'cond', run.cond.kappaDisp_mScm, config);
-  writeField(f.ph, 'ph', run.ph.pHfilt, config);
-  writeField(f.cv, 'cv', run.V_tot_mL, config);
+function refreshStatusIndication(a, run) {
+  const st = run.state;
+  // Blink only while an acknowledgement is genuinely outstanding — ISA-18.2's meaning for a
+  // flashing indication — not merely because the state word says ALARM.
+  const unacked = (st === 'ALARM' || st === 'FAULT') && !!a.alarm.ackable;
+  const stateText = `Run state: ${st} — ${stateExplanation(st)}`;
+  setModifier(a.el.stateChip, STATE_WORD_CLASSES, STATE_WORD[st] || '');
+  fmt.setText(a.el.stateWord, st);
+  fmt.setAttr(a.el.stateChip, 'title', stateText);
+  setLamp(a.el.stateLamp, stateLamp(st), stateText, unacked);
 
   let worst = 'OK';
-  for (const spec of STATUS_FIELDS) {
-    const q = spec.sensor ? sensorQuality(run, spec.sensor) : 'OK';
-    if (q !== 'OK' && worst === 'OK') worst = q;
-    else if (q === 'INVALID') worst = 'INVALID';
-    let inAlarm = false;
-    for (const s of spec.signals) if (a.alarm.signals.has(s)) inAlarm = true;
-    for (const k of spec.evals) if (a.alarm.evals.has(k)) inAlarm = true;
-    // Flow has no sensor of its own, but an automatic flow reduction means the number on screen is
-    // not the number the method asked for, and that must be visible.
-    const stale = q !== 'OK'
-      || (spec.key === 'flow' && (run.qualityFlags & QF.FLOW_REDUCED) !== 0);
-    setBoxState(f[spec.key], inAlarm, stale);
+  for (const sensor of QUALITY_SENSORS) {
+    const q = sensorQuality(run, sensor);
+    if (q === 'INVALID') worst = 'INVALID';
+    else if (q !== 'OK' && worst === 'OK') worst = q;
   }
-
-  const st = run.state;
-  setBox(a.el.stateBox, st, '');
-  setBoxState(a.el.stateBox, st === 'ALARM' || st === 'FAULT', st === 'HELD' || st === 'PAUSED');
-  fmt.setAttr(a.el.stateBox.el, 'title', stateExplanation(st));
-  setLamp(a.el.stateLamp, stateLamp(st), `Run state: ${st} — ${stateExplanation(st)}`,
-    st === 'ALARM' || st === 'FAULT');
 
   let nFlags = 0;
   const names = [];
@@ -2317,31 +2364,22 @@ function refreshStatusStrip(a, config, run) {
     ? 'Data quality: OK — press for the per-sensor verdicts'
     : `Data quality: ${worst}, ${nFlags} flag${nFlags === 1 ? '' : 's'}: ${names.join(' · ')}`;
   setLamp(a.el.qualLamp, tone, qualText, false);
-  setBox(a.el.qualBox, QUALITY_CODE[worst] || worst, nFlags > 0 ? String(nFlags) : '');
-  setBoxState(a.el.qualBox, worst === 'INVALID', worst !== 'OK');
-  fmt.setAttr(a.el.qualBox.el, 'title', qualText);
-}
-
-/**
- * Format one canonical value into its label box, unit and all.
- * @param {{val:Element, eu:Element, box:Element}} rec the label box record
- * @param {'volume'|'cv'|'flow'|'time'|'pressure'|'conc'|'abs'|'cond'|'ph'|'pct'} kind the quantity
- * @param {number} value the canonical value
- * @param {object} config the frozen config
- * @returns {void}
- */
-function writeField(rec, kind, value, config) {
-  if (!rec) return;
-  const d = fmt.toDisplay(kind, value, config);
-  setBox(rec, fmt.fmtFixed(d.value, d.decimals), d.unit);
+  setModifier(a.el.qualBtn, QUALITY_WORD_CLASSES, QUALITY_WORD[worst] || '');
+  fmt.setText(a.el.qualWord, QUALITY_CODE[worst] || worst);
+  // The button is named explicitly rather than from its contents: name-from-content over a lamp
+  // whose only text is its own `aria-label` came back EMPTY in the accessibility tree, which would
+  // have left the quality indication unreachable by name. One string, so the two cannot disagree.
+  fmt.setAttr(a.el.qualBtn, 'aria-label', qualText);
+  fmt.setAttr(a.el.qualBtn, 'title', qualText);
 }
 
 /**
  * Repaint the alarm banner when the active set changes, and keep the two live regions honest.
  *
  * The band shows the highest-ranked alarm the operator has not silenced; when there is none it
- * shows the last caught shell error; when there is neither it disappears. Only the newest alarm's
- * text is placed in a live region, rebuilt rather than appended, so a screen reader announces once.
+ * shows the last caught shell error; when there is neither it disappears. It is tinted by that
+ * row's severity. Only the newest alarm's text is placed in a live region, rebuilt rather than
+ * appended, so a screen reader announces once.
  *
  * The displayed row is recorded in `a.bannerAlarmId` on every call, and the band's ACK and SILENCE
  * controls resolve that id when they are pressed. The row the band is labelled for is therefore the
@@ -2365,6 +2403,7 @@ function refreshAlarmBar(a) {
     if (shown) {
       const sev = shown.severity || 'WARN';
       const named = `${shown.id} — ${shown.name}`;
+      setBandTone(el.alarmBar, SEVERITY_BAND[sev] || 'warn');
       setLamp(el.alarmLamp, SEVERITY_LAMP[sev] || 'warn', `${sev}: ${shown.name}`,
         (SEVERITY_RANK[sev] || 0) >= SEVERITY_RANK.ALARM);
       fmt.setText(el.alarmSev, SEVERITY_CODE[sev] || sev);
@@ -2387,6 +2426,9 @@ function refreshAlarmBar(a) {
       el.errCopyBtn.hidden = true;
       el.errClearBtn.hidden = true;
     } else if (err) {
+      // A caught shell error borrows the ALARM tint: it is a failure, and there is no sixth
+      // severity to invent for it.
+      setBandTone(el.alarmBar, 'alarm');
       setLamp(el.alarmLamp, 'alarm', `Shell error in ${err.source}`, false);
       fmt.setText(el.alarmSev, 'ERR');
       fmt.setText(el.alarmTag, err.source.toUpperCase());
@@ -2399,6 +2441,10 @@ function refreshAlarmBar(a) {
       el.alarmMoreBtn.hidden = true;
       el.errCopyBtn.hidden = false;
       el.errClearBtn.hidden = false;
+    } else {
+      // Nothing to show. Drop the tint too, so the band cannot reappear wearing the colour of the
+      // alarm that cleared before its text has been rewritten.
+      setBandTone(el.alarmBar, '');
     }
     el.alarmBar.hidden = !(shown || err);
 
@@ -2542,7 +2588,7 @@ function clearShellError(a) {
 
 /**
  * @param {string} st a `run.state` value
- * @returns {'off'|'run'|'warn'|'alarm'} the lamp colour for the run-state lamp
+ * @returns {'off'|'run'|'warn'|'alarm'} the lamp colour for the run-state chip
  */
 function stateLamp(st) {
   switch (st) {
@@ -2558,7 +2604,7 @@ function stateLamp(st) {
 }
 
 /**
- * One sentence explaining what a run state permits — the state box's tooltip.
+ * One sentence explaining what a run state permits — the state chip's tooltip.
  * @param {string} st a `run.state` value
  * @returns {string} the explanation
  */

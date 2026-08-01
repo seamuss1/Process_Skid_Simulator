@@ -1,6 +1,6 @@
 /**
  * @file src/ui/overlay.js — every floating surface in the application, in one place, drawn in the
- *                           FT-CLASSIC idiom (beveled grey chrome, sunken label boxes, ISA tags).
+ *                           HMI-2012 idiom (cool graphite panels, 1px edges, recessed value fields).
  *
  * Popovers, glossary cards, modals, confirm dialogs, toasts, coach marks, the `?` cheat sheet and
  * **the faceplate** all live here for one reason: **focus handling is written once**. Modals and
@@ -9,11 +9,12 @@
  * different answers.
  *
  * THE FACEPLATE is the characteristic widget of this aesthetic. {@link showFaceplate} opens a small
- * modeless beveled window titled with an ISA tag, carrying a PV label box, an SP label box where a
- * setpoint exists, a vertical bargraph with SP and alarm-limit markers painted on its scale, AUTO /
- * MAN indicator lamps, and the tag's actions as icon buttons. It is opened by clicking an instrument
- * bubble in the P&ID, and it is the reason the main screen needs almost no text: the numbers, the
- * limits and the controls for one loop are all one click away, and nowhere else.
+ * modeless panel — gradient title bar, 1px border, 2px radius, a real drop shadow — carrying a
+ * recessed PV field in white digits, an amber SP field where a setpoint exists, a vertical bargraph
+ * with a thin scale and SP / alarm-limit markers drawn as ticks with small labels, an AUTO | MAN
+ * segmented mode indicator, and the tag's actions as icon buttons. It is opened by clicking an
+ * instrument bubble in the P&ID, and it is the reason the main screen needs almost no text: the
+ * numbers, the limits and the controls for one loop are all one click away, and nowhere else.
  *
  * This module also owns:
  *  - viewport-flipping placement with a clamped 6 px arrow;
@@ -28,17 +29,19 @@
  * {@link showGlossaryPopover}, which knows the four-section layout but not a word of the text.
  *
  * STYLING: geometry (position, size, clip, bar fill) is computed and therefore inline. Appearance
- * comes from class names so `styles/app.css` owns the look. A complete FT-CLASSIC base stylesheet is
+ * comes from class names so `styles/app.css` owns the look. A complete HMI-2012 base stylesheet is
  * injected once inside `@layer chromaskid-overlay`, so every surface here is correct with
  * `styles/tokens.css` alone; because unlayered author rules always beat layered ones, `app.css`
  * overrides it without a specificity fight. No colour literal appears in this file — every colour is
- * a `var(--token)` from `styles/tokens.css`.
+ * a `var(--token)` from `styles/tokens.css`, and so is every gradient, border and shadow: the three
+ * depth recipes (`--surface-raised` / `--surface-pressed`, `--border-edge` / `--border-field`,
+ * `--elev-raised` / `--elev-sunken` / `--elev-float`) are applied here, never re-derived.
  *
  * TEXT POLICY: buttons on a process screen are icon-only. The one deliberate exception is a dialog
- * action button, which renders its caller-supplied `label` in 10 px uppercase — a classic
- * FactoryTalk dialog has OK / CANCEL on its buttons, and refusing to render the label would break
- * every dialog in the application. Action specs may also carry an `icon`, and an icon-only action
- * (no `label`) renders as a square icon button.
+ * action button, which renders its caller-supplied `label` as written — a dialog has Close / Cancel
+ * on its buttons, and refusing to render the label would break every dialog in the application.
+ * Action specs may also carry an `icon`, and an icon-only action (no `label`) renders as a square
+ * icon button. UPPERCASE is reserved for tags; everything else is sentence case.
  *
  * @module ui/overlay
  */
@@ -64,11 +67,21 @@ const TOAST_MS = { info: 3500, warn: 5000, blocked: 6000 };
 /** Stacking order inside the overlay root. */
 const Z = { popover: 10, faceplate: 20, modal: 30, coach: 40, toast: 50 };
 
-/** Faceplate geometry. JS and CSS read the same numbers, so the markers land on the scale. */
-const FP_W = 230;
-const FP_BAR_H = 196;
+/* Faceplate geometry. JS and CSS read the same numbers, so the markers land on the scale.
+   The scale column is laid out left to right: a gutter for the marker labels, the bar itself, a
+   1 px axis rule with 4 px ticks, then the numeric scale labels. */
+const FP_W = 240;
+const FP_BAR_H = 190;
 const FP_BAR_PAD = 2;
 const FP_MARK_H = 2;
+/** Marker-label gutter, the bar, and the axis rule, all measured from the scale column's left. */
+const FP_LBL_W = 16;
+const FP_BAR_X = 18;
+const FP_BAR_W = 22;
+const FP_AXIS_X = FP_BAR_X + FP_BAR_W + 4;
+const FP_TICK_W = 4;
+const FP_TICK_X = FP_AXIS_X + FP_TICK_W + 2;
+const FP_SCALE_W = 78;
 /** How far each new faceplate is offset from the previous one, px. */
 const FP_CASCADE_PX = 18;
 /** Keyboard nudge for a focused faceplate title bar, px (×4 with Shift). */
@@ -80,104 +93,124 @@ const FOCUSABLE_SELECTOR = [
   'textarea:not([disabled])', '[tabindex]:not([tabindex="-1"])', '[contenteditable="true"]',
 ].join(',');
 
-/** The two bevel recipes, written once. Every surface in this file uses one of them. */
-const BEV_RAISED = 'inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),'
-  + 'inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh)';
-const BEV_SUNKEN = 'inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),'
-  + 'inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt)';
-/** A hard 90s drop shadow. No blur: this aesthetic has no soft shadows. */
-const BEV_DROP = '3px 3px 0 var(--bev-dk)';
-
 const BASE_CSS = `@layer chromaskid-overlay, chromaskid-onboarding;
 @layer chromaskid-overlay {
+/* ---- THE RECIPES THIS SHEET IS BUILT FROM -------------------------------------------------------
+   Nothing below hand-rolls a border, a gradient or a shadow. styles/tokens.css publishes the three
+   surfaces of the HMI-2012 depth language and this file only ever applies them:
+
+     raised   var(--surface-raised)  + var(--border-edge)  + var(--elev-raised)
+     sunken   var(--fld-bg)          + var(--border-field) + var(--elev-sunken)
+     pressed  var(--surface-pressed) — the same gradient inverted, outer shadow dropped
+
+   A floating surface adds var(--elev-float). Every corner is var(--r-2), the 2 px step; only lamps
+   and the ISA bubbles opt out, at 50%. */
 .ov-root{position:fixed;inset:0;z-index:1000;pointer-events:none;
-  font-family:var(--font-ui);font-size:11px;line-height:1.35;color:var(--ink);}
+  font-family:var(--font-ui);font-size:var(--fs-11);line-height:var(--lh-base);color:var(--ink);}
 .ov-root>*{pointer-events:auto;}
-.ov-root *{box-sizing:border-box;border-radius:0;}
+.ov-root *{box-sizing:border-box;}
 .ov-root p{margin:0 0 6px;}
 .ov-root p:last-child{margin-bottom:0;}
 .ov-root ul,.ov-root ol{margin:0 0 6px;padding-left:16px;}
 .ov-root li{margin:1px 0;}
-.ov-root h2,.ov-root h3,.ov-root h4{margin:0 0 3px;font-size:11px;font-weight:700;color:var(--ink);}
-.ov-root strong{font-weight:700;color:var(--ink);}
+.ov-root h2,.ov-root h3,.ov-root h4{margin:0 0 3px;font-size:var(--fs-11);font-weight:600;
+  color:var(--ink);}
+.ov-root strong{font-weight:600;color:var(--ink);}
 .ov-root code,.ov-root kbd{font-family:var(--font-num);}
-.ov-root :focus-visible{outline:2px solid var(--fld-sp);outline-offset:1px;}
+.ov-root :focus-visible{outline:2px solid var(--accent);outline-offset:-2px;}
 
-/* ---- bevel utilities ------------------------------------------------------------------------ */
-.ov-raised{box-shadow:${BEV_RAISED};}
-.ov-sunken{box-shadow:${BEV_SUNKEN};}
-.ov-sep{flex:0 0 auto;width:2px;align-self:stretch;margin:0 2px;
-  box-shadow:inset 1px 0 0 var(--bev-dk),inset -1px 0 0 var(--bev-hi);}
+/* ---- depth utilities: the whole vocabulary, two classes ---------------------------------------- */
+.ov-raised{background:var(--surface-raised);border:var(--border-edge);border-radius:var(--r-2);
+  box-shadow:var(--elev-raised);}
+.ov-sunken{background:var(--fld-bg);border:var(--border-field);border-radius:var(--r-2);
+  box-shadow:var(--elev-sunken);}
+.ov-sep{flex:0 0 auto;width:1px;align-self:stretch;margin:0 3px;background:var(--edge-soft);}
+.ov-sr{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip-path:inset(50%);
+  white-space:nowrap;}
 
 /* ---- the dim -------------------------------------------------------------------------------- */
-.ov-dim{position:fixed;inset:0;background:var(--dim,rgba(0,0,0,.55));pointer-events:auto;}
+.ov-dim{position:fixed;inset:0;pointer-events:auto;background:var(--dim);}
 
-/* ---- generic beveled window ------------------------------------------------------------------ */
-.ov-win{position:fixed;display:flex;flex-direction:column;background:var(--face);
-  box-shadow:${BEV_RAISED},${BEV_DROP};color:var(--ink);}
-.ov-win__tt{flex:0 0 auto;display:flex;align-items:center;gap:5px;height:20px;padding:0 2px 0 5px;
-  background:var(--face-2);box-shadow:inset 0 -1px 0 var(--bev-sh);
-  font:700 10px/1 var(--font-ui);letter-spacing:.04em;text-transform:uppercase;color:var(--ink);
+/* ---- generic window: 1px border, gradient title bar, real drop shadow -------------------------- */
+.ov-win{position:fixed;display:flex;flex-direction:column;background:var(--panel);
+  border:var(--border-edge);border-radius:var(--r-2);box-shadow:var(--elev-float);color:var(--ink);}
+.ov-win__tt{flex:0 0 auto;display:flex;align-items:center;gap:4px;height:22px;padding:0 3px;
+  background:var(--surface-raised);border-bottom:var(--border-edge);
+  border-radius:var(--r-2) var(--r-2) 0 0;box-shadow:inset 0 1px 0 var(--spec);
+  font:600 var(--fs-11)/1 var(--font-ui);letter-spacing:.02em;color:var(--ink);
   -webkit-user-select:none;user-select:none;}
-.ov-win__tt--drag{padding-left:2px;cursor:move;}
-.ov-win__tag{flex:0 0 auto;font-family:var(--font-num);letter-spacing:.06em;}
+.ov-win__tt--drag{cursor:move;}
+.ov-win__tag{flex:0 0 auto;padding-left:2px;font:700 var(--fs-11)/1 var(--font-num);
+  letter-spacing:.02em;}
 .ov-win__sp{flex:1 1 auto;min-width:6px;}
-.ov-win__body{flex:1 1 auto;overflow:auto;padding:6px;}
+.ov-win__body{flex:1 1 auto;overflow:auto;padding:8px;}
 
-/* ---- buttons -------------------------------------------------------------------------------- */
+/* ---- buttons: 1px edge, subtle gradient, pressed inverts the gradient -------------------------- */
 .ov-ib{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
-  width:16px;height:16px;padding:0;background:var(--face);border:0;color:var(--ink);
-  cursor:pointer;box-shadow:${BEV_RAISED};}
+  width:18px;height:18px;padding:0;background:var(--surface-raised);border:var(--border-edge);
+  border-radius:var(--r-2);box-shadow:var(--elev-raised);color:var(--ink-2);cursor:pointer;
+  transition:color var(--dur-1) var(--ease-out),border-color var(--dur-1) var(--ease-out);}
 .ov-ib--lg{width:22px;height:22px;}
 .ov-ib>svg,.ov-ib>span{display:block;pointer-events:none;}
-.ov-ib>span{font:700 9px/1 var(--font-num);letter-spacing:.02em;}
-.ov-ib:active,.ov-ib[aria-pressed="true"]{box-shadow:${BEV_SUNKEN};}
-.ov-ib:active>svg,.ov-ib:active>span,
-.ov-ib[aria-pressed="true"]>svg,.ov-ib[aria-pressed="true"]>span{transform:translate(1px,1px);}
-.ov-ib[disabled]{color:var(--ink-off);cursor:default;}
-.ov-btn{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:5px;
-  min-width:64px;height:22px;padding:0 9px;background:var(--face);border:0;color:var(--ink);
-  cursor:pointer;font:700 10px/1 var(--font-ui);letter-spacing:.04em;text-transform:uppercase;
-  box-shadow:${BEV_RAISED};}
-.ov-btn:active{box-shadow:${BEV_SUNKEN};}
-.ov-btn:active .ov-btn__t,.ov-btn:active .ov-btn__i{transform:translate(1px,1px);}
-.ov-btn[disabled]{color:var(--ink-off);cursor:default;}
+.ov-ib>span{font:700 var(--fs-9)/1 var(--font-num);letter-spacing:.02em;}
+.ov-ib:hover:not([disabled]){color:var(--ink);border-color:var(--accent);}
+.ov-ib:active:not([disabled]),.ov-ib[aria-pressed="true"]{background:var(--surface-pressed);
+  box-shadow:none;color:var(--ink);}
+.ov-ib[aria-pressed="true"]{border-color:var(--accent);background-color:var(--accent-soft);}
+.ov-ib[disabled]{color:var(--ink-3);box-shadow:none;cursor:default;}
+.ov-btn{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  min-width:68px;height:24px;padding:0 10px;background:var(--surface-raised);
+  border:var(--border-edge);border-radius:var(--r-2);box-shadow:var(--elev-raised);
+  color:var(--ink);cursor:pointer;font:600 var(--fs-11)/1 var(--font-ui);letter-spacing:.02em;
+  transition:border-color var(--dur-1) var(--ease-out);}
+.ov-btn:hover:not([disabled]){border-color:var(--accent);}
+.ov-btn:active:not([disabled]){background:var(--surface-pressed);box-shadow:none;}
+.ov-btn[disabled]{color:var(--ink-3);box-shadow:none;cursor:default;}
 .ov-btn__i{flex:0 0 auto;display:block;}
 .ov-btn__t{flex:0 0 auto;white-space:nowrap;}
-.ov-btn--primary::after{content:'';position:absolute;inset:3px;outline:1px dotted var(--ink-2);}
+.ov-btn--primary{background:var(--accent);border-color:var(--accent);color:var(--text-inv);}
+.ov-btn--primary:active:not([disabled]){background:var(--accent);}
+.ov-btn--danger{background:var(--alarm);border-color:var(--alarm);color:var(--on-alarm);}
+.ov-btn--danger:active:not([disabled]){background:var(--alarm);}
 
-/* ---- label box (the sunken numeric display) --------------------------------------------------- */
-.ov-lbl{display:block;font:700 9px/1.4 var(--font-ui);letter-spacing:.04em;text-transform:uppercase;
+/* ---- value field: recessed, white PV digits, amber SP ------------------------------------------ */
+.ov-lbl{display:block;font:600 var(--fs-10)/1.5 var(--font-ui);letter-spacing:.02em;
   color:var(--ink-2);}
-.ov-fld{display:flex;align-items:baseline;justify-content:flex-end;gap:3px;min-width:0;
-  padding:2px 4px;background:var(--fld-bg);color:var(--fld-pv);box-shadow:${BEV_SUNKEN};
-  font:700 13px/1.25 var(--font-num);font-variant-numeric:tabular-nums lining-nums;}
-.ov-fld--pv{font-size:16px;}
+.ov-fld{display:flex;align-items:baseline;justify-content:flex-end;gap:4px;min-width:0;
+  padding:2px 6px;background:var(--fld-bg);border:var(--border-field);
+  border-radius:var(--r-2);box-shadow:var(--elev-sunken);color:var(--fld-pv);
+  font:500 var(--fs-13)/1.35 var(--font-num);font-variant-numeric:tabular-nums lining-nums;}
+.ov-fld--pv{font-size:var(--fs-15);}
 .ov-fld--sp{color:var(--fld-sp);}
 .ov-fld--out{color:var(--fld-out);}
 .ov-fld--alarm{color:var(--fld-alarm);}
 .ov-fld--stale{color:var(--fld-stale);}
 .ov-fld__v{overflow:hidden;white-space:nowrap;text-overflow:clip;}
-.ov-fld__eu{flex:0 0 auto;font-size:80%;font-weight:400;color:var(--fld-eu);}
+.ov-fld__eu{flex:0 0 auto;font-size:var(--fs-10);font-weight:400;color:var(--fld-eu);}
 
-/* ---- status lamps ---------------------------------------------------------------------------- */
-.ov-lamp{position:relative;flex:0 0 auto;display:inline-block;width:10px;height:10px;
-  border-radius:50%;background:var(--lamp-off);box-shadow:inset 0 0 0 1px var(--bev-dk);}
-.ov-lamp::after{content:'';position:absolute;left:2px;top:1px;width:3px;height:2px;
-  border-radius:50%;background:var(--bev-hi);opacity:.8;}
+/* ---- status lamps: 1px ring, top highlight, 25% glow when lit ---------------------------------- */
+.ov-lamp{--lamp-c:var(--lamp-off);--lamp-glow:transparent;
+  position:relative;flex:0 0 auto;display:inline-block;width:var(--lamp-d);height:var(--lamp-d);
+  border-radius:50%;background:var(--lamp-c);
+  box-shadow:inset 0 0 0 1px var(--lamp-ring),0 0 6px var(--lamp-glow);}
+.ov-lamp::after{content:'';position:absolute;left:2px;top:1.5px;width:4px;height:2px;
+  border-radius:50%;background:var(--lamp-gloss);}
 .ov-lamp--lg{width:12px;height:12px;}
-.ov-lamp--run{background:var(--lamp-run);}
-.ov-lamp--warn{background:var(--lamp-warn);}
-.ov-lamp--alarm{background:var(--lamp-alarm);}
-.ov-lamp--info{background:var(--fld-out);}
+.ov-lamp--run{--lamp-c:var(--lamp-run);--lamp-glow:var(--glow-run);}
+.ov-lamp--warn{--lamp-c:var(--lamp-warn);--lamp-glow:var(--glow-warn);}
+.ov-lamp--alarm{--lamp-c:var(--lamp-alarm);--lamp-glow:var(--glow-alarm);}
+.ov-lamp--info{--lamp-c:var(--lamp-info);--lamp-glow:var(--glow-info);}
 .ov-lamp--blink{animation:ov-blink 1s steps(1,end) infinite;}
 @keyframes ov-blink{0%,50%{opacity:1}50.01%,100%{opacity:.25}}
 
 /* ---- popovers and tooltips -------------------------------------------------------------------- */
-.ov-card{position:fixed;background:var(--face);box-shadow:${BEV_RAISED},${BEV_DROP};color:var(--ink);}
-.ov-popover{padding:6px 8px;max-width:280px;}
-.ov-popover--tip{padding:3px 6px;background:var(--face-2);font-size:10px;}
-.ov-arrow{position:absolute;width:${ARROW_PX * 2}px;height:${ARROW_PX * 2}px;background:var(--face);}
+.ov-card{position:fixed;background:var(--panel);border:var(--border-edge);
+  border-radius:var(--r-2);box-shadow:var(--elev-float);color:var(--ink);}
+.ov-popover{padding:8px 10px;max-width:280px;}
+.ov-popover--tip{padding:4px 7px;background:var(--panel-lo);border-color:var(--edge-soft);
+  color:var(--ink-2);font-size:var(--fs-11);}
+.ov-popover--tip .ov-arrow{background:var(--panel-lo);}
+.ov-arrow{position:absolute;width:${ARROW_PX * 2}px;height:${ARROW_PX * 2}px;background:var(--panel);}
 .ov-arrow--top{clip-path:polygon(0 0,100% 0,50% 100%);}
 .ov-arrow--bottom{clip-path:polygon(50% 0,100% 100%,0 100%);}
 .ov-arrow--left{clip-path:polygon(0 0,100% 50%,0 100%);}
@@ -185,99 +218,138 @@ const BASE_CSS = `@layer chromaskid-overlay, chromaskid-onboarding;
 
 /* ---- modal ------------------------------------------------------------------------------------ */
 .ov-modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;
-  flex-direction:column;max-width:min(92vw,560px);max-height:86vh;background:var(--face);
-  box-shadow:${BEV_RAISED},${BEV_DROP};color:var(--ink);}
-.ov-modal__head{flex:0 0 auto;display:flex;align-items:center;gap:5px;height:22px;padding:0 2px 0 6px;
-  background:var(--face-2);box-shadow:inset 0 -1px 0 var(--bev-sh);
+  flex-direction:column;max-width:min(92vw,560px);max-height:86vh;background:var(--panel);
+  border:var(--border-edge);border-radius:var(--r-2);box-shadow:var(--elev-float);color:var(--ink);}
+.ov-modal__head{flex:0 0 auto;display:flex;align-items:center;gap:6px;height:26px;
+  padding:0 4px 0 10px;background:var(--surface-raised);border-bottom:var(--border-edge);
+  border-radius:var(--r-2) var(--r-2) 0 0;box-shadow:inset 0 1px 0 var(--spec);
   -webkit-user-select:none;user-select:none;}
-.ov-modal__title{margin:0;flex:1 1 auto;font:700 10px/1 var(--font-ui);letter-spacing:.04em;
-  text-transform:uppercase;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ov-modal__title{margin:0;flex:1 1 auto;font:600 var(--fs-12)/1 var(--font-ui);letter-spacing:.02em;
+  color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .ov-modal__close{margin-left:auto;}
-.ov-modal__body{flex:1 1 auto;overflow:auto;padding:8px;color:var(--ink);}
-.ov-modal__actions{flex:0 0 auto;display:flex;justify-content:flex-end;gap:6px;padding:6px 8px;
-  background:var(--face-2);box-shadow:inset 0 1px 0 var(--bev-hi);}
+.ov-modal__body{flex:1 1 auto;overflow:auto;padding:10px 12px;color:var(--ink);}
+.ov-modal__actions{flex:0 0 auto;display:flex;justify-content:flex-end;gap:6px;padding:8px 10px;
+  background:var(--panel-lo);border-top:var(--border-edge);
+  border-radius:0 0 var(--r-2) var(--r-2);}
 .ov-root input[type="text"],.ov-root input[type="search"],.ov-root input[type="number"],
 .ov-root input:not([type]),.ov-root select,.ov-root textarea{
-  padding:2px 4px;background:var(--fld-bg);color:var(--fld-pv);border:0;box-shadow:${BEV_SUNKEN};
-  font:400 11px/1.4 var(--font-num);font-variant-numeric:tabular-nums lining-nums;}
+  padding:3px 6px;background:var(--fld-bg);color:var(--fld-pv);border:var(--border-field);
+  border-radius:var(--r-2);box-shadow:var(--elev-sunken);
+  font:400 var(--fs-12)/1.4 var(--font-num);font-variant-numeric:tabular-nums lining-nums;}
+.ov-root input:focus,.ov-root select:focus,.ov-root textarea:focus{border-color:var(--accent);}
 
-/* ---- toasts: small sunken strips with a severity lamp ------------------------------------------ */
-.ov-toasts{position:fixed;right:8px;bottom:30px;display:flex;flex-direction:column-reverse;gap:4px;
-  max-width:min(92vw,340px);pointer-events:none;}
-.ov-toast{pointer-events:auto;display:flex;align-items:center;gap:6px;padding:3px 3px 3px 6px;
-  background:var(--face-2);box-shadow:${BEV_SUNKEN};font-size:11px;color:var(--ink);}
+/* ---- toasts: slim dark cards with a 3px severity stripe ---------------------------------------- */
+.ov-toasts{position:fixed;right:10px;bottom:32px;display:flex;flex-direction:column-reverse;gap:6px;
+  max-width:min(92vw,360px);pointer-events:none;}
+.ov-toast{position:relative;pointer-events:auto;display:flex;align-items:center;gap:8px;
+  min-height:26px;padding:5px 4px 5px 13px;background:var(--panel);
+  border:var(--border-edge);border-radius:var(--r-2);box-shadow:var(--elev-float);
+  font-size:var(--fs-11);color:var(--ink);}
+.ov-toast::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
+  border-radius:var(--r-2) 0 0 var(--r-2);background:var(--info);}
+.ov-toast--warn::before{background:var(--warn);}
+.ov-toast--blocked::before{background:var(--alarm);}
 .ov-toast__msg{flex:1 1 auto;min-width:0;}
-.ov-toast__count{flex:0 0 auto;font:700 10px/1 var(--font-num);color:var(--ink-2);
-  font-variant-numeric:tabular-nums;}
+.ov-toast__count{flex:0 0 auto;padding:0 5px;background:var(--fld-bg);
+  border:var(--border-field);border-radius:var(--r-2);color:var(--ink-2);
+  font:500 var(--fs-10)/16px var(--font-num);font-variant-numeric:tabular-nums;}
 
 /* ---- coach marks ------------------------------------------------------------------------------ */
-.ov-coach{max-width:320px;padding:0;}
-.ov-coach__body-wrap{padding:8px;}
-.ov-coach__step{display:inline-block;margin:0 0 4px;padding:1px 4px;background:var(--fld-bg);
-  box-shadow:${BEV_SUNKEN};font:700 10px/1.3 var(--font-num);color:var(--fld-sp);}
-.ov-coach__title{margin:0 0 4px;font:700 11px/1.3 var(--font-ui);color:var(--ink);}
-.ov-coach__body{margin:0;font-size:11px;color:var(--ink-2);white-space:pre-line;}
-.ov-coach__actions{display:flex;align-items:center;gap:6px;padding:6px 8px;background:var(--face-2);
-  box-shadow:inset 0 1px 0 var(--bev-hi);}
-.ov-coach__dots{display:flex;gap:3px;margin-right:auto;}
-.ov-coach__dot{width:6px;height:6px;background:var(--bev-sh);}
-.ov-coach__dot--on{background:var(--fld-sp);}
+.ov-coach{max-width:330px;padding:0;}
+.ov-coach__body-wrap{padding:10px 12px;}
+.ov-coach__step{display:inline-block;margin:0 0 5px;padding:1px 5px;background:var(--panel-lo);
+  border:var(--border-soft);border-radius:var(--r-2);
+  font:500 var(--fs-10)/1.5 var(--font-num);color:var(--fld-sp);}
+.ov-coach__title{margin:0 0 4px;font:600 var(--fs-12)/1.3 var(--font-ui);color:var(--ink);}
+.ov-coach__body{margin:0;font-size:var(--fs-11);color:var(--ink-2);white-space:pre-line;}
+.ov-coach__actions{display:flex;align-items:center;gap:6px;padding:7px 10px;
+  background:var(--panel-lo);border-top:var(--border-edge);
+  border-radius:0 0 var(--r-2) var(--r-2);}
+.ov-coach__dots{display:flex;gap:4px;margin-right:auto;}
+.ov-coach__dot{--lamp-c:var(--lamp-off);width:6px;height:6px;border-radius:50%;
+  background:var(--lamp-c);}
+.ov-coach__dot--on{--lamp-c:var(--accent);}
 
 /* ---- cheat sheet ------------------------------------------------------------------------------ */
-.ov-cheat{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px 18px;}
+.ov-cheat{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px 20px;}
 .ov-cheat__group{break-inside:avoid;}
-.ov-cheat__gt{margin:0 0 3px;font:700 9px/1.4 var(--font-ui);letter-spacing:.04em;
+.ov-cheat__gt{margin:0 0 4px;font:600 var(--fs-10)/1.4 var(--font-ui);letter-spacing:.02em;
   text-transform:uppercase;color:var(--ink-2);}
-.ov-cheat__row{display:flex;align-items:center;gap:8px;padding:1px 0;}
-.ov-cheat__key{flex:0 0 auto;min-width:76px;padding:1px 4px;background:var(--face);
-  box-shadow:${BEV_RAISED};font:700 10px/1.5 var(--font-num);color:var(--ink);text-align:center;}
-.ov-cheat__label{flex:1 1 auto;font-size:11px;color:var(--ink-2);}
+.ov-cheat__row{display:flex;align-items:center;gap:8px;padding:2px 0;}
+.ov-cheat__key{flex:0 0 auto;min-width:80px;padding:1px 6px;background:var(--surface-raised);
+  border:var(--border-edge);border-radius:var(--r-2);box-shadow:var(--elev-raised);
+  font:500 var(--fs-10)/1.6 var(--font-num);color:var(--ink);text-align:center;}
+.ov-cheat__label{flex:1 1 auto;font-size:var(--fs-11);color:var(--ink-2);}
 
 /* ---- glossary card ---------------------------------------------------------------------------- */
-.ov-gloss__term{margin:0 0 3px;font:700 11px/1.3 var(--font-ui);color:var(--ink);}
-.ov-gloss__lead{margin:0 0 5px;color:var(--ink);}
-.ov-gloss__h{margin:5px 0 1px;font:700 9px/1.4 var(--font-ui);letter-spacing:.04em;
+.ov-gloss__term{margin:0 0 4px;font:600 var(--fs-12)/1.3 var(--font-ui);color:var(--ink);}
+.ov-gloss__lead{margin:0 0 6px;color:var(--ink);}
+.ov-gloss__h{margin:7px 0 2px;font:600 var(--fs-10)/1.4 var(--font-ui);letter-spacing:.02em;
   text-transform:uppercase;color:var(--ink-2);}
 .ov-gloss__p{margin:0;color:var(--ink-2);}
-.ov-gloss__see{display:flex;flex-wrap:wrap;gap:3px;margin-top:6px;}
-.ov-gloss__chip{padding:1px 5px;background:var(--face);border:0;box-shadow:${BEV_RAISED};
-  font:700 9px/1.5 var(--font-num);color:var(--ink-2);cursor:pointer;}
-.ov-gloss__chip:active{box-shadow:${BEV_SUNKEN};}
+.ov-gloss__see{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px;}
+.ov-gloss__chip{padding:1px 6px;background:var(--surface-raised);border:var(--border-edge);
+  border-radius:var(--r-2);font:500 var(--fs-10)/1.6 var(--font-num);color:var(--ink-2);
+  cursor:pointer;transition:color var(--dur-1) var(--ease-out),
+    border-color var(--dur-1) var(--ease-out);}
+.ov-gloss__chip:hover{color:var(--ink);border-color:var(--accent);}
+.ov-gloss__chip:active{background:var(--surface-pressed);}
 
-/* ---- FACEPLATE -------------------------------------------------------------------------------- */
+/* ---- FACEPLATE: the signature widget ------------------------------------------------------------
+   Scale column, left to right: marker labels | bar | axis rule + ticks | numeric scale. */
 .ov-fp{width:${FP_W}px;}
-.ov-fp__desc{flex:0 0 auto;padding:2px 5px;background:var(--face-2);
-  box-shadow:inset 0 -1px 0 var(--bev-sh);font:700 9px/1.5 var(--font-ui);letter-spacing:.04em;
-  text-transform:uppercase;color:var(--ink-2);white-space:nowrap;overflow:hidden;
-  text-overflow:ellipsis;}
-.ov-fp__main{flex:1 1 auto;display:flex;gap:8px;padding:6px;}
-.ov-fp__scale{position:relative;flex:0 0 auto;width:64px;height:${FP_BAR_H}px;}
-.ov-fp__bar{position:absolute;left:0;top:0;width:26px;height:100%;background:var(--fld-bg);
-  box-shadow:${BEV_SUNKEN};overflow:hidden;}
-.ov-fp__fill{position:absolute;left:${FP_BAR_PAD}px;right:${FP_BAR_PAD}px;bottom:${FP_BAR_PAD}px;
-  height:0;background:var(--fld-pv);}
-.ov-fp__fill--alarm{background:var(--fld-alarm);}
-.ov-fp__fill--out{background:var(--fld-out);}
-.ov-fp__fill--stale{background:var(--fld-stale);}
-.ov-fp__mk{position:absolute;left:0;width:34px;height:${FP_MARK_H}px;background:var(--fld-alarm);}
-.ov-fp__mk--sp{background:var(--fld-sp);}
-.ov-fp__mk--warn{background:var(--lamp-warn);}
-.ov-fp__tick{position:absolute;left:38px;font:400 9px/1 var(--font-num);color:var(--ink-2);
-  font-variant-numeric:tabular-nums;white-space:nowrap;}
-.ov-fp__side{flex:1 1 auto;display:flex;flex-direction:column;gap:5px;min-width:0;}
-.ov-fp__row{display:flex;flex-direction:column;gap:1px;}
-.ov-fp__modes{display:flex;align-items:center;gap:8px;padding:3px 5px;background:var(--face-3);
-  box-shadow:${BEV_SUNKEN};}
-.ov-fp__mode{display:flex;align-items:center;gap:4px;font:700 9px/1 var(--font-ui);
-  letter-spacing:.04em;color:var(--ink-off);}
-.ov-fp__mode--on{color:var(--ink);}
-.ov-fp__acts{flex:0 0 auto;display:flex;align-items:center;gap:4px;min-height:28px;padding:3px 6px;
-  background:var(--face-2);box-shadow:inset 0 1px 0 var(--bev-hi);}
-.ov-fp__q{margin-left:auto;display:flex;align-items:center;gap:4px;font:700 9px/1 var(--font-ui);
-  letter-spacing:.04em;color:var(--ink-2);}
+.ov-fp__desc{flex:0 0 auto;padding:3px 8px;background:var(--panel);
+  border-bottom:var(--border-soft);font:500 var(--fs-10)/1.5 var(--font-ui);letter-spacing:.02em;
+  color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ov-fp__main{flex:1 1 auto;display:flex;gap:8px;padding:8px;}
+.ov-fp__scale{position:relative;flex:0 0 auto;width:${FP_SCALE_W}px;height:${FP_BAR_H}px;}
+.ov-fp__bar{position:absolute;left:${FP_BAR_X}px;top:0;width:${FP_BAR_W}px;height:100%;
+  background:var(--fld-bg);border:var(--border-field);border-radius:var(--r-2);
+  box-shadow:var(--elev-sunken);overflow:hidden;}
+.ov-fp__fill{--bar-c:var(--accent);position:absolute;left:${FP_BAR_PAD}px;right:${FP_BAR_PAD}px;
+  bottom:${FP_BAR_PAD}px;height:0;border-radius:1px;
+  background:linear-gradient(180deg,color-mix(in srgb,var(--bar-c) 82%,var(--ink)),var(--bar-c));}
+.ov-fp__fill--alarm{--bar-c:var(--fld-alarm);}
+.ov-fp__fill--out{--bar-c:var(--fld-out);}
+.ov-fp__fill--stale{--bar-c:var(--fld-stale);}
+.ov-fp__axis{position:absolute;left:${FP_AXIS_X}px;top:0;width:1px;height:100%;background:var(--edge);}
+.ov-fp__tickm{position:absolute;left:${FP_AXIS_X}px;width:${FP_TICK_W}px;height:1px;
+  background:var(--edge);}
+/* Scale ticks are the only numerals on the faceplate an operator reads against the SCALE
+   rather than against the bar, so they take --ink-2. --ink-3 is the disabled step and lands
+   at 2.8:1 on graphite and 2.9:1 on steel — under 4.5 on both, for text that has to be read. */
+.ov-fp__tick{position:absolute;left:${FP_TICK_X}px;font:400 var(--fs-9)/1 var(--font-num);
+  color:var(--ink-2);font-variant-numeric:tabular-nums;white-space:nowrap;}
+/* The MARK and its LABEL split here. The mark is a solid 2px bar — a lamp, so it keeps the
+   saturated --alarm/--warn fill. The label is 8px text beside it, so it takes the matching
+   *-ink step, which is exactly what those tokens exist for. */
+.ov-fp__mk{--mk-c:var(--alarm);position:absolute;left:${FP_BAR_X}px;width:${FP_BAR_W + 3}px;
+  height:${FP_MARK_H}px;background:var(--mk-c);}
+.ov-fp__mkl{--mk-c:var(--alarm-ink);position:absolute;left:0;width:${FP_LBL_W}px;text-align:right;
+  font:600 var(--fs-8)/1 var(--font-num);letter-spacing:.02em;color:var(--mk-c);}
+.ov-fp__mk--sp{--mk-c:var(--fld-sp);}
+.ov-fp__mkl--sp{--mk-c:var(--fld-sp);}
+.ov-fp__mk--warn{--mk-c:var(--warn);}
+.ov-fp__mkl--warn{--mk-c:var(--warn-ink);}
+.ov-fp__side{flex:1 1 auto;display:flex;flex-direction:column;gap:6px;min-width:0;}
+.ov-fp__row{display:flex;flex-direction:column;gap:2px;}
+.ov-fp__modes{display:flex;gap:2px;padding:2px;background:var(--panel-lo);
+  border:var(--border-soft);border-radius:var(--r-2);}
+/* AUTO|MAN: the unselected segment must stay READABLE — it is the mode the loop is not in,
+   which is information. --ink-2 against --panel-lo, not the --ink-3 disabled step. */
+.ov-fp__mode{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap:4px;height:18px;
+  border-radius:1px;font:600 var(--fs-10)/1 var(--font-ui);letter-spacing:.02em;color:var(--ink-2);}
+.ov-fp__mode--on{background:var(--surface-raised);color:var(--ink);
+  box-shadow:inset 0 0 0 1px var(--edge),var(--elev-raised);}
+.ov-fp__acts{flex:0 0 auto;display:flex;align-items:center;gap:4px;min-height:30px;padding:4px 6px;
+  background:var(--panel-lo);border-top:var(--border-edge);
+  border-radius:0 0 var(--r-2) var(--r-2);}
+.ov-fp__q{margin-left:auto;display:flex;align-items:center;gap:5px;letter-spacing:.02em;
+  font:500 var(--fs-10)/1 var(--font-ui);color:var(--ink-2);}
 
 @media (prefers-reduced-motion:reduce){
   .ov-lamp--blink{animation:none;}
+  .ov-ib,.ov-btn,.ov-gloss__chip{transition:none;}
 }
 }`;
 
@@ -371,14 +443,15 @@ export function overlayIcon(name, size) {
 }
 
 /**
- * Build a beveled icon-only button. Icon-only controls need both `title` and `aria-label`, so this
- * writes both from one string and there is no way to forget one.
+ * Build an icon-only button: 1px edge, subtle vertical gradient, 2px radius. Icon-only controls need
+ * both `title` and `aria-label`, so this writes both from one string and there is no way to forget
+ * one.
  *
  * @param {object} opts
  * @param {string|Node} opts.icon  An {@link overlayIcon} name, or a ready-made node.
  * @param {string} opts.title  The tooltip and the accessible name. Required.
  * @param {() => void} opts.onClick
- * @param {boolean} [opts.large=false]  22×22 instead of 16×16.
+ * @param {boolean} [opts.large=false]  22×22 instead of 18×18.
  * @param {boolean} [opts.disabled=false]
  * @param {string} [opts.className]  Extra class.
  * @returns {HTMLButtonElement}
@@ -387,7 +460,7 @@ export function iconButton(opts) {
   const o = opts || {};
   const node = typeof o.icon === 'object' && o.icon && typeof o.icon.nodeType === 'number'
     ? o.icon
-    : overlayIcon(o.icon, o.large ? 14 : 11);
+    : overlayIcon(o.icon, o.large ? 14 : 12);
   const btn = h('button', {
     type: 'button',
     class: 'ov-ib' + (o.large ? ' ov-ib--lg' : '') + (o.className ? ' ' + o.className : ''),
@@ -400,15 +473,18 @@ export function iconButton(opts) {
 }
 
 /**
- * Build a sunken label box: a tag label above (optional), the value right-aligned in tabular
- * numerals, and the engineering unit beside it at 80 % size.
+ * Build a recessed value field: a short label above (optional), the value right-aligned in tabular
+ * numerals, and the engineering unit beside it in the dimmer unit ink.
+ *
+ * White PV digits on a dark recessed field are the single detail that dates this interface to the
+ * 2010s rather than the 1990s; the amber SP field beside it is the second.
  *
  * @param {object} opts
- * @param {string} [opts.label]  The ISA tag or short caption above the box, 9 px uppercase.
+ * @param {string} [opts.label]  The ISA tag or short caption above the field, 10 px.
  * @param {'pv'|'sp'|'out'} [opts.tone='pv']  Which digit colour to use.
  * @param {string} [opts.eu]  Engineering unit suffix.
  * @param {string} [opts.value]  Initial text.
- * @param {boolean} [opts.big=false]  16 px digits instead of 13 px.
+ * @param {boolean} [opts.big=false]  15 px digits instead of 13 px.
  * @returns {{el:HTMLElement, box:HTMLElement, valueEl:HTMLElement, euEl:HTMLElement}}
  *          `el` is the label+box group; write through `valueEl` / `euEl`.
  */
@@ -427,7 +503,8 @@ export function labelBox(opts) {
 }
 
 /**
- * Build a round glassy status lamp.
+ * Build a round status lamp: a 1px dark ring, a soft top highlight, and — when it is lit — a glow of
+ * its own colour at 25 %. Unlit is a flat edge grey, not a black hole.
  *
  * @param {'off'|'run'|'warn'|'alarm'|'info'} [state='off']
  * @param {object} [opts]
@@ -847,7 +924,7 @@ function mountContent(target, content) {
   else target.appendChild(document.createTextNode(String(content)));
 }
 
-/** Build the beveled title strip shared by every window-class surface. */
+/** Build the gradient title strip shared by every window-class surface. */
 function titleStrip(titleText, opts) {
   const o = opts || {};
   const strip = h('div', {
@@ -880,8 +957,8 @@ function titleStrip(titleText, opts) {
  * @param {number} [opts.maxWidth=280]  Max width in px.
  * @param {string} [opts.role='dialog']  Use `'tooltip'` for a purely descriptive popover.
  * @param {string} [opts.className]  Extra class on the card, for view-specific styling.
- * @param {boolean} [opts.arrow=false]  Draw the 6 px arrow. Off by default: a classic HMI popover is
- *        a plain beveled box.
+ * @param {boolean} [opts.arrow=false]  Draw the 6 px arrow. Off by default: an HMI popover is a
+ *        plain bordered card.
  * @param {boolean} [opts.closeOnOutside=true]
  * @param {boolean} [opts.dismissible=true]  `false` means `Esc` will not close it.
  * @param {(handle:OverlayHandle) => void} [opts.onDismiss]
@@ -1060,8 +1137,9 @@ export function showGlossaryPopover(host, opts) {
  * Build one dialog action button.
  *
  * A dialog action may be icon-only (`icon`, no `label`), icon + label, or label-only. The label is
- * rendered in 10 px uppercase, which is what a classic HMI dialog button carries; the icon-only
- * variant is the one the process screens themselves use.
+ * rendered as the caller wrote it — sentence case, 11 px — and the variant is carried by the face:
+ * accent for primary, alarm red for danger, the plain gradient for everything else. A danger button
+ * needs no lamp beside its label; the red face is the signal.
  */
 function actionButton(spec, handle) {
   const variant = spec.variant === 'primary' || spec.variant === 'danger' ? spec.variant : 'ghost';
@@ -1079,8 +1157,7 @@ function actionButton(spec, handle) {
   }
 
   const kids = [];
-  if (variant === 'danger') kids.push(statusLamp('alarm'));
-  else if (spec.icon) kids.push(h('span', { class: 'ov-btn__i' }, overlayIcon(spec.icon, 11)));
+  if (spec.icon) kids.push(h('span', { class: 'ov-btn__i' }, overlayIcon(spec.icon, 12)));
   kids.push(h('span', { class: 'ov-btn__t' }, label));
 
   const btn = h('button', {
@@ -1220,11 +1297,12 @@ export function showConfirm(host, opts) {
  * 7. TOASTS
  * ===============================================================================================*/
 
-/** Severity lamp colour per toast kind. */
-const TOAST_LAMP = { info: 'info', warn: 'warn', blocked: 'alarm' };
+/** The severity word a screen reader hears; the stripe is what the eye gets. */
+const TOAST_SEVERITY = { info: 'Information', warn: 'Warning', blocked: 'Blocked' };
 
 /**
- * Show a transient message in the bottom-right stack, as a small sunken strip with a severity lamp.
+ * Show a transient message in the bottom-right stack, as a slim dark card with a 3 px severity
+ * stripe down its left edge.
  *
  * This is the surface every `{ok:false, reason}` from `core/sim.js` goes through: a blocked interlock
  * is **explained**, never silently refused. Repeating the same message re-arms the timer and adds a
@@ -1267,7 +1345,9 @@ export function showToast(host, opts) {
     class: 'ov-toast ov-toast--' + kind,
     role: kind === 'blocked' ? 'alert' : undefined,
   },
-  statusLamp(TOAST_LAMP[kind], { title: kind === 'blocked' ? 'Blocked' : kind }),
+  // The stripe is decorative to assistive tech, so the severity is spoken instead: the live region
+  // reads the card's text, and without this a blocked interlock would be announced as bare prose.
+  h('span', { class: 'ov-sr' }, TOAST_SEVERITY[kind] + ': '),
   h('span', { class: 'ov-toast__msg' }, message),
   countEl);
 
@@ -1311,7 +1391,7 @@ function spotlightClip(rect, pad) {
 
 /**
  * Show one step of the guided tour: a full-screen dim with a cut-out around the target, plus a
- * positioned beveled card with Back / Next / Skip icon buttons and progress squares.
+ * positioned card with Back / Next / Skip icon buttons and progress dots.
  *
  * A `null` `targetEl` dims the whole viewport and centres the card, which is what the opening and
  * closing steps of a tour want. `Esc` skips the tour.
@@ -1512,8 +1592,10 @@ export function showCheatSheet(host, keymap) {
 /**
  * @typedef {Object} FaceplateLimit
  * @property {number} value  Where the marker sits, in the same units as `range`.
- * @property {'alarm'|'warn'|'hi'|'lo'|'hihi'|'lolo'} [kind='alarm']  Marker colour class.
- * @property {string} [label]  Tooltip text for the marker.
+ * @property {'alarm'|'warn'|'hi'|'lo'|'hihi'|'lolo'} [kind='alarm']  Sets the two-character label
+ *           printed beside the tick (`A`, `W`, `HI`, `LO`, `HH`, `LL`) and its colour — amber for
+ *           `warn`, alarm red for the rest.
+ * @property {string} [label]  Tooltip text for the marker. The value is appended to it.
  */
 
 /**
@@ -1561,21 +1643,41 @@ function scalePos(v, lo, hi) {
   return f < 0 ? 0 : (f > 1 ? 1 : f);
 }
 
-/** Normalise the `limits` array into `{value, kind, label}` records. */
+/** The two-character abbreviation printed beside a limit tick. The gutter is 16 px — no more fits. */
+const LIMIT_MARK = { alarm: 'A', warn: 'W', hi: 'HI', lo: 'LO', hihi: 'HH', lolo: 'LL' };
+
+/** The tooltip a limit tick carries when the caller supplied no `label`. */
+const LIMIT_TITLE = {
+  alarm: 'Alarm limit', warn: 'Warn limit', hi: 'High limit', lo: 'Low limit',
+  hihi: 'High-high limit', lolo: 'Low-low limit',
+};
+
+/**
+ * Normalise the `limits` array into `{value, kind, tone, label}` records.
+ *
+ * `kind` survives as written so the marker can print `HI` / `LO` / `HH` / `LL` beside its tick;
+ * `tone` collapses it to the two colours a limit may take — amber for a warning, red for everything
+ * else. An unrecognised kind reads as a plain alarm rather than disappearing.
+ */
 function normaliseLimits(limits) {
   const out = [];
   const list = Array.isArray(limits) ? limits : [];
   for (let i = 0; i < list.length; i += 1) {
     const raw = list[i];
     if (typeof raw === 'number') {
-      if (Number.isFinite(raw)) out.push({ value: raw, kind: 'alarm', label: '' });
+      if (Number.isFinite(raw)) out.push({ value: raw, kind: 'alarm', tone: 'alarm', label: '' });
       continue;
     }
     if (!raw || typeof raw !== 'object') continue;
     const v = typeof raw.value === 'number' ? raw.value : Number(raw.value);
     if (!Number.isFinite(v)) continue;
-    const k = raw.kind === 'warn' ? 'warn' : 'alarm';
-    out.push({ value: v, kind: k, label: typeof raw.label === 'string' ? raw.label : '' });
+    const k = LIMIT_MARK[raw.kind] ? raw.kind : 'alarm';
+    out.push({
+      value: v,
+      kind: k,
+      tone: k === 'warn' ? 'warn' : 'alarm',
+      label: typeof raw.label === 'string' ? raw.label : '',
+    });
   }
   return out;
 }
@@ -1691,13 +1793,15 @@ function wireFaceplateDrag(handle, grip, keyEl) {
 }
 
 /**
- * Open a faceplate for one instrument tag: the small draggable beveled window this whole interface
- * is built around.
+ * Open a faceplate for one instrument tag: the small draggable panel this whole interface is built
+ * around.
  *
- * Contents, top to bottom: an ISA-tagged title bar with a close icon; the descriptor strip; a
- * vertical bargraph of PV against `range` with the SP and every alarm limit drawn as markers on its
- * scale; PV and SP label boxes; AUTO / MAN indicator lamps; and the tag's actions as icon buttons.
- * Nothing on it is a sentence — every explanation is a `title` tooltip.
+ * Contents, top to bottom: a gradient title bar carrying the ISA tag, the move grip and the close
+ * icon; the descriptor strip; a vertical bargraph of PV against `range`, with a thin scale beside it
+ * and the SP and every alarm limit drawn as ticks with two-character labels; the recessed PV field
+ * in white digits and the SP field in amber; the AUTO | MAN segmented mode indicator; and the tag's
+ * actions as icon buttons over a recessed footer. Nothing on it is a sentence — every explanation is
+ * a `title` tooltip.
  *
  * The faceplate is **modeless**: it does not dim the screen, does not make the application inert and
  * does not trap focus, because an operator watches the P&ID while a faceplate is open. `Esc` closes
@@ -1753,36 +1857,55 @@ export function showFaceplate(host, spec) {
 
   if (s.desc) win.appendChild(h('div', { class: 'ov-fp__desc' }, s.desc));
 
-  /* ---- bargraph ----------------------------------------------------------------------------- */
+  /* ---- bargraph ------------------------------------------------------------------------------
+     The bar is a recessed well with a gradient fill; beside it a 1 px axis carries three numeric
+     ticks, and every limit is a thin tick across the bar with a two-character label in the gutter.
+     Painting order is deliberate: scale, then limits, then SP — the setpoint is never hidden. */
   const fillEl = h('div', { class: 'ov-fp__fill' });
   const barEl = h('div', { class: 'ov-fp__bar' }, fillEl);
-  const scaleEl = h('div', { class: 'ov-fp__scale' }, barEl);
+  const scaleEl = h('div', { class: 'ov-fp__scale' }, barEl, h('div', { class: 'ov-fp__axis' }));
+
+  const ticks = [hi, lo + (hi - lo) / 2, lo];
+  for (let i = 0; i < ticks.length; i += 1) {
+    const pos = scalePos(ticks[i], lo, hi);
+    scaleEl.appendChild(h('div', {
+      class: 'ov-fp__tickm',
+      style: { bottom: markBottom(pos, 1) + 'px' },
+    }));
+    scaleEl.appendChild(h('div', {
+      class: 'ov-fp__tick',
+      style: { bottom: markBottom(pos, 9) + 'px' },
+    }, fmtFixed(ticks[i], decimals)));
+  }
+
+  for (let i = 0; i < limits.length; i += 1) {
+    const lim = limits[i];
+    const pos = scalePos(lim.value, lo, hi);
+    const title = (lim.label || LIMIT_TITLE[lim.kind]) + ' — ' + fmtFixed(lim.value, decimals);
+    scaleEl.appendChild(h('div', {
+      class: 'ov-fp__mk ov-fp__mk--' + lim.tone,
+      title,
+      style: { bottom: markBottom(pos, FP_MARK_H) + 'px' },
+    }));
+    scaleEl.appendChild(h('div', {
+      class: 'ov-fp__mkl ov-fp__mkl--' + lim.tone,
+      title,
+      style: { bottom: markBottom(pos, 8) + 'px' },
+    }, LIMIT_MARK[lim.kind]));
+  }
 
   const spMark = h('div', {
     class: 'ov-fp__mk ov-fp__mk--sp',
     title: 'Setpoint',
     style: { display: 'none', bottom: markBottom(0, FP_MARK_H) + 'px' },
   });
+  const spMarkLabel = h('div', {
+    class: 'ov-fp__mkl ov-fp__mkl--sp',
+    title: 'Setpoint',
+    style: { display: 'none', bottom: markBottom(0, 8) + 'px' },
+  }, 'SP');
   scaleEl.appendChild(spMark);
-
-  for (let i = 0; i < limits.length; i += 1) {
-    const lim = limits[i];
-    scaleEl.appendChild(h('div', {
-      class: 'ov-fp__mk' + (lim.kind === 'warn' ? ' ov-fp__mk--warn' : ''),
-      title: lim.label || (lim.kind === 'warn' ? 'Warn limit' : 'Alarm limit')
-        + ' ' + fmtFixed(lim.value, decimals),
-      style: { bottom: markBottom(scalePos(lim.value, lo, hi), FP_MARK_H) + 'px' },
-    }));
-  }
-
-  const ticks = [hi, lo + (hi - lo) / 2, lo];
-  for (let i = 0; i < ticks.length; i += 1) {
-    const pos = scalePos(ticks[i], lo, hi);
-    scaleEl.appendChild(h('div', {
-      class: 'ov-fp__tick',
-      style: { bottom: markBottom(pos, 9) + 'px' },
-    }, fmtFixed(ticks[i], decimals)));
-  }
+  scaleEl.appendChild(spMarkLabel);
 
   /* ---- readouts ----------------------------------------------------------------------------- */
   const pv = labelBox({ label: 'PV', tone: 'pv', big: true });
@@ -1797,11 +1920,18 @@ export function showFaceplate(host, spec) {
   let autoWrap = null;
   let manWrap = null;
   if (hasMode) {
+    // A segmented control, not two 3D pushbuttons: the live segment is raised out of a recessed
+    // track. It indicates rather than commands — the mode is changed from the action bar below —
+    // so `aria-current` carries to assistive tech what the raised segment carries to the eye.
     autoLamp = statusLamp('off');
     manLamp = statusLamp('off');
     autoWrap = h('span', { class: 'ov-fp__mode' }, autoLamp, 'AUTO');
     manWrap = h('span', { class: 'ov-fp__mode' }, manLamp, 'MAN');
-    side.appendChild(h('div', { class: 'ov-fp__modes' }, autoWrap, manWrap));
+    side.appendChild(h('div', {
+      class: 'ov-fp__modes',
+      role: 'group',
+      'aria-label': 'Controller mode',
+    }, autoWrap, manWrap));
   }
 
   win.appendChild(h('div', { class: 'ov-fp__main' }, scaleEl, side));
@@ -1909,10 +2039,13 @@ export function showFaceplate(host, spec) {
     const hasSp = typeof r.sp === 'number' && Number.isFinite(r.sp);
     sp.el.style.display = hasSp ? '' : 'none';
     spMark.style.display = hasSp ? '' : 'none';
+    spMarkLabel.style.display = hasSp ? '' : 'none';
     if (hasSp) {
       setText(sp.valueEl, fmtFixed(r.sp, decimals));
       setText(sp.euEl, r.eu || '');
-      spMark.style.bottom = markBottom(scalePos(r.sp, lo, hi), FP_MARK_H) + 'px';
+      const spPos = scalePos(r.sp, lo, hi);
+      spMark.style.bottom = markBottom(spPos, FP_MARK_H) + 'px';
+      spMarkLabel.style.bottom = markBottom(spPos, 8) + 'px';
     }
 
     const pos = scalePos(r.pv, lo, hi);
@@ -1928,6 +2061,8 @@ export function showFaceplate(host, spec) {
       setLamp(manLamp, isMan ? 'warn' : 'off');
       cls(autoWrap, 'ov-fp__mode--on', !isMan);
       cls(manWrap, 'ov-fp__mode--on', isMan);
+      setAttr(autoWrap, 'aria-current', isMan ? null : 'true');
+      setAttr(manWrap, 'aria-current', isMan ? 'true' : null);
     }
 
     setLamp(qualityLamp, alarm ? 'alarm' : (stale ? 'warn' : 'run'), alarm);

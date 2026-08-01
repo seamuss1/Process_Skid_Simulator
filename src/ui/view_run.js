@@ -1,5 +1,5 @@
 /**
- * @file src/ui/view_run.js — the main operator screen, in the FT-CLASSIC idiom.
+ * @file src/ui/view_run.js — the main operator screen, in the HMI-2012 idiom.
  *
  * LAYER: `ui-panels`. This module COMPOSES `ui/pid.js` and `ui/chart.js` and re-implements
  * neither: the schematic brings its own symbols and interactions, the trend brings its own
@@ -8,12 +8,16 @@
  *
  * SCREEN, top to bottom:
  *   1. P&ID panel      `flex: 1 1 0` — it claims every pixel the fixed bands leave behind.
- *   2. Fraction strip  waste + 12 ports, beveled cells that fill as they collect, active one lamped.
- *   3. Splitter        6 px, sunken, `role="separator"`, drag / arrow keys / three snap points.
- *   4. Phase rail      one segment per method block, active one lit, progress fill.
+ *   2. Fraction strip  waste + 12 ports, recessed cells that fill with product green as they
+ *                      collect, the port under the head lamped and ringed.
+ *   3. Splitter        6 px, `role="separator"`, drag / arrow keys / three snap points.
+ *   4. Phase rail      a segmented progress bar: one block per segment, a service-tint cap, an
+ *                      accent fill that sweeps across the active segment.
  *   5. Trend panel     the chromatogram, holding `ui/chart.js` whole.
- *   6. Status strip    FIC-101, AIC-101, PT-101, PDT-101, UV-101, CE-101, AE-101, TOTAL CV and the
- *                      run-state pill — mounted only when the shell has not already built band 5.
+ *
+ * There is NO bottom value strip. It duplicated numbers that already sit beside their instruments
+ * on the schematic and in the trend's pen rail, and it cost the two panels that matter their
+ * height. Run state and quality indication live in the title bar, beside the alarm summary.
  *
  * BUS: this view listens, it does not drive. `key-action` carries the shortcuts `ui/app.js` does
  * not handle itself; `request-pane` carries `{ pane: 'pid' | 'trend' }` from the two nav buttons
@@ -24,11 +28,13 @@
  * `aria-label`; every number lives in a label box carrying its ISA tag and its engineering unit;
  * every explanation is a tooltip or a `data/glossary.js` popover.
  *
- * STYLES: the chrome is `styles/app.css`'s shared FT-CLASSIC vocabulary — `.rv-panel`, `.rv-hd`,
- * `.lbox`, `.tagblk`, `.lamp`, `.btn`, `.splitter`, `.statusstrip`, `.tb-sep`, `.rv-vial`,
- * `.rv-blk`, `.rv-rail`, `.rv-pid-host`, `.rv-chart-host`. This module injects only the screen's
- * own skeleton, inside a cascade layer, so every rule here loses to `styles/app.css` and the shell
- * stays the authority on how a label box or a lamp looks.
+ * STYLES: two blocks, and the split is deliberate.
+ *   · `@layer skid-run` holds the SKELETON — sizes and flex behaviour only. A layered declaration
+ *     always loses to an unlayered one, so `styles/app.css` stays free to re-lay-out the screen.
+ *   · The unlayered `.rv …` block holds the chrome this screen OWNS: the panel frames, the phase
+ *     rail, the fraction strip and the splitter. Those four are this module's brief, so they are
+ *     scoped under `.rv` and win on both specificity and layer order.
+ * Shared furniture — `.lbox`, `.tagblk`, `.lamp`, `.btn` — is still `styles/app.css`'s to define.
  */
 
 import * as fmt from './format.js';
@@ -36,7 +42,6 @@ import * as chartlib from './chart.js';
 import * as pidlib from './pid.js';
 import * as overlaylib from './overlay.js';
 import * as simlib from '../core/sim.js';
-import * as sensors from '../skid/sensors.js';
 import * as engine from '../skid/engine.js';
 import * as methodlib from '../skid/method.js';
 import { column, QF } from '../core/log.js';
@@ -52,33 +57,7 @@ const X_CHANNELS = Object.freeze({ volume: 'V_mL', time: 't_s', cv: 'V_CV' });
 /** X modes in the order the `x-axis-cycle` shortcut steps through them. */
 const X_MODES = Object.freeze(['volume', 'time', 'cv']);
 
-/**
- * The status strip: eight sunken label boxes, every value converted through the display-unit
- * boundary so the strip follows the user's unit preferences. `alarms` are the `config.alarms` ids
- * that turn the digits red; `sensor` selects the quality that turns them stale-grey.
- */
-const STATUS = Object.freeze([
-  { key: 'flow', tag: 'FIC-101', kind: 'flow', glossary: 'FLOW', sensor: null,
-    alarms: ['ALM-PMP-01', 'ALM-PMP-02', 'ALM-PMP-03'],
-    read: (c, r) => r.Q_actual_mLs, sp: (c, r) => r.Q_set_mLs },
-  { key: 'pctb', tag: 'AIC-101', kind: 'pct', glossary: 'PCTB', sensor: null, alarms: [],
-    read: (c, r) => r.pctB_actual, sp: (c, r) => r.pctB_set },
-  { key: 'p1', tag: 'PT-101', kind: 'pressure', glossary: 'P1', sensor: 'PRESS',
-    alarms: ['ALM-P1-01', 'ALM-P1-02'], read: (c, r) => r.press.P1disp_bar, sp: null },
-  { key: 'dp', tag: 'PDT-101', kind: 'pressure', glossary: 'DP', sensor: 'PRESS',
-    alarms: ['ALM-DP-01', 'ALM-DP-02', 'ALM-DP-03', 'ALM-DP-04'],
-    read: (c, r) => r.dP_bar, sp: null },
-  { key: 'uv', tag: 'UV-101', kind: 'abs', glossary: 'UV_280', sensor: 'UV',
-    alarms: ['ALM-UV-01', 'ALM-UV-02', 'WRN-UV-03'], read: (c, r) => r.uv.Afilt[0], sp: null },
-  { key: 'cond', tag: 'CE-101', kind: 'cond', glossary: 'COND', sensor: 'COND',
-    alarms: ['ALM-CND-01'], read: (c, r) => r.cond.kappaDisp_mScm, sp: null },
-  { key: 'ph', tag: 'AE-101', kind: 'ph', glossary: 'PH', sensor: 'PH',
-    alarms: ['ALM-PH-01', 'ALM-PH-02'], read: (c, r) => r.ph.pHfilt, sp: null },
-  { key: 'cv', tag: 'TOTAL', kind: 'cv', glossary: 'CV', sensor: null, alarms: [],
-    read: (c, r) => r.V_tot_mL, sp: null },
-]);
-
-/** Block-type → service slug, which picks the phase-rail fill colour. */
+/** Block-type → service slug, which picks the phase-rail segment's service cap. */
 const BLOCK_KIND = Object.freeze({
   EQUILIBRATION: 'equil', RE_EQUILIBRATION: 'equil', LOAD: 'load', WASH: 'wash',
   ELUTION_ISOCRATIC: 'elute', ELUTION_LINEAR: 'elute', ELUTION_STEP: 'elute',
@@ -108,12 +87,6 @@ const QF_LAMPS = Object.freeze([
   ['ELEC', QF.PH_ELECTRODE_DEGRADED, 'is-warn', 'pH electrode degraded'],
   ['PRS', QF.PRESS_SUSPECT, 'is-warn', 'Pressure signal suspect'],
 ]);
-
-/** Run state → the `state-pill` modifier `styles/app.css` colours the pill lamp with. */
-const STATE_PILL = Object.freeze({
-  IDLE: '', READY: 'is-warn', RUNNING: 'is-running', HELD: 'is-warn', PAUSED: 'is-warn',
-  ALARM: 'is-alarm', ENDED: 'is-finished', FAULT: 'is-fault',
-});
 
 /** Readout refresh period, ms. 10 Hz is the HMI convention and matches the control tick. */
 const READOUT_MS = 100;
@@ -352,15 +325,12 @@ function callSim(ctx, name, ...args) {
 const STYLE_ID = 'rv-run-view-styles';
 
 /**
- * The run screen's own skeleton — sizes, flex behaviour and the one widget `styles/app.css` has no
- * vocabulary for (the quality-flag code lamps). Everything else is inherited.
+ * The run screen's SKELETON — sizes and flex behaviour, nothing else.
  *
  * Wrapped in a cascade layer on purpose: an unlayered declaration always beats a layered one, so
- * `styles/app.css` can restyle any of this without a specificity war, and nothing here can
- * accidentally override the shared FT-CLASSIC chrome.
+ * `styles/app.css` can re-lay-out any of this without a specificity war.
  */
-const STYLE_TEXT = '@layer skid-run{' + [
-  /* -- skeleton ---------------------------------------------------------------------------- */
+const STYLE_SKELETON = '@layer skid-run{' + [
   // `height:100%` AND `flex:1 1 auto`, because ui/app.js may hand this view either a block pane
   // (the composite main screen) or a flex column. Without a DEFINITE height here the trend's
   // percentage flex-basis degrades to `auto` and the schematic collapses to nothing.
@@ -370,69 +340,134 @@ const STYLE_TEXT = '@layer skid-run{' + [
   'text-align:left;cursor:pointer}',
   '.rv ol,.rv ul{list-style:none;margin:0;padding:0}',
   /* -- P&ID: the panel that must claim the leftover height ---------------------------------- */
-  // Without an explicit grow this panel inherits `0 1 auto` and collapses to its 20px header
-  // while the column sits empty. `flex:1 1 0` plus `min-height:0` is set INLINE on the element,
-  // because styles/app.css declares `flex` for the shared host classes and an unlayered
-  // declaration would otherwise win.
+  // Without an explicit grow this panel inherits `0 1 auto` and collapses to its header while the
+  // column sits empty. `flex:1 1 0` plus `min-height:0` is set INLINE on the element, because
+  // styles/app.css declares `flex` for the shared host classes.
   '.rv-pid-host{display:flex;flex-direction:column;margin:2px}',
-  '.rv-pidpanel.is-manual{outline:3px solid var(--lamp-warn);outline-offset:-3px}',
   /* -- header furniture --------------------------------------------------------------------- */
-  '.rv-codes{display:flex;align-items:center;gap:2px;min-width:0;overflow:hidden}',
-  '.rv-code{flex:0 0 auto;display:inline-flex;align-items:center;gap:3px;height:14px;',
-  'padding:0 3px;background:var(--face-3);box-shadow:var(--bevel-sunken-1)}',
-  '.rv-code-t{font:700 var(--fs-9)/1 var(--font-ui);letter-spacing:var(--ls-caps);',
-  'color:var(--ink-2)}',
+  '.rv-codes{display:flex;align-items:center;gap:3px;min-width:0;overflow:hidden}',
   '.rv-tb{flex:0 0 auto;min-width:0}',
   /* -- bands (fraction strip, phase rail) ---------------------------------------------------- */
-  '.rv-band{flex:0 0 auto;display:flex;align-items:center;gap:var(--sp-3);',
-  'padding:0 var(--sp-4);min-width:0;background:var(--face);box-shadow:var(--bevel-raised-1)}',
+  '.rv-band{flex:0 0 auto;display:flex;align-items:center;gap:var(--sp-5);',
+  'padding:0 var(--sp-5);min-width:0}',
   '.rv-frac{flex-basis:var(--rv-frac-h)}',
-  '.rv-vials{display:flex;align-items:stretch;gap:1px;flex:1 1 auto;min-width:0;height:26px;',
-  'padding:1px}',
+  '.rv-vials{display:flex;align-items:stretch;gap:2px;flex:1 1 auto;min-width:0;height:26px}',
   '.rv-vials>li{flex:1 1 0;min-width:0;display:flex}',
-  '.rv-vials>li.rv-wasteli{flex:0 0 34px}',
+  '.rv-vials>li.rv-wasteli{flex:0 0 36px}',
   '.rv-vial{width:100%;height:100%;display:flex;align-items:flex-end;justify-content:center;',
   'padding:0 1px 1px;overflow:hidden;cursor:pointer}',
-  '.rv-vial-f{position:absolute;left:0;right:0;bottom:0;height:0}',
-  '.rv-vial-id{position:relative;pointer-events:none;white-space:nowrap;overflow:hidden}',
-  '.rv-vial .lamp{position:absolute;top:2px;left:50%;margin-left:-4px;width:8px;height:8px}',
-  '.rv-vial.is-waste .rv-vial-f{background:var(--svc-waste)}',
-  '.rv-vial.has-peak .rv-vial-id{color:var(--fld-pv)}',
-  '.rv-vial.is-open::after{content:"";position:absolute;inset:0;pointer-events:none;',
-  'box-shadow:inset 0 0 0 2px var(--lamp-run)}',
-  '.rv-vial.is-pooling .rv-vial-id{color:var(--ink)}',
   /* -- phase rail --------------------------------------------------------------------------- */
   '.rv-railbar{flex-basis:26px;height:26px}',
   '.rv-rail{display:flex;align-items:stretch;gap:1px;flex:1 1 auto;min-width:0;height:18px;',
   'padding:1px}',
   '.rv-rail>li{min-width:7px;display:flex}',
   '.rv-blk{position:relative;width:100%;height:100%;display:flex;align-items:center;',
-  'padding:0 3px;overflow:hidden;cursor:pointer}',
-  '.rv-blk-f{position:absolute;left:0;top:0;bottom:0;width:100%;transform:scaleX(0);',
-  'transform-origin:left center;background:var(--svc-a);opacity:.35}',
-  '.rv-blk-t{position:relative;pointer-events:none;white-space:nowrap;overflow:hidden;',
-  'text-overflow:ellipsis}',
-  '.rv-blk[data-kind="load"] .rv-blk-f{background:var(--svc-sample)}',
-  '.rv-blk[data-kind="wash"] .rv-blk-f{background:var(--svc-a)}',
-  '.rv-blk[data-kind="elute"] .rv-blk-f{background:var(--svc-b)}',
-  '.rv-blk[data-kind="strip"] .rv-blk-f{background:var(--svc-cip)}',
-  '.rv-blk[data-kind="bypass"] .rv-blk-f{background:var(--svc-waste)}',
-  '.rv-blk.is-done .rv-blk-t{color:var(--ink-off)}',
-  '.rv-blk.is-off{opacity:.45}',
+  'padding:0 4px;overflow:hidden;cursor:pointer}',
   /* -- trend: the panel is a frame, ui/chart.js is the whole content ------------------------- */
   // `0 1` not `0 0`: the trend holds its share of the height but yields it on a short viewport,
   // so the schematic is never squeezed out of existence. Their co-visibility is the point.
   '.rv-trend{flex:0 1 var(--rv-trend-h)}',
   '.rv-trend>.rv-chart-host{margin:2px}',
-  /* -- status strip -------------------------------------------------------------------------- */
-  '.rv-statusbar{flex:0 0 auto}',
-  '.rv-statusbar .rv-tb{min-width:0}',
   /* -- responsive ---------------------------------------------------------------------------- */
   '.rv.is-narrow .rv-codes{max-width:180px}',
   '.rv.is-short .rv-blk-t{display:none}',
   '.rv.is-short .rv-railbar{flex-basis:18px;height:18px}',
   '.rv.is-short .rv-rail{height:14px}',
 ].join('') + '}';
+
+/**
+ * The chrome this screen OWNS — panel frames, the phase rail, the fraction strip, the splitter.
+ *
+ * Deliberately UNLAYERED and scoped under `.rv`, so it wins on both specificity and layer order:
+ * these four widgets are this module's responsibility, not the shell's.
+ *
+ * Every surface below is one of the depth recipes `styles/tokens.css` publishes: raised is
+ * `--surface-raised` + `--border-edge` + `--elev-raised`, recessed is `--fld-bg` +
+ * `--border-field` + `--elev-sunken`. Nothing here hand-rolls a border, a gradient or a shadow,
+ * which is also why the light theme needs no rule of its own — those recipes invert themselves.
+ * No colour literal appears in this file at all.
+ */
+const STYLE_CHROME = [
+  '.rv{background:var(--screen);gap:3px;padding:3px}',
+  /* -- panel frames -------------------------------------------------------------------------- */
+  '.rv .rv-panel{background:var(--panel);border:var(--border-edge);border-radius:2px;',
+  'box-shadow:var(--elev-raised)}',
+  '.rv .rv-hd{height:22px;min-height:22px;margin:0;padding:0 6px;',
+  'background:var(--surface-header);border:0;border-bottom:var(--border-soft);',
+  'border-radius:2px 2px 0 0;box-shadow:none;color:var(--ink-2);',
+  'font:600 11px/1 var(--font-ui);letter-spacing:.02em;text-transform:uppercase}',
+  '.rv .rv-hd-t{color:var(--ink)}',
+  '.rv .rv-pidpanel.is-manual{border-color:var(--warn);',
+  'box-shadow:var(--elev-raised),0 0 0 1px var(--warn)}',
+  /* -- splitter: a 1px-ruled bar with an accent grip ----------------------------------------- */
+  '.rv .splitter{background:var(--surface-raised);border:0;border-top:var(--border-soft);',
+  'border-bottom:var(--border-soft);box-shadow:none}',
+  '.rv .splitter::before{background:var(--ink-3);border-radius:2px;box-shadow:none}',
+  '.rv .splitter:hover::before{background:var(--accent)}',
+  '.rv .splitter:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}',
+  /* -- bands: raised strips that carry the rail and the strip -------------------------------- */
+  '.rv .rv-band{background:var(--surface-raised);border:var(--border-edge);border-radius:2px;',
+  'box-shadow:var(--elev-raised)}',
+  /* -- quality-flag code chips --------------------------------------------------------------- */
+  '.rv .rv-code{flex:0 0 auto;display:inline-flex;align-items:center;gap:4px;height:16px;',
+  'padding:0 5px;background:var(--panel-lo);border:var(--border-edge);border-radius:2px}',
+  '.rv .rv-code-t{font:600 9px/1 var(--font-ui);letter-spacing:.02em;color:var(--ink-2)}',
+  /* -- fraction strip: recessed cells that fill with product green ---------------------------- */
+  '.rv .rv-vials{background:none;border:0;box-shadow:none;overflow:visible}',
+  '.rv .rv-vial{position:relative;background:var(--fld-bg);border:var(--border-field);',
+  'border-radius:2px;box-shadow:var(--elev-sunken)}',
+  '.rv .rv-vial-f{position:absolute;left:0;right:0;bottom:0;height:0;z-index:0;',
+  'background:var(--svc-product);pointer-events:none}',
+  '.rv .rv-vial.is-waste .rv-vial-f{background:var(--svc-waste)}',
+  '.rv .rv-vial .lamp{position:absolute;top:2px;left:50%;margin-left:-4px;width:8px;height:8px;',
+  'z-index:2}',
+  '.rv .rv-vial-id{position:relative;z-index:2;pointer-events:none;white-space:nowrap;',
+  'overflow:hidden;color:var(--ink-2);font:600 9px/1 var(--font-num);letter-spacing:.02em}',
+  '.rv .rv-vial.has-peak .rv-vial-id{color:var(--ink)}',
+  '.rv .rv-vial.is-pooling{background:var(--accent-soft);border-color:var(--accent)}',
+  '.rv .rv-vial.is-pooling .rv-vial-f{background:var(--svc-product)}',
+  '.rv .rv-vial.is-pooling .rv-vial-id{color:var(--ink)}',
+  // The port under the head is lamped AND ringed, and carries the same 25 % outer glow a lit lamp
+  // does — colour is state, and this is the one cell whose state is changing.
+  '.rv .rv-vial.is-open{border-color:var(--ok);',
+  'box-shadow:var(--elev-sunken),0 0 0 1px var(--ok),0 0 6px var(--glow-run)}',
+  '.rv .rv-vial:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}',
+  /* -- phase rail: a segmented progress bar -------------------------------------------------- */
+  '.rv .rv-rail{position:relative;background:var(--fld-bg);border:var(--border-field);',
+  'border-radius:2px;box-shadow:var(--elev-sunken);overflow:hidden}',
+  '.rv .rv-blk{background:var(--surface-raised);border:var(--border-edge);border-radius:2px;',
+  'color:var(--ink-2);font:600 10px/1 var(--font-ui);letter-spacing:.02em;',
+  'text-transform:uppercase}',
+  // The service tint survives as a 2px cap, not as the whole segment: on a high-performance HMI
+  // the process is grey and the saturated fill is reserved for the state — here, for progress.
+  '.rv .rv-blk::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;z-index:2;',
+  'background:var(--pipe-idle);pointer-events:none}',
+  '.rv .rv-blk[data-kind="equil"]::before{background:var(--svc-a)}',
+  '.rv .rv-blk[data-kind="load"]::before{background:var(--svc-sample)}',
+  '.rv .rv-blk[data-kind="wash"]::before{background:var(--svc-a)}',
+  '.rv .rv-blk[data-kind="elute"]::before{background:var(--svc-b)}',
+  '.rv .rv-blk[data-kind="strip"]::before{background:var(--svc-cip)}',
+  '.rv .rv-blk[data-kind="bypass"]::before{background:var(--svc-waste)}',
+  '.rv .rv-blk[data-kind="test"]::before{background:var(--info)}',
+  // One fill, two intensities: a spent segment carries the accent quietly, the segment running
+  // now carries it at half strength. That is what makes the rail read as a progress bar.
+  '.rv .rv-blk-f{position:absolute;left:0;top:0;bottom:0;width:100%;z-index:0;',
+  'transform:scaleX(0);transform-origin:left center;background:var(--accent);opacity:.22;',
+  'pointer-events:none}',
+  '.rv .rv-blk-t{position:relative;z-index:1;pointer-events:none;white-space:nowrap;',
+  'overflow:hidden;text-overflow:ellipsis}',
+  '.rv .rv-blk.is-active{border-color:var(--accent);color:var(--ink)}',
+  '.rv .rv-blk.is-active .rv-blk-f{opacity:.5}',
+  '.rv .rv-blk.is-done .rv-blk-t{color:var(--ink-3)}',
+  '.rv .rv-blk.is-off{opacity:.45}',
+  '.rv .rv-blk:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}',
+  /* -- the two label boxes each band carries ------------------------------------------------- */
+  '.rv .rv-band .lbl{color:var(--ink-2);font:600 10px/1 var(--font-ui);letter-spacing:.02em}',
+  '.rv .rv-band .tb-sep{width:1px;height:14px;flex:0 0 1px;margin:0 2px;',
+  'background:var(--edge-soft);box-shadow:none}',
+].join('');
+
+const STYLE_TEXT = STYLE_SKELETON + STYLE_CHROME;
 
 /**
  * Inject the run view's scoped stylesheet once per document.
@@ -510,7 +545,7 @@ export function createRunView(rootEl, ctx) {
   const nodes = {
     railBlocks: [], railFills: [],
     vials: [], vialFills: [], vialLamps: [],
-    statusBox: [], qfLamps: [],
+    qfLamps: [],
   };
 
   let railSig = '';
@@ -544,7 +579,10 @@ export function createRunView(rootEl, ctx) {
   const qfWrap = mk('span', 'rv-codes');
   pidTools.appendChild(qfWrap);
   pidTools.appendChild(mk('span', 'tb-sep'));
-  const almBox = labelBox('ALM', '', { title: 'Alarms active now — detail in the alarm banner' });
+  const almBox = labelBox('ALM', '', {
+    title: 'Alarms active now — detail in the alarm banner',
+    onInfo: (anchor) => openGlossary(anchor, 'ALARM'),
+  });
   pidTools.appendChild(almBox.el);
   pidHd.appendChild(pidTools);
   const pidHost = mk('div', 'rv-pid-host');
@@ -583,7 +621,10 @@ export function createRunView(rootEl, ctx) {
   vialList.setAttribute('aria-label', 'Fraction collector positions');
   fracBand.appendChild(vialList);
   fracBand.appendChild(mk('span', 'tb-sep'));
-  const fracCountBox = labelBox('FR', '', { title: 'Fractions collected so far' });
+  const fracCountBox = labelBox('FR', '', {
+    title: 'Fractions collected so far',
+    onInfo: (anchor) => openGlossary(anchor, 'FRACTION'),
+  });
   const fracVolBox = labelBox('PORT', 'mL', { title: 'Volume in the port now under the head' });
   fracBand.appendChild(fracCountBox.el);
   fracBand.appendChild(fracVolBox.el);
@@ -616,30 +657,11 @@ export function createRunView(rootEl, ctx) {
   trendPanel.appendChild(chartHost);
   el.appendChild(trendPanel);
 
-  /* -- 6. status strip --
-     The shell builds band 5 itself when it is a full FT-CLASSIC shell; two identical strips
-     stacked would be a defect, so this one is built either way — the code is real and exercised
-     by any host that lacks a strip — but mounted only when nothing else has claimed
-     `.statusstrip`. */
-  const ownStatus = !document.querySelector('.statusstrip');
-  const statusStrip = mk('div', 'statusstrip rv-statusbar');
-  statusStrip.setAttribute('role', 'group');
-  statusStrip.setAttribute('aria-label', 'Process status');
-  for (let i = 0; i < STATUS.length; i++) {
-    const s = STATUS[i];
-    const g = glossaryFor(s.glossary);
-    const box = labelBox(s.tag, fmt.unitLabel(s.kind), {
-      title: g ? g.term : s.tag,
-      onInfo: g ? (anchor) => openGlossary(anchor, s.glossary) : null,
-    });
-    statusStrip.appendChild(box.el);
-    nodes.statusBox.push(box);
-  }
-  statusStrip.appendChild(mk('span', 'statusstrip__spacer'));
-  const statePill = mk('span', 'state-pill', 'IDLE');
-  statePill.title = 'Run state';
-  statusStrip.appendChild(statePill);
-  if (ownStatus) el.appendChild(statusStrip);
+  /* There is deliberately no sixth band. The FLOW / %B / P1 / dP / UV / COND / pH / CV strip that
+     used to run along the bottom of this screen is gone: every one of those numbers already sits
+     beside its instrument on the schematic above and on the trend's pen rail below, and the strip
+     was charging the two panels that matter 24 px for the duplication. Run state and quality
+     indication are the title bar's, next to the alarm summary. */
 
   rootEl.appendChild(el);
 
@@ -1505,13 +1527,8 @@ export function createRunView(rootEl, ctx) {
     }
   };
 
-  /** Display-unit preferences changed: re-label every status box and force a readout. */
+  /** Display-unit preferences changed: force the next readout to re-label and re-convert. */
   const onUnitsChanged = () => {
-    if (ownStatus) {
-      for (let i = 0; i < STATUS.length; i++) {
-        nodes.statusBox[i].setUnit(fmt.unitLabel(STATUS[i].kind));
-      }
-    }
     lastReadout = -1e9;
   };
 
@@ -1645,59 +1662,6 @@ export function createRunView(rootEl, ctx) {
   }
 
   /**
-   * Refresh the status strip: eight label boxes and the run-state pill.
-   * @param {Set<string>} activeIds Ids of the alarms currently active.
-   * @returns {void}
-   */
-  function updateStatus(activeIds) {
-    if (!ownStatus) return;                   // the shell's band 5 owns these numbers instead
-    const config = ctx.config;
-    const run = ctx.run;
-    for (let i = 0; i < STATUS.length; i++) {
-      const s = STATUS[i];
-      const d = fmt.toDisplay(s.kind, s.read(config, run), config);
-      let tone = 'pv';
-      if (s.sensor) {
-        const q = sensors.sensorQuality(run, s.sensor);
-        if (q === 'SUSPECT' || q === 'INVALID' || q === 'BYPASSED') tone = 'stale';
-      }
-      for (let k = 0; k < s.alarms.length; k++) {
-        if (activeIds.has(s.alarms[k])) { tone = 'alarm'; break; }
-      }
-      const box = nodes.statusBox[i];
-      box.setUnit(d.unit);
-      box.set(nfix(d.value, d.decimals), tone);
-      if (s.sp) {
-        const sp = fmt.toDisplay(s.kind, s.sp(config, run), config);
-        box.el.title = s.tag + '  PV ' + nfix(d.value, d.decimals) + ' ' + d.unit
-          + '  ·  SP ' + nfix(sp.value, sp.decimals) + ' ' + sp.unit;
-      }
-    }
-    const st = run.state;
-    const alarmish = st === 'ALARM' || st === 'FAULT';
-    const cls = ('state-pill ' + (STATE_PILL[st] || '')
-      + (alarmish && !allAcked() ? ' is-unacked' : '')).trim();
-    if (statePill.className !== cls) statePill.className = cls;
-    fmt.setText(statePill, st);
-    statePill.title = 'Run state: ' + st;
-  }
-
-  /**
-   * Whether every active or latched alarm has been acknowledged.
-   * @returns {boolean} True when nothing is waiting for an acknowledgement.
-   */
-  function allAcked() {
-    const run = ctx.run;
-    const table = ctx.config.alarms || [];
-    for (let k = 0; k < table.length; k++) {
-      if ((run.alarmActive[k] === 1 || run.alarmLatched[k] === 1) && run.alarmAcked[k] !== 1) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  /**
    * The ids of every alarm whose condition is active right now.
    * @returns {Set<string>} Alarm ids.
    */
@@ -1760,11 +1724,9 @@ export function createRunView(rootEl, ctx) {
       cachedTrendH = trendPanel.getBoundingClientRect().height;
     }
 
-    const ids = activeAlarmIds();
-    updateHeader(ids);
+    updateHeader(activeAlarmIds());
     updateRail();
     updateFractions();
-    updateStatus(ids);
   }
 
   /**
@@ -1823,11 +1785,9 @@ export function createRunView(rootEl, ctx) {
 
     if (now - lastReadout >= READOUT_MS) {
       lastReadout = now;
-      const ids = activeAlarmIds();
-      updateHeader(ids);
+      updateHeader(activeAlarmIds());
       updateRail();
       updateFractions();
-      updateStatus(ids);
     }
 
     if (pid && typeof pid.update === 'function') pid.update(frameInfo);

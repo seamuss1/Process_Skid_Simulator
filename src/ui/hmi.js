@@ -1,11 +1,13 @@
 /**
- * @file src/ui/hmi.js — the shared FT-CLASSIC widget kit.
+ * @file src/ui/hmi.js — the shared HMI-2012 widget kit.
  *
  * Every other module under `src/ui/` builds its chrome out of the eight factories exported here.
- * The house style is a classic Rockwell FactoryTalk View SE / Wonderware InTouch operator screen:
- * beveled grey panels, sunken near-black label boxes, round glassy lamps, ISA-5.1 instrument
+ * The house style is an early-2010s operator screen — Wonderware InTouch 2012, FactoryTalk View SE
+ * 7, Ignition 7.x — and the High-Performance HMI thinking that came with it: cool graphite panels
+ * edged with a single 1px border over a very subtle vertical gradient, recessed fields carrying
+ * WHITE PV digits and AMBER setpoints, round lamps that glow only while lit, ISA-5.1 instrument
  * bubbles and process symbols, and icon-only controls that carry their meaning in `title` /
- * `aria-label` rather than on their face.
+ * `aria-label` rather than on their face. Saturated colour is reserved for state and alarms.
  *
  * Three rules bind this file.
  *
@@ -13,20 +15,19 @@
  *     not even a sibling in `src/ui/`. A widget receives numbers and strings and returns DOM. It
  *     never reads `run`/`config` and it never mutates simulation state.
  *  2. **Tokens, not literals.** Every colour resolves through `var(--token)` out of
- *     `styles/tokens.css`, so the light (default) and dark themes both fall out of the same
- *     markup. The only literal in the stylesheet below is the white specular highlight on a lamp
- *     and the white glyph on the E-STOP button, both behind a `var(--x, fallback)` so the token
- *     file can still claim them later.
+ *     `styles/tokens.css` — there is not one colour literal in this file — so the graphite
+ *     (default) and steel themes both fall out of the same markup.
  *  3. **Allocation-free on the hot path.** `labelBox().set()` and `lamp().set()` run for ~20
  *     widgets every animation frame. Both compare against a cached value first and touch the DOM
  *     only when the rendered result actually changes.
  *
  * The kit ships its own stylesheet, injected once as the **first** child of `<head>` so that
  * `styles/app.css` — linked later in the document — wins every specificity tie and can restyle any
- * of it without `!important`.
+ * of it without `!important`. It also injects one hidden `<svg><defs>` holding the equipment fill
+ * gradient and the base shading every vessel symbol references.
  *
  * Stable hooks other modules may rely on (they are part of the contract, like the exports):
- *   `.hmi-raised` `.hmi-sunken`                                        bevel utilities
+ *   `.hmi-raised` `.hmi-sunken` `.hmi-pressed`                         depth utilities
  *   `.hmi-panel` `.hmi-panel-hd` `.hmi-panel-bd`                       panel parts
  *   `.hmi-btn` `.hmi-btn--danger` `.hmi-icon`                          controls
  *   `.hmi-lb` `.hmi-lb-tag` `.hmi-lb-field` `.hmi-lb-val` `.hmi-lb-eu` label box parts
@@ -125,34 +126,43 @@ function svgTitle(el, text) {
 
 const KIT_CSS = `
 .hmi-panel,.hmi-panel-hd,.hmi-panel-bd,.hmi-btn,.hmi-lb,.hmi-lb-field,.hmi-lamp,.hmi-chip{
-  box-sizing:border-box;border-radius:0;
+  box-sizing:border-box;
 }
 
-/* -- bevel utilities ------------------------------------------------------------------------- */
+/* -- depth utilities --------------------------------------------------------------------------
+   The whole language is three recipes: a 180deg gradient under a 1px border with a soft drop
+   shadow and a hairline specular top edge; a recessed field; and a pressed control that flips the
+   gradient and drops the outer shadow. Nothing here is ever hand-rolled. */
 .hmi-raised{
-  box-shadow:inset 1px 1px 0 var(--bev-hi),inset -1px -1px 0 var(--bev-dk),
-             inset 2px 2px 0 var(--bev-lt),inset -2px -2px 0 var(--bev-sh);
+  background:var(--surface-raised);border:1px solid var(--edge);
+  border-radius:var(--r-2);box-shadow:var(--elev-raised);
 }
 .hmi-sunken{
-  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),
-             inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt);
+  background:var(--fld-bg);border:1px solid var(--fld-edge);
+  border-radius:var(--r-2);box-shadow:var(--elev-sunken);
+}
+.hmi-pressed{
+  background:var(--surface-pressed);box-shadow:var(--elev-pressed);
 }
 
 /* -- panel ----------------------------------------------------------------------------------- */
 .hmi-panel{
   position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;
-  background:var(--face);color:var(--ink);
-  font-family:var(--font-ui,system-ui,"Segoe UI",Tahoma,sans-serif);
+  background:var(--panel);color:var(--ink);font-family:var(--font-ui);
 }
 .hmi-panel-hd{
-  flex:0 0 auto;display:flex;align-items:center;gap:6px;height:18px;padding:0 5px;
-  background:var(--face-2);color:var(--ink-2);
-  font:700 10px/1 var(--font-ui,system-ui,"Segoe UI",Tahoma,sans-serif);
-  text-transform:uppercase;letter-spacing:.04em;white-space:nowrap;overflow:hidden;
+  flex:0 0 auto;display:flex;align-items:center;gap:6px;height:var(--panel-header);padding:0 6px;
+  background:var(--surface-header);border-bottom:1px solid var(--edge);
+  border-radius:var(--r-2) var(--r-2) 0 0;color:var(--ink-2);
+  font:600 var(--fs-10)/1 var(--font-ui);
+  text-transform:uppercase;letter-spacing:var(--ls-caps);white-space:nowrap;overflow:hidden;
 }
 .hmi-panel-hd:empty{display:none;}
 .hmi-panel-hd-title{margin-right:auto;}
-.hmi-panel-bd{flex:1 1 auto;position:relative;min-width:0;min-height:0;padding:3px;}
+.hmi-panel-bd{
+  flex:1 1 auto;position:relative;min-width:0;min-height:0;padding:var(--panel-pad);
+  border-radius:0 0 var(--r-2) var(--r-2);
+}
 .hmi-panel-bd[data-scroll="1"]{overflow:auto;}
 
 /* -- icon ------------------------------------------------------------------------------------ */
@@ -160,91 +170,132 @@ const KIT_CSS = `
 
 /* -- icon button ----------------------------------------------------------------------------- */
 .hmi-btn{
-  display:inline-flex;align-items:center;justify-content:center;gap:3px;
-  width:34px;height:34px;padding:0;border:0;
-  background:var(--face);color:var(--ink);
-  font:700 11px/1 var(--font-ui,system-ui,"Segoe UI",Tahoma,sans-serif);
-  font-variant-numeric:tabular-nums lining-nums;letter-spacing:.02em;
+  display:inline-flex;align-items:center;justify-content:center;gap:4px;
+  width:var(--btn-icon);height:var(--btn-icon);padding:0;
+  color:var(--ink);
+  font:600 var(--fs-11)/1 var(--font-ui);
+  font-variant-numeric:tabular-nums lining-nums;letter-spacing:var(--ls-caps);
   cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent;
+  transition:background-color var(--dur-1) var(--ease-out),
+             border-color var(--dur-1) var(--ease-out);
 }
-.hmi-btn:hover:not(:disabled){background:var(--face-3);}
-.hmi-btn:active:not(:disabled),.hmi-btn[aria-pressed="true"]:not(:disabled){
-  box-shadow:inset 1px 1px 0 var(--bev-dk),inset -1px -1px 0 var(--bev-hi),
-             inset 2px 2px 0 var(--bev-sh),inset -2px -2px 0 var(--bev-lt);
+.hmi-btn:hover:not(:disabled){
+  background-image:linear-gradient(var(--hover-tint),var(--hover-tint)),var(--surface-raised);
+  border-color:var(--ink-3);
 }
-.hmi-btn:active:not(:disabled)>*,.hmi-btn[aria-pressed="true"]:not(:disabled)>*{
-  transform:translate(1px,1px);
+.hmi-btn:active:not(:disabled){
+  background:var(--surface-pressed);box-shadow:var(--elev-pressed);
 }
-.hmi-btn:disabled{color:var(--ink-off);cursor:default;}
-.hmi-btn:focus-visible{outline:2px solid var(--focus-ring);outline-offset:-3px;}
-.hmi-btn--danger{background:var(--lamp-alarm);color:var(--estop-ink);}
-.hmi-btn--danger:hover:not(:disabled){background:var(--lamp-alarm);filter:brightness(1.12);}
-.hmi-btn-txt{pointer-events:none;padding:0 4px;}
+.hmi-btn[aria-pressed="true"]:not(:disabled){
+  background:var(--accent-soft);border-color:var(--accent);box-shadow:var(--elev-pressed);
+}
+.hmi-btn:disabled{
+  color:var(--ink-3);cursor:default;background:var(--panel);
+  border-color:var(--edge-soft);box-shadow:none;
+}
+.hmi-btn:disabled .hmi-icon{opacity:.5;}
+.hmi-btn:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;}
+.hmi-btn--danger{
+  background:var(--alarm);border-color:var(--alarm);color:var(--estop-ink);
+  box-shadow:var(--elev-raised),0 0 0 3px var(--alarm-soft);
+}
+.hmi-btn--danger:hover:not(:disabled){
+  background-image:linear-gradient(var(--hover-tint),var(--hover-tint));border-color:var(--alarm);
+}
+.hmi-btn-txt{pointer-events:none;padding:0 5px;}
 
-/* -- label box ------------------------------------------------------------------------------- */
+/* -- label box --------------------------------------------------------------------------------
+   The tag caption is quiet; the digits are not. PV is WHITE, SP amber, OUT cyan — on a recessed
+   near-black field with a thin border and a 2px radius. */
 .hmi-lb{
-  display:inline-flex;flex-direction:column;gap:1px;min-width:0;
-  font-family:var(--font-ui,system-ui,"Segoe UI",Tahoma,sans-serif);
+  display:inline-flex;flex-direction:column;gap:2px;min-width:0;font-family:var(--font-ui);
 }
-.hmi-lb[data-layout="inline"]{flex-direction:row;align-items:center;gap:4px;}
+.hmi-lb[data-layout="inline"]{flex-direction:row;align-items:center;gap:5px;}
 .hmi-lb-tag{
-  font:700 10px/1.1 var(--font-ui,system-ui,"Segoe UI",Tahoma,sans-serif);
-  text-transform:uppercase;letter-spacing:.04em;color:var(--ink-2);
+  font:600 var(--fs-10)/1.2 var(--font-ui);
+  text-transform:uppercase;letter-spacing:var(--ls-caps);color:var(--ink-2);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 .hmi-lb-field{
-  display:flex;align-items:baseline;justify-content:flex-end;gap:3px;
-  padding:2px 3px;min-width:0;background:var(--fld-bg);
+  display:flex;align-items:baseline;justify-content:flex-end;gap:4px;
+  height:var(--lbox-h);padding:0 4px;min-width:0;
+  background:var(--fld-bg);border:1px solid var(--fld-edge);
+  border-radius:var(--r-2);box-shadow:var(--elev-sunken);
 }
 .hmi-lb-val{
-  font:700 13px/1.2 var(--font-num,ui-monospace,Consolas,"Courier New",monospace);
+  font:500 var(--fs-13)/calc(var(--lbox-h) - 2px) var(--font-num);
   font-variant-numeric:tabular-nums lining-nums;
   color:var(--fld-pv);white-space:nowrap;
 }
 .hmi-lb-eu{
-  font:600 10.4px/1 var(--font-num,ui-monospace,Consolas,"Courier New",monospace);
+  font:400 var(--fs-10)/1 var(--font-num);
   color:var(--fld-eu);white-space:nowrap;
 }
-.hmi-lb[data-size="sm"] .hmi-lb-val{font-size:11px;}
-.hmi-lb[data-size="sm"] .hmi-lb-eu{font-size:8.8px;}
-.hmi-lb[data-size="lg"] .hmi-lb-val{font-size:16px;}
-.hmi-lb[data-size="lg"] .hmi-lb-eu{font-size:12.8px;}
-.hmi-lb[data-size="xl"] .hmi-lb-val{font-size:20px;}
-.hmi-lb[data-size="xl"] .hmi-lb-eu{font-size:16px;}
+.hmi-lb[data-size="sm"] .hmi-lb-field{height:var(--ctl-sm);}
+.hmi-lb[data-size="sm"] .hmi-lb-val{font-size:var(--fs-11);line-height:calc(var(--ctl-sm) - 2px);}
+.hmi-lb[data-size="sm"] .hmi-lb-eu{font-size:var(--fs-9);}
+.hmi-lb[data-size="lg"] .hmi-lb-field,
+.hmi-lb[data-size="xl"] .hmi-lb-field{height:var(--lbox-h-lg);}
+.hmi-lb[data-size="lg"] .hmi-lb-val,
+.hmi-lb[data-size="xl"] .hmi-lb-val{
+  font-size:var(--fs-15);line-height:calc(var(--lbox-h-lg) - 2px);
+}
+.hmi-lb[data-size="lg"] .hmi-lb-eu,
+.hmi-lb[data-size="xl"] .hmi-lb-eu{font-size:var(--fs-11);}
 .hmi-lb[data-kind="sp"] .hmi-lb-val{color:var(--fld-sp);}
 .hmi-lb[data-kind="out"] .hmi-lb-val{color:var(--fld-out);}
 .hmi-lb-field[data-q="SUSPECT"] .hmi-lb-val,
 .hmi-lb-field[data-q="INVALID"] .hmi-lb-val,
 .hmi-lb-field[data-empty="1"] .hmi-lb-val{color:var(--fld-stale);}
+.hmi-lb-field[data-alarm="1"]{border-color:var(--alarm);}
 .hmi-lb-field[data-alarm="1"] .hmi-lb-val{color:var(--fld-alarm);}
-.hmi-lb-field[data-blink="1"] .hmi-lb-val{animation:hmi-blink 900ms steps(1,end) infinite;}
+.hmi-lb-field[data-blink="1"] .hmi-lb-val{animation:hmi-blink var(--blink) steps(1,end) infinite;}
 
-/* -- lamp ------------------------------------------------------------------------------------ */
-.hmi-lamp{display:inline-block;line-height:0;flex:0 0 auto;}
+/* -- lamp -------------------------------------------------------------------------------------
+   A filled disc, a 1px dark ring, a soft top highlight — and, only while lit, a matching outer
+   glow at 25%. An unlit lamp casts nothing at all. */
+.hmi-lamp{
+  --hmi-glow:transparent;
+  display:inline-block;line-height:0;flex:0 0 auto;border-radius:var(--r-round);
+  box-shadow:0 0 6px 1px var(--hmi-glow);
+}
 .hmi-lamp svg{display:block;overflow:visible;}
 .hmi-lamp-body{fill:var(--lamp-off);}
-.hmi-lamp-ring{fill:none;stroke:var(--bev-dk);stroke-width:1;}
-.hmi-lamp-gloss{fill:var(--lamp-gloss,rgba(255,255,255,.55));stroke:none;}
+.hmi-lamp-ring{fill:none;stroke:var(--lamp-ring);stroke-width:1;}
+.hmi-lamp-gloss{fill:var(--lamp-gloss);stroke:none;}
 .hmi-lamp[data-state="run"] .hmi-lamp-body{fill:var(--lamp-run);}
 .hmi-lamp[data-state="warn"] .hmi-lamp-body{fill:var(--lamp-warn);}
 .hmi-lamp[data-state="alarm"] .hmi-lamp-body{fill:var(--lamp-alarm);}
-.hmi-lamp[data-blink="1"] .hmi-lamp-body{animation:hmi-blink 900ms steps(1,end) infinite;}
+.hmi-lamp[data-state="run"]{--hmi-glow:var(--glow-run);}
+.hmi-lamp[data-state="warn"]{--hmi-glow:var(--glow-warn);}
+.hmi-lamp[data-state="alarm"]{--hmi-glow:var(--glow-alarm);}
+.hmi-lamp[data-blink="1"] .hmi-lamp-body{animation:hmi-blink var(--blink) steps(1,end) infinite;}
 
-@keyframes hmi-blink{0%,55%{opacity:1;}56%,100%{opacity:.16;}}
+@keyframes hmi-blink{0%,55%{opacity:1;}56%,100%{opacity:.18;}}
 
 /* -- ISA bubble ------------------------------------------------------------------------------ */
-.hmi-isa-ring{fill:var(--bubble-fill,var(--face-3));stroke:var(--ink);stroke-width:1.25;}
-.hmi-isa-line{stroke:var(--ink);stroke-width:1.25;fill:none;}
+.hmi-isa-ring{fill:var(--bubble-fill);stroke:var(--equip-edge);stroke-width:1.25;}
+.hmi-isa-line{stroke:var(--equip-edge);stroke-width:1.25;fill:none;}
 .hmi-isa-fn,.hmi-isa-loop{
   fill:var(--ink);stroke:none;text-anchor:middle;
-  font-family:var(--font-ui,system-ui,"Segoe UI",Tahoma,sans-serif);font-weight:700;
+  font-family:var(--font-ui);font-weight:600;
 }
-.hmi-isa[data-alarm="1"] .hmi-isa-ring{stroke:var(--lamp-alarm);stroke-width:2;}
-.hmi-isa[data-alarm="1"] .hmi-isa-fn,.hmi-isa[data-alarm="1"] .hmi-isa-loop{fill:var(--lamp-alarm);}
+.hmi-isa-loop{fill:var(--ink-2);}
+.hmi-isa[data-alarm="1"] .hmi-isa-ring{stroke:var(--alarm);stroke-width:2;}
+.hmi-isa[data-alarm="1"] .hmi-isa-fn,.hmi-isa[data-alarm="1"] .hmi-isa-loop{fill:var(--alarm);}
 
-/* -- process symbols ------------------------------------------------------------------------- */
-.hmi-sym{color:var(--ink);}
-.hmi-sym-fill{fill:var(--face-3);}
+/* -- process symbols --------------------------------------------------------------------------
+   Equipment is restrained: a 180deg gradient body edged in --equip-edge. A vessel adds a 1px
+   specular highlight down its inside left edge and soft shading at its base — the treatment the
+   column already carries, applied to every other vessel. */
+.hmi-sym{color:var(--equip-edge);}
+.hmi-sym-fill,.hmi-sym-body,.hmi-sym-vessel{fill:url(#hmi-equip-fill);}
+.hmi-sym-spec{fill:none;stroke:var(--spec-edge);stroke-width:1;}
+.hmi-sym-base{fill:url(#hmi-equip-base);stroke:none;opacity:.45;}
+.hmi-sym-ink{fill:var(--ink-2);stroke:none;}
+#hmi-kit-defs .hmi-stop-top{stop-color:var(--equip-top);}
+#hmi-kit-defs .hmi-stop-bot{stop-color:var(--equip-bot);}
+#hmi-kit-defs .hmi-stop-shade{stop-color:var(--shade-deep);}
 
 @media (prefers-reduced-motion:reduce){
   .hmi-lb-field[data-blink="1"] .hmi-lb-val,
@@ -252,18 +303,63 @@ const KIT_CSS = `
 }
 `;
 
+/**
+ * The shared SVG gradients. A vessel cannot fill itself with a CSS gradient, so the two paint
+ * servers every symbol references live in one hidden `<svg>` appended to `<body>`: a 180deg
+ * equipment fill, and the soft shading that darkens a vessel towards its base.
+ */
+const KIT_DEFS = `
+<defs>
+  <linearGradient id="hmi-equip-fill" x1="0" y1="0" x2="0" y2="1">
+    <stop class="hmi-stop-top" offset="0"/>
+    <stop class="hmi-stop-bot" offset="1"/>
+  </linearGradient>
+  <linearGradient id="hmi-equip-base" x1="0" y1="0" x2="0" y2="1">
+    <stop class="hmi-stop-shade" offset="0" stop-opacity="0"/>
+    <stop class="hmi-stop-shade" offset="1" stop-opacity="1"/>
+  </linearGradient>
+</defs>`;
+
 let stylesInstalled = false;
+let defsInstalled = false;
 
 /** Inject the kit stylesheet exactly once. Safe to call in a non-DOM environment. */
 function ensureStyles() {
-  if (stylesInstalled) return;
   if (typeof document === 'undefined' || !document.head) return;
-  stylesInstalled = true;
-  if (document.getElementById('hmi-kit-styles')) return;
-  const style = document.createElement('style');
-  style.id = 'hmi-kit-styles';
-  style.textContent = KIT_CSS;
-  document.head.insertBefore(style, document.head.firstChild);
+  if (!stylesInstalled) {
+    stylesInstalled = true;
+    if (!document.getElementById('hmi-kit-styles')) {
+      const style = document.createElement('style');
+      style.id = 'hmi-kit-styles';
+      style.textContent = KIT_CSS;
+      document.head.insertBefore(style, document.head.firstChild);
+    }
+  }
+  ensureDefs();
+}
+
+/**
+ * Mount the shared gradient defs once, out of flow and out of the accessibility tree.
+ * Retried on every `ensureStyles()` until `<body>` exists, so importing the kit from `<head>`
+ * cannot leave the paint servers unmounted.
+ */
+function ensureDefs() {
+  if (defsInstalled) return;
+  const parent = document.body || document.documentElement;
+  if (!parent) return;
+  defsInstalled = true;
+  if (document.getElementById('hmi-kit-defs')) return;
+  const host = document.createElementNS(SVG_NS, 'svg');
+  attr(host, {
+    id: 'hmi-kit-defs',
+    'aria-hidden': 'true',
+    focusable: 'false',
+    width: 0,
+    height: 0,
+    style: 'position:absolute;width:0;height:0;overflow:hidden',
+  });
+  host.innerHTML = KIT_DEFS;
+  parent.appendChild(host);
 }
 
 ensureStyles();
@@ -585,7 +681,11 @@ export function isaBubble(fnLetters, loopNo, opts) {
  *
  * Convention inside a symbol:
  *   - outlines inherit `stroke: currentColor`, `fill: none` from the group;
- *   - a shape that must read solid sets `fill="currentColor" stroke="none"` itself;
+ *   - a body that must read solid carries `.hmi-sym-body`, and a vessel `.hmi-sym-vessel`; both
+ *     fill with the shared 180deg equipment gradient out of the kit's `<defs>`;
+ *   - a vessel adds `.hmi-sym-spec` (the 1px specular hairline down its inside left edge) and
+ *     `.hmi-sym-base` (the soft shading at its foot);
+ *   - a solid detail that is neither carries `.hmi-sym-ink`;
  *   - anything the P&ID needs to animate or measure carries `data-part`.
  * ===============================================================================================*/
 
@@ -622,10 +722,10 @@ function symPath(d, part, className) {
   return el;
 }
 
-/** Shorthand: a filled path. */
-function symFill(d, part) {
-  const el = s('path');
-  attr(el, { d, fill: 'currentColor', stroke: 'none' });
+/** Shorthand: a solid path. `.hmi-sym-ink` unless the caller names another class. */
+function symFill(d, part, className) {
+  const el = s('path', className || 'hmi-sym-ink');
+  attr(el, { d, stroke: 'none' });
   if (part) attr(el, { 'data-part': part });
   return el;
 }
@@ -639,8 +739,8 @@ function symLine(x1, y1, x2, y2, width) {
 }
 
 /** Shorthand: a stroked rect. */
-function symRect(x, y, w, hgt, part) {
-  const el = s('rect');
+function symRect(x, y, w, hgt, part, className) {
+  const el = s('rect', className);
   attr(el, { x, y, width: w, height: hgt });
   if (part) attr(el, { 'data-part': part });
   return el;
@@ -655,7 +755,7 @@ function valveBody(g) {
 /** Stem plus the rectangular actuator that makes a valve an *automated* valve. */
 function valveActuator(g) {
   g.appendChild(symLine(0, 0, 0, -19));
-  g.appendChild(symRect(-9, -27, 18, 8, 'actuator'));
+  g.appendChild(symRect(-9, -27, 18, 8, 'actuator', 'hmi-sym-body'));
 }
 
 /**
@@ -704,9 +804,8 @@ export function isaSymbol(kind, opts) {
   switch (k) {
     /* -- rotating equipment ------------------------------------------------------------------ */
     case 'pump': {
-      const c = s('circle');
-      attr(c, { cx: 0, cy: 0, r: 16 });
-      attr(c, { 'data-part': 'body' });
+      const c = s('circle', 'hmi-sym-body');
+      attr(c, { cx: 0, cy: 0, r: 16, 'data-part': 'body' });
       g.appendChild(c);
       g.appendChild(symFill('M-6.5 -8.5 10.5 0 -6.5 8.5Z', 'rotor'));
       break;
@@ -725,7 +824,7 @@ export function isaSymbol(kind, opts) {
       break;
 
     case 'valveN': {
-      const c = s('circle');
+      const c = s('circle', 'hmi-sym-body');
       attr(c, { cx: 0, cy: 0, r: 15, 'data-part': 'body' });
       g.appendChild(c);
       const ports = [0, 60, 120, 180, 240, 300];
@@ -739,15 +838,17 @@ export function isaSymbol(kind, opts) {
       const rotor = symLine(0, 0, 13, 0, 3);
       attr(rotor, { 'data-part': 'rotor' });
       g.appendChild(rotor);
-      const hub = s('circle');
-      attr(hub, { cx: 0, cy: 0, r: 3, fill: 'currentColor', stroke: 'none' });
+      const hub = s('circle', 'hmi-sym-ink');
+      attr(hub, { cx: 0, cy: 0, r: 3, stroke: 'none' });
       g.appendChild(hub);
       g.appendChild(symLine(0, -15, 0, -24));
-      g.appendChild(symRect(-9, -32, 18, 8, 'actuator'));
+      g.appendChild(symRect(-9, -32, 18, 8, 'actuator', 'hmi-sym-body'));
       break;
     }
 
-    /* -- vessels ----------------------------------------------------------------------------- */
+    /* -- vessels -----------------------------------------------------------------------------
+       A vessel is a gradient body, the live level clipped inside it, soft shading at the foot,
+       a 1px specular hairline down the inside left edge, and the outline last. */
     case 'tank': {
       const bodyD = 'M-16 -13A16 6.5 0 0 1 16 -13L16 13A16 6.5 0 0 1 -16 13Z';
       const clipId = uid('clip');
@@ -760,6 +861,8 @@ export function isaSymbol(kind, opts) {
       defs.appendChild(clip);
       g.appendChild(defs);
 
+      g.appendChild(symPath(bodyD, 'vessel', 'hmi-sym-vessel'));
+
       const level = s('rect', 'hmi-sym-level');
       attr(level, {
         x: -17, y: -20, width: 34, height: 40,
@@ -767,6 +870,14 @@ export function isaSymbol(kind, opts) {
       });
       g.appendChild(level);
 
+      const base = s('rect', 'hmi-sym-base');
+      attr(base, {
+        x: -17, y: 4, width: 34, height: 16,
+        'clip-path': `url(#${clipId})`, 'pointer-events': 'none',
+      });
+      g.appendChild(base);
+
+      g.appendChild(symPath('M-14.4 -11.6V11.6', 'spec', 'hmi-sym-spec'));
       g.appendChild(symPath(bodyD, 'body'));
       const rim = s('ellipse');
       attr(rim, { cx: 0, cy: -13, rx: 16, ry: 6.5, 'data-part': 'rim' });
@@ -775,9 +886,11 @@ export function isaSymbol(kind, opts) {
     }
 
     case 'column':
-      g.appendChild(symRect(-13, -30, 26, 60, 'body'));
-      g.appendChild(symRect(-16.5, -35, 33, 5.5, 'flange-top'));
-      g.appendChild(symRect(-16.5, 29.5, 33, 5.5, 'flange-bottom'));
+      g.appendChild(symRect(-13, -30, 26, 60, 'body', 'hmi-sym-vessel'));
+      g.appendChild(symRect(-13, 16, 26, 14, 'base', 'hmi-sym-base'));
+      g.appendChild(symPath('M-10.6 -27.4V27.4', 'spec', 'hmi-sym-spec'));
+      g.appendChild(symRect(-16.5, -35, 33, 5.5, 'flange-top', 'hmi-sym-body'));
+      g.appendChild(symRect(-16.5, 29.5, 33, 5.5, 'flange-bottom', 'hmi-sym-body'));
       g.appendChild(symLine(-13, -24, 13, -24));
       g.appendChild(symLine(-13, 26, 13, 26));
       g.appendChild(symRect(-13, -24, 26, 50, 'bed'));
@@ -787,18 +900,20 @@ export function isaSymbol(kind, opts) {
 
     /* -- inline devices ---------------------------------------------------------------------- */
     case 'filter':
-      g.appendChild(symRect(-14, -10, 28, 20, 'body'));
+      g.appendChild(symRect(-14, -10, 28, 20, 'body', 'hmi-sym-body'));
       g.appendChild(symLine(-14, 10, 14, -10));
       break;
 
     case 'mixer':
-      g.appendChild(symRect(-18, -9, 36, 18, 'body'));
+      g.appendChild(symRect(-18, -9, 36, 18, 'body', 'hmi-sym-body'));
       g.appendChild(symLine(-18, 9, -6, -9));
       g.appendChild(symLine(-6, 9, 6, -9));
       g.appendChild(symLine(6, 9, 18, -9));
       break;
 
     case 'airtrap':
+      g.appendChild(symPath('M-9 -8A9 4 0 0 1 9 -8L9 10A9 4 0 0 1 -9 10Z', 'vessel', 'hmi-sym-vessel'));
+      g.appendChild(symPath('M-7.6 -7V9', 'spec', 'hmi-sym-spec'));
       g.appendChild(symPath('M-9 -8A9 4 0 0 1 9 -8L9 10A9 4 0 0 1 -9 10Z', 'body'));
       g.appendChild(symLine(0, -12, 0, -19));
       g.appendChild(symFill('M-3.2 -17 3.2 -17 0 -22.4Z', 'vent'));
@@ -813,23 +928,23 @@ export function isaSymbol(kind, opts) {
       break;
 
     case 'detector': {
-      g.appendChild(symRect(-16, -11, 32, 22, 'body'));
-      const lamp = s('circle');
-      attr(lamp, { cx: -9, cy: 0, r: 3, fill: 'currentColor', stroke: 'none', 'data-part': 'lamp' });
+      g.appendChild(symRect(-16, -11, 32, 22, 'body', 'hmi-sym-body'));
+      const lamp = s('circle', 'hmi-sym-ink');
+      attr(lamp, { cx: -9, cy: 0, r: 3, stroke: 'none', 'data-part': 'lamp' });
       g.appendChild(lamp);
       const beam = symLine(-5, 0, 5.5, 0);
       attr(beam, { 'stroke-dasharray': '3 2.5', 'data-part': 'beam' });
       g.appendChild(beam);
-      const plate = s('rect');
-      attr(plate, { x: 6.5, y: -5, width: 4.5, height: 10, fill: 'currentColor', stroke: 'none' });
+      const plate = s('rect', 'hmi-sym-ink');
+      attr(plate, { x: 6.5, y: -5, width: 4.5, height: 10, stroke: 'none' });
       g.appendChild(plate);
       break;
     }
 
     case 'collector': {
       g.appendChild(symLine(0, -22, 0, -13));
-      const nozzle = s('circle');
-      attr(nozzle, { cx: 0, cy: -11.2, r: 1.9, fill: 'currentColor', stroke: 'none', 'data-part': 'nozzle' });
+      const nozzle = s('circle', 'hmi-sym-ink');
+      attr(nozzle, { cx: 0, cy: -11.2, r: 1.9, stroke: 'none', 'data-part': 'nozzle' });
       g.appendChild(nozzle);
       g.appendChild(symLine(-20, -9, 20, -9));
       const xs = [-13, 0, 13];
@@ -875,8 +990,9 @@ function formatValue(v, decimals) {
 }
 
 /**
- * Build the workhorse of this design: a tag caption over (or beside) a sunken near-black field
- * holding right-aligned tabular digits and a smaller, dimmer engineering-unit suffix.
+ * Build the workhorse of this design: a quiet tag caption over (or beside) a recessed field
+ * holding right-aligned tabular digits and a smaller, dimmer engineering-unit suffix. The field is
+ * a 2px-radius well with a thin border; the digits are the loudest thing on it.
  *
  * `set()` is written for the animation frame. It bails on an unchanged value *and* on a changed
  * value that renders to the same string (1.234 → 1.237 at one decimal), so a screen full of boxes
@@ -886,7 +1002,7 @@ function formatValue(v, decimals) {
  *          kind?: 'pv'|'sp'|'out', title?: string, layout?: 'stack'|'inline',
  *          size?: 'sm'|'md'|'lg'|'xl', className?: string}} opts
  *   `tag` is the ISA tag name shown in 10px caps; `eu` the engineering unit; `decimals` the fixed
- *   decimal count (default 1); `kind` picks the digit colour — PV lime, SP amber, OUT cyan;
+ *   decimal count (default 1); `kind` picks the digit colour — PV white, SP amber, OUT cyan;
  *   `width` sizes the field (number = px).
  * @returns {{el: HTMLElement, set: (value: number|string|null|undefined,
  *            opts2?: {quality?: 'OK'|'SUSPECT'|'INVALID', alarm?: boolean, blink?: boolean}) => void}}
@@ -982,8 +1098,10 @@ export function labelBox(opts) {
 const LAMP_STATES = { off: 1, run: 1, warn: 1, alarm: 1 };
 
 /**
- * Build a round glassy status lamp: a filled disc, a dark ring, and a specular highlight arc at the
- * top left. Drawn as SVG rather than a gradient so it stays crisp at any size and any zoom.
+ * Build a round status lamp: a filled disc, a 1px dark ring, and a soft highlight arc at the top
+ * left. Drawn as SVG rather than a CSS gradient so it stays crisp at any size and any zoom. While
+ * lit the wrapper casts a matching outer glow at 25%; an unlit lamp casts nothing at all, which is
+ * what keeps a screenful of lamps quiet until one of them means something.
  *
  * @param {{size?: number, title?: string, label?: string, state?: 'off'|'run'|'warn'|'alarm',
  *          className?: string}} [opts]
@@ -1050,12 +1168,16 @@ export function lamp(opts) {
 }
 
 /* =================================================================================================
- * 7. BEVEL UTILITY
+ * 7. DEPTH UTILITY
  * ===============================================================================================*/
 
 /**
- * Apply the house bevel to an element. This is the only sanctioned way to get an edge: never write
- * an ad-hoc `border` in this application.
+ * Apply the house depth recipe to an element. This is the only sanctioned way to get an edge: never
+ * write an ad-hoc `border` in this application.
+ *
+ * The name is historical — it once applied a four-step bevel — and is kept because five other
+ * modules call it. What it applies now is the HMI-2012 recipe: a 180deg gradient under a 1px border
+ * with a soft drop shadow (`raised`), or a recessed field with an inner shadow (`sunken`).
  *
  * @param {HTMLElement} el
  * @param {'raised'|'sunken'|'flat'} [kind='raised'] `'flat'` removes both classes.
@@ -1073,12 +1195,13 @@ export function bevel(el, kind) {
  * ===============================================================================================*/
 
 /**
- * Build a beveled icon-only button — the toolbar's entire vocabulary.
+ * Build an icon-only button — the toolbar's entire vocabulary.
  *
  * The face never carries a word: meaning lives in `title` (the hover tooltip) and `ariaLabel` (the
- * accessible name). Pressing swaps the bevel to sunken and nudges the glyph 1px down-right, exactly
- * like the physical panel buttons this imitates. The one concession is `opts.text`, for the speed
- * chips, which are numerals rather than prose.
+ * accessible name). Pressing flips the gradient and drops the outer shadow; a *latched* toggle goes
+ * further and takes the accent tint, because "held down" and "selected" are different states and an
+ * operator has to tell them apart. The one concession is `opts.text`, for the speed chips, which
+ * are numerals rather than prose.
  *
  * @param {string|null} name Icon name from {@link ICON_NAMES}, or `null` when using `opts.text`.
  * @param {{title?: string, ariaLabel?: string, onClick?: (ev: MouseEvent, pressed: boolean) => void,
@@ -1145,7 +1268,8 @@ export function iconButton(name, opts) {
  * ===============================================================================================*/
 
 /**
- * Build a raised panel: the grey slab everything else sits on.
+ * Build a raised panel: the graphite slab everything else sits on, edged with a single 1px border
+ * and capped by a slightly lighter header strip.
  *
  * The header is created unconditionally but collapses through `:empty` when there is no title and
  * nothing has been appended to it, so a caller can add tool buttons to a bare panel later and have
@@ -1154,7 +1278,7 @@ export function iconButton(name, opts) {
  * @param {string} [titleText] Optional 10px caps caption. Also becomes the panel's accessible name.
  * @param {{className?: string, scroll?: boolean, pad?: number|false, id?: string,
  *          role?: string}} [opts]
- *   `scroll` makes the body scrollable; `pad` overrides the 3px body padding (`false` = none).
+ *   `scroll` makes the body scrollable; `pad` overrides the default body padding (`false` = none).
  * @returns {{el: HTMLElement, body: HTMLElement, header: HTMLElement}}
  *   `el` is the panel, `body` the content area, `header` the caption strip (append tool buttons to
  *   it — they float right of the title).

@@ -1,11 +1,14 @@
 /**
  * @file src/ui/pid.js — the plant P&ID: ISA-5.1 instrument bubbles, service-coloured process lines,
- * beveled equipment, sunken label boxes and the packed-bed canvas painter.
+ * gradient-filled equipment, recessed label boxes and the packed-bed canvas painter.
  *
- * The schematic is inline SVG on a `viewBox="0 0 1640 430"` grid drawn in the "FT-CLASSIC" idiom of
- * a FactoryTalk View SE / InTouch operator screen: square corners, beveled grey chrome, sunken
- * near-black label boxes with lime PV digits, round glassy lamps, ISA bubbles wired to their
- * equipment by thin leader lines.
+ * The schematic is inline SVG on a `viewBox="0 0 1640 430"` grid drawn in the "HMI-2012" idiom of a
+ * Wonderware InTouch 2014 / FactoryTalk View SE 7 / Ignition 7 operator screen: cool graphite
+ * equipment under a 180 degree fill gradient, a 1 px edge and a 2 px radius where the old idiom put
+ * a two-tone bevel, recessed near-black label boxes with WHITE PV digits and an amber SP, round
+ * lamps that carry a soft glow when lit, and ISA bubbles wired to their equipment by thin leader
+ * lines.  Saturated colour is spent on state, alarms and the service tint of a LIVE line only — the
+ * process itself is drawn in restrained greys, which is what lets an alarm stand out.
  *
  * The 3.81:1 grid is chosen to match the host panel's letterbox: at `xMidYMid meet` inside a
  * ~1900 x 465 slot the drawing renders ~1772 x 435 and the dead margin drops to well under 70 px a
@@ -148,42 +151,86 @@ const DV_ARC_R = 20;
 /** Default ISA instrument-bubble radius. */
 const BUBBLE_R = 19;
 
+/** Corner radius on equipment bodies, label boxes and chips, schematic units.  Never 0, never > 3. */
+const R_BOX = 2;
+
 /* ===============================================================================================
- * 2.  THEME TOKENS  (FT-CLASSIC)
+ * 2.  THEME TOKENS  (HMI-2012)
  * =============================================================================================*/
 
-/** Every token the schematic and the bed painter read. @type {string[]} */
-const TOKEN_NAMES = [
-  '--screen', '--face', '--face-2', '--face-3',
-  '--bev-hi', '--bev-lt', '--bev-sh', '--bev-dk',
-  '--ink', '--ink-2', '--ink-off',
-  '--fld-bg', '--fld-pv', '--fld-sp', '--fld-out', '--fld-alarm', '--fld-stale', '--fld-eu',
-  '--lamp-off', '--lamp-run', '--lamp-warn', '--lamp-alarm',
-  '--pipe-idle', '--svc-a', '--svc-b', '--svc-sample', '--svc-cip', '--svc-product', '--svc-waste',
-  '--pen-flow', '--pen-pctb', '--pen-press', '--pen-uv', '--pen-cond', '--pen-ph', '--pen-temp',
-];
-
-/** Normative light "FT-CLASSIC" defaults — the fallback when a token is absent. */
-const LIGHT_DEFAULTS = {
-  '--screen': '#6E6E6E', '--face': '#C7C3BC', '--face-2': '#BFBBB4', '--face-3': '#D2CEC7',
-  '--bev-hi': '#FFFFFF', '--bev-lt': '#E6E2DA', '--bev-sh': '#85817B', '--bev-dk': '#4A4744',
-  '--ink': '#101010', '--ink-2': '#3A3A3A', '--ink-off': '#7A7A7A',
-  '--fld-bg': '#0A0F0A', '--fld-pv': '#12FF4B', '--fld-sp': '#FFD400', '--fld-out': '#00E5FF',
-  '--fld-alarm': '#FF3B30', '--fld-stale': '#7A8A7A', '--fld-eu': '#9FB39F',
-  '--lamp-off': '#4A4744', '--lamp-run': '#16C60C', '--lamp-warn': '#FFC000',
-  '--lamp-alarm': '#E81123',
-  '--pipe-idle': '#4A4744', '--svc-a': '#2D6FB8', '--svc-b': '#8A5BC8', '--svc-sample': '#C8862B',
-  '--svc-cip': '#1FA98C', '--svc-product': '#16C60C', '--svc-waste': '#6B6B6B',
-  '--pen-flow': '#00E5FF', '--pen-pctb': '#FF6EC7', '--pen-press': '#FFD400', '--pen-uv': '#12FF4B',
-  '--pen-cond': '#FF9A3C', '--pen-ph': '#B39DFF', '--pen-temp': '#FFFFFF',
+/**
+ * The normative HMI-2012 palette: the value a token takes when the host stylesheet does not define
+ * it.  `styles/tokens.css` is the source of truth — this map exists because two consumers cannot
+ * read a custom property:
+ *
+ *   1. the packed-bed canvas painter, which needs resolved sRGB to interpolate in linear light, and
+ *   2. the `var()` fallbacks in {@link PID_CSS}, which are interpolated from here so the injected
+ *      sheet carries no colour literal of its own.
+ *
+ * @type {Record<string,string>}
+ */
+const F = {
+  '--screen': '#21262C',
+  '--panel': '#2B3138',
+  '--panel-hi': '#333A42',
+  '--panel-lo': '#1B1F24',
+  '--edge': '#454E58',
+  '--edge-soft': '#383F47',
+  '--ink': '#E8ECF0',
+  '--ink-2': '#9AA5B1',
+  '--ink-3': '#6B7681',
+  '--accent': '#3D9BE9',
+  '--fld-bg': '#171B20',
+  '--fld-edge': '#3A424B',
+  '--fld-pv': '#FFFFFF',
+  '--fld-sp': '#FFC24B',
+  '--fld-out': '#4FC3F7',
+  '--fld-alarm': '#FF5A52',
+  '--fld-stale': '#6B7681',
+  '--fld-eu': '#7D8894',
+  '--ok': '#4CAF50',
+  '--warn': '#FFB300',
+  '--alarm': '#E53935',
+  '--info': '#29B6F6',
+  '--equip-top': '#3A424B',
+  '--equip-bot': '#2E343B',
+  '--equip-edge': '#566171',
+  '--pipe-idle': '#4A535D',
+  '--svc-a': '#4A7FB5',
+  '--svc-b': '#8267AD',
+  '--svc-sample': '#B58141',
+  '--svc-cip': '#3F9E8C',
+  '--svc-product': '#4CAF50',
+  '--svc-waste': '#6B7078',
+  /* The four species bands and the mini axial profile borrow the TREND's pens, so these are
+     copied byte-for-byte from the GRAPHITE block of styles/tokens.css and from the identical
+     table in ui/chart.js.  A bed band and its trace on the trend are the same substance; they
+     must never be two different greens because two files guessed separately. */
+  '--pen-flow': '#4FC3F7',
+  '--pen-pctb': '#CE93D8',
+  '--pen-press': '#FFB74D',
+  '--pen-uv': '#66BB6A',
+  '--pen-cond': '#FF8A65',
+  '--pen-ph': '#B39DDB',
+  '--pen-temp': '#E8ECF0',
+  /* State lamps: a saturated face over a dark ring, with a soft gloss on top. */
+  '--lamp-off': '#39414A',
+  '--lamp-run': '#4CAF50',
+  '--lamp-warn': '#FFB300',
+  '--lamp-alarm': '#E53935',
+  '--lamp-ring': 'rgba(0,0,0,.55)',
+  '--lamp-gloss': 'rgba(255,255,255,.42)',
+  '--flow-dash': 'rgba(255,255,255,.80)',
+  /* The achromatic half of the depth recipe: the vessel specular, the raised inner highlight and
+     the two shadow ramps. */
+  '--spec': 'rgba(255,255,255,.06)',
+  '--spec-edge': 'rgba(255,255,255,.10)',
+  '--shade': 'rgba(0,0,0,.35)',
+  '--shade-deep': 'rgba(0,0,0,.50)',
 };
 
-/** Normative dark defaults — same bevel language, same field and pen colours. */
-const DARK_DEFAULTS = Object.assign({}, LIGHT_DEFAULTS, {
-  '--screen': '#2A2A2A', '--face': '#4A4744', '--face-2': '#3E3B38', '--face-3': '#565250',
-  '--bev-hi': '#7A7672', '--bev-lt': '#605C58', '--bev-sh': '#2E2B29', '--bev-dk': '#1A1817',
-  '--ink': '#E8E4DC', '--ink-2': '#B8B4AC', '--ink-off': '#8A8680',
-});
+/** Every token the schematic and the bed painter resolve at runtime. @type {string[]} */
+const TOKEN_NAMES = Object.keys(F);
 
 /* ===============================================================================================
  * 3.  COLOUR UTILITIES
@@ -321,25 +368,28 @@ const THEME_CACHE = new WeakMap();
 /**
  * Derive the painter-facing fields (`bands`, `lutAB`, bead / front / void colours) from a token map.
  *
+ * The packed bed has to read as part of the same drawing as the equipment around it, so the bead
+ * and void colours are mixed from the equipment tokens rather than carrying a palette of their own.
+ *
  * @param {Record<string,string>} raw a token map
  * @returns {object} the resolved theme
  */
 function deriveTheme(raw) {
   const t = Object.assign({}, raw);
-  t.isDark = luminance(t['--face']) < 0.35;
+  t.isDark = luminance(t['--panel']) < 0.35;
   t.lutAB = buildBlendLut(t['--svc-a'], t['--svc-b']);
   t.bands = [t['--pen-uv'], t['--pen-pctb'], t['--pen-cond'], t['--pen-ph']];
-  t.$bead = t.isDark ? mix(t['--face'], '#FFFFFF', 0.45) : mix(t['--face'], '#2A2A2A', 0.35);
+  t.$bead = mix(t['--equip-top'], t.isDark ? t['--ink'] : t['--panel-lo'], 0.5);
   t.$front = t['--fld-sp'];
-  t.$void = t.isDark ? t['--face-2'] : t['--face-3'];
-  t.$edge = t.isDark ? t['--bev-hi'] : t['--bev-dk'];
+  t.$void = t['--panel-hi'];
+  t.$edge = t['--equip-edge'];
   return t;
 }
 
 /**
  * Read the theme tokens this panel needs from a live element, falling back to the normative
- * FT-CLASSIC defaults for any token the stylesheet does not define.  Called once at mount and once
- * per theme change, never per frame.
+ * HMI-2012 values in {@link F} for any token the stylesheet does not define.  Called once at mount
+ * and once per theme change, never per frame.
  *
  * @param {Element|null} el an element inside the themed subtree, or null for `documentElement`
  * @returns {object} a resolved theme: the token map plus `isDark`, `lutAB`, `bands`
@@ -350,23 +400,12 @@ function readTheme(el) {
   if (target && typeof getComputedStyle === 'function') {
     try { cs = getComputedStyle(target); } catch (e) { cs = null; }
   }
-  let probe = LIGHT_DEFAULTS;
-  const attr = (target && target.getAttribute) ? target.getAttribute('data-theme') : null;
-  const rootAttr = attr || ((typeof document !== 'undefined')
-    ? document.documentElement.getAttribute('data-theme') : null);
-  if (rootAttr === 'dark') probe = DARK_DEFAULTS;
-  else if (!rootAttr && typeof matchMedia === 'function'
-    && matchMedia('(prefers-color-scheme: dark)').matches) probe = DARK_DEFAULTS;
-  if (cs) {
-    const face = String(cs.getPropertyValue('--face') || '').trim();
-    if (face) probe = luminance(face) < 0.35 ? DARK_DEFAULTS : LIGHT_DEFAULTS;
-  }
   /** @type {Record<string,string>} */
   const raw = {};
   for (let i = 0; i < TOKEN_NAMES.length; i++) {
     const name = TOKEN_NAMES[i];
     const v = cs ? String(cs.getPropertyValue(name) || '').trim() : '';
-    raw[name] = v || probe[name];
+    raw[name] = v || F[name];
   }
   return deriveTheme(raw);
 }
@@ -379,13 +418,11 @@ function readTheme(el) {
  * @returns {object} a resolved theme with `isDark`, `lutAB` and `bands`
  */
 function normaliseTheme(theme) {
-  if (!theme || typeof theme !== 'object') return deriveTheme(LIGHT_DEFAULTS);
+  if (!theme || typeof theme !== 'object') return deriveTheme(F);
   if (Array.isArray(theme.lutAB) && Array.isArray(theme.bands) && theme.$bead) return theme;
   const hit = THEME_CACHE.get(theme);
   if (hit) return hit;
-  const probe = (theme['--face'] && luminance(theme['--face']) < 0.35)
-    ? DARK_DEFAULTS : LIGHT_DEFAULTS;
-  const t = deriveTheme(Object.assign({}, probe, theme));
+  const t = deriveTheme(Object.assign({}, F, theme));
   THEME_CACHE.set(theme, t);
   return t;
 }
@@ -420,27 +457,40 @@ function fmtTankVolume(v_mL) {
  * =============================================================================================*/
 
 /**
- * Two-tone 2 px bevel frame.
+ * The HMI-2012 replacement for the two-tone bevel: one 1 px border at a 2 px radius.
+ *
+ * Depth now comes from the fill — a 180 degree gradient on the body underneath — so this rect is
+ * deliberately stroke-only and any level fill, hazard pattern or bed canvas already drawn inside
+ * the same box survives.  Coordinates sit on the half-unit grid so the stroke stays crisp.
+ *
  * @param {number} x left
  * @param {number} y top
  * @param {number} w width
  * @param {number} h height
- * @param {boolean} sunken true for a sunken frame, false for raised
+ * @param {boolean} sunken true for a recessed field edge, false for an equipment edge
  * @returns {string} SVG markup
  */
-function bevel(x, y, w, h, sunken) {
-  const o1 = sunken ? 'pid-bv-dk' : 'pid-bv-hi';
-  const o2 = sunken ? 'pid-bv-hi' : 'pid-bv-dk';
-  const i1 = sunken ? 'pid-bv-sh' : 'pid-bv-lt';
-  const i2 = sunken ? 'pid-bv-lt' : 'pid-bv-sh';
-  const L = x + 0.5;
-  const T = y + 0.5;
-  const R = x + w - 0.5;
-  const B = y + h - 0.5;
-  return `<path class="${o1}" d="M${L},${B} V${T} H${R}"/>`
-    + `<path class="${o2}" d="M${R},${T} V${B} H${L}"/>`
-    + `<path class="${i1}" d="M${L + 1},${B - 1} V${T + 1} H${R - 1}"/>`
-    + `<path class="${i2}" d="M${R - 1},${T + 1} V${B - 1} H${L + 1}"/>`;
+function edgeBox(x, y, w, h, sunken) {
+  return `<rect class="pid-edge${sunken ? ' pid-edge--in' : ''}" x="${x + 0.5}" y="${y + 0.5}" `
+    + `width="${w - 1}" height="${h - 1}" rx="${R_BOX}"/>`;
+}
+
+/**
+ * Vessel and equipment modelling: a 1 px specular highlight down the inside left edge and a soft
+ * shadow pooled at the base.  Emitted AFTER the level fill at every call site, so the highlight
+ * reads as the light on the vessel wall rather than as a line under the liquid.
+ *
+ * @param {number} x left
+ * @param {number} y top
+ * @param {number} w width
+ * @param {number} h height
+ * @returns {string} SVG markup
+ */
+function sheen(x, y, w, h) {
+  const sh = clamp(h * 0.28, 4, 16);
+  return `<path class="pid-spec" d="M${x + 1.5},${y + 2.5} V${y + h - 2.5}"/>`
+    + `<rect class="pid-base-sh" x="${x + 1}" y="${(y + h - 1 - sh).toFixed(1)}" `
+    + `width="${w - 2}" height="${sh.toFixed(1)}"/>`;
 }
 
 /** Right-hand padding inside a label box, schematic units. @type {number} */
@@ -474,7 +524,12 @@ function euWidth(eu) {
 }
 
 /**
- * A sunken label box: near-black field, right-aligned tabular value, dim EU suffix.
+ * A recessed label box: near-black field under a soft top-inset shadow, a 1 px field edge, a
+ * right-aligned tabular value in WHITE and a dim EU suffix.
+ *
+ * The white PV is the single change that does most of the re-skin's work: lime digits on black are
+ * a CRT tell, white digits on a recessed graphite field are what a 2012 faceplate looks like.
+ *
  * @param {string} id element id stem — the value text gets `${id}-v`
  * @param {number} x left
  * @param {number} y top
@@ -488,8 +543,10 @@ function fld(id, x, y, w, h, eu, kind) {
   const euW = eu ? euWidth(eu) + FLD_GUTTER : 0;
   const base = y + h - Math.max(4, (h - 10) / 2);
   return `<g id="${id}" class="pid-fld${kind ? ' pid-fld--' + kind : ''}">`
-    + `<rect class="pid-fld-bg" x="${x}" y="${y}" width="${w}" height="${h}"/>`
-    + bevel(x, y, w, h, true)
+    + `<rect class="pid-fld-bg" x="${x}" y="${y}" width="${w}" height="${h}" rx="${R_BOX}"/>`
+    + `<rect class="pid-fld-ins" x="${x}" y="${y}" width="${w}" height="${(h * 0.5).toFixed(1)}" `
+    + `rx="${R_BOX}"/>`
+    + edgeBox(x, y, w, h, true)
     + `<text id="${id}-v" class="pid-fld-v" x="${(x + w - FLD_PAD - euW).toFixed(1)}" `
     + `y="${base.toFixed(1)}" text-anchor="end">—</text>`
     + (eu ? `<text class="pid-fld-eu" x="${x + w - FLD_PAD}" y="${base.toFixed(1)}" `
@@ -498,7 +555,8 @@ function fld(id, x, y, w, h, eu, kind) {
 }
 
 /**
- * An ISA-5.1 field instrument bubble: plain circle, function letters over loop number.
+ * An ISA-5.1 field instrument bubble: a circle under a subtle raised gradient and a 1 px edge,
+ * function letters over loop number.
  *
  * Both lines are `dominant-baseline:middle`, so `dy = -3` and `dy = +8` place their *optical*
  * centres, not their baselines.  At 8.5 px and 7.5 px that puts the function-letter box at
@@ -523,7 +581,8 @@ function bubble(id, cx, cy, fn, loop, r) {
 }
 
 /**
- * A round glassy status lamp.
+ * A round status lamp: a 1 px dark ring, a soft top highlight and — once lit — an outer glow in
+ * the state colour, applied by {@link PID_CSS}.
  * @param {string} id element id
  * @param {number} cx centre x
  * @param {number} cy centre y
@@ -645,14 +704,16 @@ function tankCell(i, comp, role, label, lt) {
   const dx = x + TANK_DROP_DX;
   return `<g id="pid-tk${i}" class="pid-tank">`
     + `<text id="pid-tk${i}-role" class="pid-tag" x="${x}" y="20">${role}</text>`
-    + `<rect class="pid-tank-bg" x="${x}" y="${TANK_TOP}" width="${TANK_W}" height="${TANK_H}"/>`
+    + `<rect class="pid-tank-bg" x="${x}" y="${TANK_TOP}" width="${TANK_W}" height="${TANK_H}" `
+    + `rx="${R_BOX}"/>`
     + `<g clip-path="url(#pid-clip-tk${i})">`
     + `<rect id="pid-tk${i}-fill" class="pid-tank-fill" x="${x}" y="70" `
     + `width="${TANK_W}" height="30"/>`
     + `<line id="pid-tk${i}-men" class="pid-tank-men" x1="${x}" y1="70" `
     + `x2="${x + TANK_W}" y2="70"/>`
     + '</g>'
-    + bevel(x, TANK_TOP, TANK_W, TANK_H, true)
+    + sheen(x, TANK_TOP, TANK_W, TANK_H)
+    + edgeBox(x, TANK_TOP, TANK_W, TANK_H, false)
     + leader(`M${x + TANK_W},44 H${x + 123}`)
     + bubble('pid-tk' + i + '-bub', x + 142, 44, 'LT', lt)
     + fld('pid-tk' + i + '-lv', x + 166, 35, 52, 18, 'L')
@@ -675,8 +736,9 @@ function tankCell(i, comp, role, label, lt) {
  */
 function detector(id, y, tag, glyph, comp, label) {
   return `<g id="${id}" class="pid-det">`
-    + `<rect class="pid-det-bg" x="1060" y="${y}" width="110" height="46"/>`
-    + bevel(1060, y, 110, 46, false)
+    + `<rect class="pid-det-bg" x="1060" y="${y}" width="110" height="46" rx="${R_BOX}"/>`
+    + sheen(1060, y, 110, 46)
+    + edgeBox(1060, y, 110, 46, false)
     + `<text class="pid-tag" x="1066" y="${y + 14}">${tag}</text>`
     + `<path class="pid-det-glyph" transform="translate(1060,${y})" d="${glyph}"/>`
     + hit(comp, 1060, y, 110, 46, label)
@@ -698,17 +760,17 @@ export const PID_TEMPLATE = `
      role="group" aria-label="Process and instrumentation diagram">
   <defs>
     <clipPath id="pid-clip-tk0"><rect x="${TANK_X[0]}" y="${TANK_TOP}" width="${TANK_W}"
-      height="${TANK_H}"/></clipPath>
+      height="${TANK_H}" rx="${R_BOX}"/></clipPath>
     <clipPath id="pid-clip-tk1"><rect x="${TANK_X[1]}" y="${TANK_TOP}" width="${TANK_W}"
-      height="${TANK_H}"/></clipPath>
+      height="${TANK_H}" rx="${R_BOX}"/></clipPath>
     <clipPath id="pid-clip-tk2"><rect x="${TANK_X[2]}" y="${TANK_TOP}" width="${TANK_W}"
-      height="${TANK_H}"/></clipPath>
+      height="${TANK_H}" rx="${R_BOX}"/></clipPath>
     <clipPath id="pid-clip-tk3"><rect x="${TANK_X[3]}" y="${TANK_TOP}" width="${TANK_W}"
-      height="${TANK_H}"/></clipPath>
+      height="${TANK_H}" rx="${R_BOX}"/></clipPath>
     <clipPath id="pid-clip-waste"><rect x="${WASTE_X}" y="${WASTE_Y}" width="${WASTE_W}"
-      height="${WASTE_H}"/></clipPath>
+      height="${WASTE_H}" rx="${R_BOX}"/></clipPath>
     <clipPath id="pid-clip-trap"><rect x="${TRAP_X}" y="${TRAP_TOP}" width="${TRAP_W}"
-      height="${TRAP_H}"/></clipPath>
+      height="${TRAP_H}" rx="${R_BOX}"/></clipPath>
     <pattern id="pid-hazard" width="8" height="8" patternUnits="userSpaceOnUse"
              patternTransform="rotate(45)">
       <rect width="8" height="8" class="pid-hz-bg"/>
@@ -719,6 +781,21 @@ export const PID_TEMPLATE = `
       <rect width="6" height="6" class="pid-hz-bg"/>
       <rect width="3" height="6" class="pid-flt-fg"/>
     </pattern>
+    <!-- The depth recipe. Every body is a 180deg gradient under a 1px edge; the two black ramps
+         are the inset shadow of a recessed field and the shadow pooled at a vessel base.  Stops
+         are classed, never inlined: a presentation attribute cannot resolve var(). -->
+    <linearGradient id="pid-g-equip" x1="0" y1="0" x2="0" y2="1">
+      <stop class="pid-gs-eq-a" offset="0"/><stop class="pid-gs-eq-b" offset="1"/>
+    </linearGradient>
+    <linearGradient id="pid-g-raised" x1="0" y1="0" x2="0" y2="1">
+      <stop class="pid-gs-rs-a" offset="0"/><stop class="pid-gs-rs-b" offset="1"/>
+    </linearGradient>
+    <linearGradient id="pid-g-inset" x1="0" y1="0" x2="0" y2="1">
+      <stop class="pid-gs-ins" offset="0"/><stop class="pid-gs-clear" offset="1"/>
+    </linearGradient>
+    <linearGradient id="pid-g-base" x1="0" y1="0" x2="0" y2="1">
+      <stop class="pid-gs-clear" offset="0"/><stop class="pid-gs-base" offset="1"/>
+    </linearGradient>
   </defs>
 
   <!-- ============================ PROCESS LINES (idle layer) ============================ -->
@@ -793,16 +870,18 @@ export const PID_TEMPLATE = `
 
   <!-- ============================ MIXER / FILTER / AIR TRAP ============================ -->
   <g id="pid-mixer" class="pid-eq">
-    <rect class="pid-eq-bg" x="136" y="226" width="108" height="52"/>
-    ${bevel(136, 226, 108, 52, false)}
+    <rect class="pid-eq-bg" x="136" y="226" width="108" height="52" rx="${R_BOX}"/>
+    ${sheen(136, 226, 108, 52)}
+    ${edgeBox(136, 226, 108, 52, false)}
     <path class="pid-eq-glyph" d="M142,272 L154,232 L166,272 L178,232 L190,272 L202,232
                                   L214,272 L226,232 L238,272"/>
     <text class="pid-tag" x="190" y="220" text-anchor="middle">M-101</text>
     ${hit('M-101', 136, 226, 108, 52, 'Gradient mixer M-101')}
   </g>
   <g id="pid-filter" class="pid-eq">
-    <rect class="pid-eq-bg" x="282" y="228" width="68" height="48"/>
-    ${bevel(282, 228, 68, 48, false)}
+    <rect class="pid-eq-bg" x="282" y="228" width="68" height="48" rx="${R_BOX}"/>
+    ${sheen(282, 228, 68, 48)}
+    ${edgeBox(282, 228, 68, 48, false)}
     <path class="pid-eq-glyph" d="M287,238 H345 M287,247 H345 M287,256 H345 M287,265 H345"/>
     <text class="pid-tag" x="316" y="222" text-anchor="middle">F-101</text>
     ${hit('F-101', 282, 228, 68, 48, 'Inline filter F-101')}
@@ -810,14 +889,16 @@ export const PID_TEMPLATE = `
   <g id="pid-trap" class="pid-eq">
     <line class="pid-vent" x1="415" y1="${TRAP_TOP}" x2="415" y2="204"/>
     <line class="pid-vent" x1="408" y1="204" x2="422" y2="204"/>
-    <rect class="pid-eq-bg" x="${TRAP_X}" y="${TRAP_TOP}" width="${TRAP_W}" height="${TRAP_H}"/>
+    <rect class="pid-eq-bg" x="${TRAP_X}" y="${TRAP_TOP}" width="${TRAP_W}" height="${TRAP_H}"
+          rx="${R_BOX}"/>
     <g clip-path="url(#pid-clip-trap)">
       <rect id="pid-trap-liq" class="pid-trap-liq" x="${TRAP_X}" y="240" width="${TRAP_W}"
             height="48"/>
       <line id="pid-trap-men" class="pid-tank-men" x1="${TRAP_X}" y1="240"
             x2="${TRAP_X + TRAP_W}" y2="240"/>
     </g>
-    ${bevel(TRAP_X, TRAP_TOP, TRAP_W, TRAP_H, true)}
+    ${sheen(TRAP_X, TRAP_TOP, TRAP_W, TRAP_H)}
+    ${edgeBox(TRAP_X, TRAP_TOP, TRAP_W, TRAP_H, false)}
     <text class="pid-tag" x="446" y="220">AT-101</text>
     ${hit('AT-101', TRAP_X, TRAP_TOP, TRAP_W, TRAP_H, 'Air trap AT-101')}
   </g>
@@ -863,12 +944,13 @@ export const PID_TEMPLATE = `
 
   <!-- ============================ COLUMN ============================ -->
   <g id="pid-column" class="pid-col">
-    <rect class="pid-col-adapter" x="812" y="140" width="176" height="16"/>
-    ${bevel(812, 140, 176, 16, false)}
-    <rect class="pid-col-adapter" x="812" y="378" width="176" height="16"/>
-    ${bevel(812, 378, 176, 16, false)}
-    <rect class="pid-col-tube" x="820" y="148" width="160" height="238"/>
-    ${bevel(820, 148, 160, 238, true)}
+    <rect class="pid-col-adapter" x="812" y="140" width="176" height="16" rx="${R_BOX}"/>
+    ${edgeBox(812, 140, 176, 16, false)}
+    <rect class="pid-col-adapter" x="812" y="378" width="176" height="16" rx="${R_BOX}"/>
+    ${edgeBox(812, 378, 176, 16, false)}
+    <rect class="pid-col-tube" x="820" y="148" width="160" height="238" rx="${R_BOX}"/>
+    ${sheen(820, 148, 160, 238)}
+    ${edgeBox(820, 148, 160, 238, false)}
     <line class="pid-col-frit" x1="${BED_X}" y1="${BED_Y}" x2="${BED_X + BED_W}" y2="${BED_Y}"/>
     <line class="pid-col-frit" x1="${BED_X}" y1="${BED_Y + BED_H}" x2="${BED_X + BED_W}"
           y2="${BED_Y + BED_H}"/>
@@ -977,7 +1059,8 @@ export const PID_TEMPLATE = `
       <rect id="pid-waste-fill" class="pid-waste-fill" x="${WASTE_X}" y="388"
             width="${WASTE_W}" height="24"/>
     </g>
-    ${bevel(WASTE_X, WASTE_Y, WASTE_W, WASTE_H, true)}
+    ${sheen(WASTE_X, WASTE_Y, WASTE_W, WASTE_H)}
+    ${edgeBox(WASTE_X, WASTE_Y, WASTE_W, WASTE_H, false)}
     <text class="pid-tag" x="146" y="366">WASTE</text>
     ${fld('pid-waste-lv', 146, 372, 76, 18, 'L')}
     ${hit('WASTE', WASTE_X, WASTE_Y, WASTE_W, WASTE_H, 'Waste container')}
@@ -985,8 +1068,9 @@ export const PID_TEMPLATE = `
 
   <g id="pid-collector" class="pid-fc">
     <line class="pid-rail" x1="1360" y1="348" x2="1616" y2="348"/>
-    <rect class="pid-fc-bg" x="1352" y="360" width="264" height="60"/>
-    ${bevel(1352, 360, 264, 60, false)}
+    <rect class="pid-fc-bg" x="1352" y="360" width="264" height="60" rx="${R_BOX}"/>
+    ${sheen(1352, 360, 264, 60)}
+    ${edgeBox(1352, 360, 264, 60, false)}
     <g id="pid-vials"></g>
     <g id="pid-frac-head" class="pid-frac-head" transform="translate(${VIAL_PARK_X},0)">
       <line x1="0" y1="348" x2="0" y2="360"/>
@@ -999,23 +1083,23 @@ export const PID_TEMPLATE = `
 
   <!-- ============================ SERVICE LEGEND ============================ -->
   <g id="pid-legend" class="pid-legend" aria-hidden="true">
-    <rect class="pid-lg-sw" x="1180" y="26" width="16" height="10"
-          style="fill:var(--svc-a,#2D6FB8)"/>
+    <rect class="pid-lg-sw" x="1180" y="26" width="16" height="10" rx="${R_BOX}"
+          style="fill:var(--svc-a,${F['--svc-a']})"/>
     <text class="pid-tag" x="1200" y="35">A</text>
-    <rect class="pid-lg-sw" x="1254" y="26" width="16" height="10"
-          style="fill:var(--svc-b,#8A5BC8)"/>
+    <rect class="pid-lg-sw" x="1254" y="26" width="16" height="10" rx="${R_BOX}"
+          style="fill:var(--svc-b,${F['--svc-b']})"/>
     <text class="pid-tag" x="1274" y="35">B</text>
-    <rect class="pid-lg-sw" x="1328" y="26" width="16" height="10"
-          style="fill:var(--svc-sample,#C8862B)"/>
+    <rect class="pid-lg-sw" x="1328" y="26" width="16" height="10" rx="${R_BOX}"
+          style="fill:var(--svc-sample,${F['--svc-sample']})"/>
     <text class="pid-tag" x="1348" y="35">SMP</text>
-    <rect class="pid-lg-sw" x="1402" y="26" width="16" height="10"
-          style="fill:var(--svc-cip,#1FA98C)"/>
+    <rect class="pid-lg-sw" x="1402" y="26" width="16" height="10" rx="${R_BOX}"
+          style="fill:var(--svc-cip,${F['--svc-cip']})"/>
     <text class="pid-tag" x="1422" y="35">CIP</text>
-    <rect class="pid-lg-sw" x="1476" y="26" width="16" height="10"
-          style="fill:var(--svc-product,#16C60C)"/>
+    <rect class="pid-lg-sw" x="1476" y="26" width="16" height="10" rx="${R_BOX}"
+          style="fill:var(--svc-product,${F['--svc-product']})"/>
     <text class="pid-tag" x="1496" y="35">PROD</text>
-    <rect class="pid-lg-sw" x="1550" y="26" width="16" height="10"
-          style="fill:var(--svc-waste,#6B6B6B)"/>
+    <rect class="pid-lg-sw" x="1550" y="26" width="16" height="10" rx="${R_BOX}"
+          style="fill:var(--svc-waste,${F['--svc-waste']})"/>
     <text class="pid-tag" x="1570" y="35">WST</text>
   </g>
 </svg>`;
@@ -1024,167 +1108,203 @@ export const PID_TEMPLATE = `
  * 7.  PANEL STYLESHEET (injected once; scoped to .pid-root)
  * =============================================================================================*/
 
-/** Panel stylesheet — every colour is an FT-CLASSIC token. @type {string} */
+/**
+ * Panel stylesheet.
+ *
+ * Every colour resolves through a token; the `var()` fallback is interpolated from {@link F}, so
+ * this sheet holds no colour literal of its own and cannot drift from what the canvas painter uses.
+ *
+ * Every rule is scoped under `.pid-root`.  `styles/app.css` carries a shared `.pid-*` vocabulary
+ * whose text rule (`.pid-svg text`) outranks a bare single-class selector; scoping puts this sheet
+ * — which is appended to `<head>` at panel construction — ahead on both specificity and source
+ * order, so the symbol internals are governed here and nowhere else.
+ *
+ * @type {string}
+ */
 const PID_CSS = `
 .pid-root{position:relative;display:block;width:100%;height:100%;min-height:220px;
-  background:var(--face,#C7C3BC);color:var(--ink,#101010);
-  font-family:var(--font-ui,system-ui,'Segoe UI',Tahoma,sans-serif);border-radius:0;
-  box-shadow:inset 1px 1px 0 var(--bev-dk,#4A4744),inset -1px -1px 0 var(--bev-hi,#FFF),
-    inset 2px 2px 0 var(--bev-sh,#85817B),inset -2px -2px 0 var(--bev-lt,#E6E2DA);
+  background:var(--screen,${F['--screen']});color:var(--ink,${F['--ink']});
+  font-family:var(--font-ui,'Segoe UI',Roboto,system-ui,sans-serif);border-radius:${R_BOX}px;
+  box-shadow:inset 0 0 0 1px var(--edge,${F['--edge']});
   -webkit-user-select:none;user-select:none;}
 .pid-root .pid-svg{display:block;width:100%;height:100%;overflow:hidden;}
-.pid-bed-canvas{position:absolute;left:0;top:0;pointer-events:none;}
-.pid-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+.pid-root .pid-bed-canvas{position:absolute;left:0;top:0;pointer-events:none;}
+.pid-root .pid-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
   clip:rect(0 0 0 0);white-space:nowrap;border:0;}
 
-/* ---- bevel strokes -------------------------------------------------------- */
-.pid-bv-hi,.pid-bv-lt,.pid-bv-sh,.pid-bv-dk{fill:none;stroke-width:1;shape-rendering:crispEdges;}
-.pid-bv-hi{stroke:var(--bev-hi,#FFFFFF);}
-.pid-bv-lt{stroke:var(--bev-lt,#E6E2DA);}
-.pid-bv-sh{stroke:var(--bev-sh,#85817B);}
-.pid-bv-dk{stroke:var(--bev-dk,#4A4744);}
+/* ---- the depth recipe: gradient stops, 1px edges, glass -------------------- */
+.pid-root .pid-gs-eq-a{stop-color:var(--equip-top,${F['--equip-top']});}
+.pid-root .pid-gs-eq-b{stop-color:var(--equip-bot,${F['--equip-bot']});}
+.pid-root .pid-gs-rs-a{stop-color:var(--panel-hi,${F['--panel-hi']});}
+.pid-root .pid-gs-rs-b{stop-color:var(--panel,${F['--panel']});}
+.pid-root .pid-gs-ins{stop-opacity:.50;}
+.pid-root .pid-gs-base{stop-opacity:.35;}
+.pid-root .pid-gs-clear{stop-opacity:0;}
+.pid-root .pid-edge{fill:none;stroke:var(--equip-edge,${F['--equip-edge']});stroke-width:1;}
+.pid-root .pid-edge--in{stroke:var(--fld-edge,${F['--fld-edge']});}
+.pid-root .pid-spec{fill:none;stroke:var(--spec-edge,${F['--spec-edge']});stroke-width:1;}
+.pid-root .pid-base-sh{fill:url(#pid-g-base);pointer-events:none;}
 
 /* ---- text ----------------------------------------------------------------- */
-.pid-tag{font-size:9px;fill:var(--ink,#101010);letter-spacing:.04em;text-transform:uppercase;
-  font-weight:600;}
-.pid-tag--state{fill:var(--ink-2,#3A3A3A);font-size:9px;}
-.pid-bub-t{fill:var(--ink,#101010);letter-spacing:.02em;font-weight:600;
+.pid-root .pid-tag{font-size:9px;fill:var(--ink-2,${F['--ink-2']});letter-spacing:.02em;
+  text-transform:uppercase;font-weight:600;}
+.pid-root .pid-tag--state{fill:var(--ink-3,${F['--ink-3']});font-size:9px;}
+.pid-root .pid-bub-t{fill:var(--ink,${F['--ink']});letter-spacing:.02em;font-weight:600;
   dominant-baseline:middle;}
-.pid-bub-fn{font-size:8.5px;}
-.pid-bub-lp{font-size:7.5px;}
+.pid-root .pid-bub-fn{font-size:8.5px;}
+.pid-root .pid-bub-lp{font-size:7.5px;}
 
 /* ---- label boxes ---------------------------------------------------------- */
-.pid-fld-bg{fill:var(--fld-bg,#0A0F0A);}
-.pid-fld-v{font-family:var(--font-num,ui-monospace,Consolas,monospace);
-  font-variant-numeric:tabular-nums lining-nums;font-size:12px;font-weight:700;
-  fill:var(--fld-pv,#12FF4B);}
-.pid-fld-eu{font-family:var(--font-num,ui-monospace,Consolas,monospace);font-size:8px;
-  fill:var(--fld-eu,#9FB39F);}
-.pid-fld--sp .pid-fld-v{fill:var(--fld-sp,#FFD400);}
-.pid-fld--out .pid-fld-v{fill:var(--fld-out,#00E5FF);}
-.pid-fld.is-alarm .pid-fld-v{fill:var(--fld-alarm,#FF3B30);}
-.pid-fld.is-stale .pid-fld-v{fill:var(--fld-stale,#7A8A7A);}
+.pid-root .pid-fld-bg{fill:var(--fld-bg,${F['--fld-bg']});}
+.pid-root .pid-fld-ins{fill:url(#pid-g-inset);}
+.pid-root .pid-fld-v{font-family:var(--font-num,'Roboto Mono',Consolas,ui-monospace,monospace);
+  font-variant-numeric:tabular-nums lining-nums;font-size:12px;font-weight:600;
+  fill:var(--fld-pv,${F['--fld-pv']});}
+.pid-root .pid-fld-eu{font-family:var(--font-num,'Roboto Mono',Consolas,ui-monospace,monospace);
+  font-size:8px;fill:var(--fld-eu,${F['--fld-eu']});}
+.pid-root .pid-fld--sp .pid-fld-v{fill:var(--fld-sp,${F['--fld-sp']});}
+.pid-root .pid-fld--out .pid-fld-v{fill:var(--fld-out,${F['--fld-out']});}
+.pid-root .pid-fld.is-alarm .pid-fld-v{fill:var(--fld-alarm,${F['--fld-alarm']});}
+.pid-root .pid-fld.is-alarm .pid-edge{stroke:var(--alarm,${F['--alarm']});}
+.pid-root .pid-fld.is-stale .pid-fld-v{fill:var(--fld-stale,${F['--fld-stale']});}
 
-/* ---- lamps ---------------------------------------------------------------- */
-.pid-lamp-b{fill:var(--lamp-off,#4A4744);stroke:#2A2A2A;stroke-width:1;}
-.pid-lamp-hi{fill:none;stroke:rgba(255,255,255,.85);stroke-width:1;stroke-linecap:round;}
-.pid-lamp.is-run .pid-lamp-b{fill:var(--lamp-run,#16C60C);}
-.pid-lamp.is-warn .pid-lamp-b{fill:var(--lamp-warn,#FFC000);}
-.pid-lamp.is-alarm .pid-lamp-b{fill:var(--lamp-alarm,#E81123);}
-.pid-lamp.is-blink .pid-lamp-b{animation:pid-blink 1s steps(1,end) infinite;}
+/* ---- lamps: 1px dark ring, top highlight, state glow at rest ---------------- */
+.pid-root .pid-lamp-b{fill:var(--lamp-off,${F['--lamp-off']});
+  stroke:var(--lamp-ring,${F['--lamp-ring']});stroke-width:1;}
+.pid-root .pid-lamp-hi{fill:none;stroke:var(--lamp-gloss,${F['--lamp-gloss']});
+  stroke-width:1;stroke-linecap:round;}
+.pid-root .pid-lamp.is-run .pid-lamp-b{fill:var(--lamp-run,${F['--lamp-run']});
+  filter:drop-shadow(0 0 2px var(--lamp-run,${F['--lamp-run']}));}
+.pid-root .pid-lamp.is-warn .pid-lamp-b{fill:var(--lamp-warn,${F['--lamp-warn']});
+  filter:drop-shadow(0 0 2px var(--lamp-warn,${F['--lamp-warn']}));}
+.pid-root .pid-lamp.is-alarm .pid-lamp-b{fill:var(--lamp-alarm,${F['--lamp-alarm']});
+  filter:drop-shadow(0 0 2.5px var(--lamp-alarm,${F['--lamp-alarm']}));}
+.pid-root .pid-lamp.is-blink .pid-lamp-b{animation:pid-blink 1s steps(1,end) infinite;}
 @keyframes pid-blink{0%{opacity:1}50%{opacity:.2}100%{opacity:1}}
 
-/* ---- process lines -------------------------------------------------------- */
-.pid-pipes path{stroke:var(--pipe-idle,#4A4744);stroke-width:3.5;stroke-linecap:butt;
-  stroke-linejoin:miter;}
-.pid-pipes path.is-active{stroke-width:5;}
-.pid-flow-layer path{stroke:#FFFFFF;stroke-width:3;stroke-dasharray:6 10;stroke-linecap:butt;
-  opacity:0;pointer-events:none;}
-.pid-flow-layer path.is-flowing{opacity:.85;}
-.pid-arrows path{fill:#FFFFFF;opacity:0;pointer-events:none;}
-.pid-arrows path.is-shown{opacity:.9;}
+/* ---- process lines ---------------------------------------------------------
+   The dash offset is advanced numerically at 10 Hz by advanceDashes(); the shared marching
+   animation in app.css would override that attribute and march every line at one speed. */
+.pid-root .pid-pipes path{fill:none;stroke:var(--pipe-idle,${F['--pipe-idle']});stroke-width:3.5;
+  stroke-linecap:butt;stroke-linejoin:miter;}
+.pid-root .pid-pipes path.is-active{stroke-width:5;}
+.pid-root .pid-flow-layer path{stroke:var(--flow-dash,${F['--flow-dash']});stroke-width:3;
+  stroke-dasharray:6 10;stroke-linecap:butt;opacity:0;pointer-events:none;animation:none;}
+.pid-root .pid-flow-layer path.is-flowing{opacity:1;}
+.pid-root .pid-arrows path{fill:var(--flow-dash,${F['--flow-dash']});opacity:0;
+  pointer-events:none;}
+.pid-root .pid-arrows path.is-shown{opacity:1;}
 
 /* ---- tanks ---------------------------------------------------------------- */
-.pid-tank-bg{fill:var(--face-3,#D2CEC7);}
-.pid-tank-fill{fill:var(--svc-a,#2D6FB8);opacity:.85;}
-.pid-tank-men{stroke:#FFFFFF;stroke-width:1.2;opacity:.6;}
-.pid-tank-nozzle{stroke:var(--pipe-idle,#4A4744);stroke-width:3.5;fill:none;}
-.pid-tank.is-empty .pid-tank-bg{fill:var(--face-2,#BFBBB4);}
+.pid-root .pid-tank-bg{fill:url(#pid-g-equip);}
+.pid-root .pid-tank-fill{fill:var(--svc-a,${F['--svc-a']});opacity:.62;}
+.pid-root .pid-tank-men{stroke:var(--ink,${F['--ink']});stroke-opacity:.45;stroke-width:1.2;}
+.pid-root .pid-tank-nozzle{stroke:var(--pipe-idle,${F['--pipe-idle']});stroke-width:3.5;fill:none;}
+.pid-root .pid-tank.is-empty .pid-tank-bg{fill:var(--panel-lo,${F['--panel-lo']});}
 
 /* ---- valves --------------------------------------------------------------- */
-.pid-vlv-body{fill:var(--pipe-idle,#4A4744);stroke:var(--bev-dk,#4A4744);stroke-width:1;}
-.pid-vlv-stem{stroke:var(--ink-2,#3A3A3A);stroke-width:1.6;}
-.pid-vlv.is-open .pid-vlv-body{fill:var(--svc-a,#2D6FB8);}
-.pid-vlv.is-fault .pid-vlv-body{fill:url(#pid-fault);}
-.pid-vlv.is-moving .pid-vlv-body{opacity:.55;}
-.pid-vlv.is-alarm .pid-vlv-body{stroke:var(--lamp-alarm,#E81123);stroke-width:2;}
-.pid-vlv.is-warn .pid-vlv-body{stroke:var(--lamp-warn,#FFC000);stroke-width:2;}
-.pid-hz-bg{fill:var(--face-2,#BFBBB4);}
-.pid-hz-fg{fill:var(--lamp-warn,#FFC000);}
-.pid-flt-fg{fill:var(--lamp-alarm,#E81123);}
+.pid-root .pid-vlv-body{fill:var(--pipe-idle,${F['--pipe-idle']});
+  stroke:var(--equip-edge,${F['--equip-edge']});stroke-width:1;}
+.pid-root .pid-vlv-stem{stroke:var(--ink-2,${F['--ink-2']});stroke-width:1.6;}
+.pid-root .pid-vlv.is-open .pid-vlv-body{fill:var(--svc-a,${F['--svc-a']});}
+.pid-root .pid-vlv.is-fault .pid-vlv-body{fill:url(#pid-fault);}
+.pid-root .pid-vlv.is-moving .pid-vlv-body{opacity:.55;}
+.pid-root .pid-vlv.is-alarm .pid-vlv-body{stroke:var(--alarm,${F['--alarm']});stroke-width:2;}
+.pid-root .pid-vlv.is-warn .pid-vlv-body{stroke:var(--warn,${F['--warn']});stroke-width:2;}
+.pid-root .pid-hz-bg{fill:var(--equip-bot,${F['--equip-bot']});}
+.pid-root .pid-hz-fg{fill:var(--warn,${F['--warn']});}
+.pid-root .pid-flt-fg{fill:var(--alarm,${F['--alarm']});}
 
 /* ---- rotary valves -------------------------------------------------------- */
-.pid-rot-b{fill:var(--face-3,#D2CEC7);stroke:var(--bev-dk,#4A4744);stroke-width:1.4;}
-.pid-rot-ports circle{fill:var(--ink-2,#3A3A3A);}
-.pid-rot-ch{fill:none;stroke:var(--pipe-idle,#4A4744);stroke-width:3;stroke-linecap:round;}
-.pid-rot-caps line{stroke:var(--ink,#101010);stroke-width:1.8;opacity:0;}
-.pid-rot-caps line.is-capped{opacity:.9;}
-.pid-rot-rotor line{stroke:var(--ink,#101010);stroke-width:1.6;}
-.pid-rot-rotor path{fill:var(--ink,#101010);}
-.pid-rot-rotor{transition:transform var(--dur-3,250ms) var(--ease-inout,ease);}
-.pid-rot.is-fault .pid-rot-b{stroke:var(--lamp-alarm,#E81123);stroke-width:2;}
-.pid-move-arc{fill:none;stroke:var(--fld-sp,#FFD400);stroke-width:2;opacity:0;
+.pid-root .pid-rot-b{fill:url(#pid-g-equip);stroke:var(--equip-edge,${F['--equip-edge']});
+  stroke-width:1;}
+.pid-root .pid-rot-ports circle{fill:var(--ink-3,${F['--ink-3']});}
+.pid-root .pid-rot-ch{fill:none;stroke:var(--pipe-idle,${F['--pipe-idle']});stroke-width:3;
+  stroke-linecap:round;}
+.pid-root .pid-rot-caps line{stroke:var(--ink-2,${F['--ink-2']});stroke-width:1.8;opacity:0;}
+.pid-root .pid-rot-caps line.is-capped{opacity:.9;}
+.pid-root .pid-rot-rotor line{stroke:var(--ink,${F['--ink']});stroke-width:1.6;}
+.pid-root .pid-rot-rotor path{fill:var(--ink,${F['--ink']});}
+.pid-root .pid-rot-rotor{transition:transform var(--dur-3,250ms) var(--ease-inout,ease);}
+.pid-root .pid-rot.is-fault .pid-rot-b{stroke:var(--alarm,${F['--alarm']});stroke-width:2;}
+.pid-root .pid-move-arc{fill:none;stroke:var(--fld-sp,${F['--fld-sp']});stroke-width:2;opacity:0;
   transform:rotate(-90deg);}
-.pid-move-arc.is-moving{opacity:1;}
+.pid-root .pid-move-arc.is-moving{opacity:1;}
 
 /* ---- equipment ------------------------------------------------------------ */
-.pid-eq-bg,.pid-det-bg,.pid-fc-bg{fill:var(--face,#C7C3BC);}
-.pid-eq-glyph,.pid-det-glyph{fill:none;stroke:var(--ink-2,#3A3A3A);stroke-width:1.2;
-  stroke-linejoin:round;}
-.pid-det-glyph{stroke-width:1.4;}
-.pid-mach-b{fill:var(--face-3,#D2CEC7);stroke:var(--bev-dk,#4A4744);stroke-width:1.4;}
-.pid-impeller path,.pid-impeller-static{fill:var(--ink-2,#3A3A3A);}
-.pid-impeller-hub{fill:var(--face,#C7C3BC);}
-.pid-mach.is-running .pid-impeller path{fill:var(--lamp-run,#16C60C);}
-.pid-vent{stroke:var(--ink-2,#3A3A3A);stroke-width:1.4;}
-.pid-trap-liq{fill:var(--svc-a,#2D6FB8);opacity:.85;}
-.pid-det.is-bypassed .pid-det-glyph{opacity:.3;}
+.pid-root .pid-eq-bg,.pid-root .pid-det-bg,.pid-root .pid-fc-bg{fill:url(#pid-g-equip);}
+.pid-root .pid-eq-glyph,.pid-root .pid-det-glyph{fill:none;stroke:var(--ink-2,${F['--ink-2']});
+  stroke-width:1.2;stroke-linejoin:round;}
+.pid-root .pid-det-glyph{stroke-width:1.4;}
+.pid-root .pid-mach-b{fill:url(#pid-g-equip);stroke:var(--equip-edge,${F['--equip-edge']});
+  stroke-width:1;}
+.pid-root .pid-impeller path,.pid-root .pid-impeller-static{fill:var(--ink-2,${F['--ink-2']});}
+.pid-root .pid-impeller-hub{fill:var(--equip-bot,${F['--equip-bot']});}
+.pid-root .pid-mach.is-running .pid-impeller path{fill:var(--ok,${F['--ok']});}
+.pid-root .pid-vent{stroke:var(--ink-3,${F['--ink-3']});stroke-width:1.4;}
+.pid-root .pid-trap-liq{fill:var(--svc-a,${F['--svc-a']});opacity:.62;}
+.pid-root .pid-det.is-bypassed .pid-det-glyph{opacity:.3;}
 
 /* ---- column --------------------------------------------------------------- */
-.pid-col-tube{fill:var(--fld-bg,#0A0F0A);}
-.pid-col-adapter{fill:var(--face-2,#BFBBB4);}
-.pid-col-frit{stroke:var(--ink-off,#7A7A7A);stroke-width:1.4;}
-.pid-col-ruler line{stroke:var(--ink-off,#7A7A7A);stroke-width:1;}
-.pid-col-axis{stroke:var(--ink-off,#7A7A7A);stroke-width:1;opacity:.6;}
-.pid-profile-line{fill:none;stroke:var(--pen-uv,#12FF4B);stroke-width:1.4;stroke-linejoin:round;}
-.pid-bracket{fill:none;stroke:var(--ink-2,#3A3A3A);stroke-width:1.2;}
+.pid-root .pid-col-tube{fill:var(--fld-bg,${F['--fld-bg']});}
+.pid-root .pid-col-adapter{fill:url(#pid-g-equip);}
+.pid-root .pid-col-frit{stroke:var(--equip-edge,${F['--equip-edge']});stroke-width:1.4;}
+.pid-root .pid-col-ruler line{stroke:var(--ink-3,${F['--ink-3']});stroke-width:1;opacity:.75;}
+.pid-root .pid-col-axis{stroke:var(--ink-3,${F['--ink-3']});stroke-width:1;opacity:.6;}
+.pid-root .pid-profile-line{fill:none;stroke:var(--pen-uv,${F['--pen-uv']});stroke-width:1.4;
+  stroke-linejoin:round;}
+.pid-root .pid-bracket{fill:none;stroke:var(--ink-3,${F['--ink-3']});stroke-width:1.2;}
 
 /* ---- instruments ---------------------------------------------------------- */
-.pid-bub-c{fill:var(--face-3,#D2CEC7);stroke:var(--ink,#101010);stroke-width:1.2;}
-.pid-inst.is-warn .pid-bub-c{stroke:var(--lamp-warn,#FFC000);stroke-width:2;}
-.pid-inst.is-alarm .pid-bub-c{stroke:var(--lamp-alarm,#E81123);stroke-width:2;}
-.pid-leader{fill:none;stroke:var(--ink-2,#3A3A3A);stroke-width:.8;}
+.pid-root .pid-bub-c{fill:url(#pid-g-raised);stroke:var(--ink-3,${F['--ink-3']});stroke-width:1;}
+.pid-root .pid-inst.is-warn .pid-bub-c{stroke:var(--warn,${F['--warn']});stroke-width:2;}
+.pid-root .pid-inst.is-alarm .pid-bub-c{stroke:var(--alarm,${F['--alarm']});stroke-width:2;}
+.pid-root .pid-leader{fill:none;stroke:var(--edge,${F['--edge']});stroke-width:.8;}
 
 /* ---- collector / waste ---------------------------------------------------- */
-.pid-rail{stroke:var(--ink-2,#3A3A3A);stroke-width:1.6;}
-.pid-vial{fill:var(--face-2,#BFBBB4);stroke:var(--bev-dk,#4A4744);stroke-width:.8;}
-.pid-vial-fill{fill:var(--svc-product,#16C60C);opacity:.9;}
-.pid-vial.is-active{stroke:var(--fld-sp,#FFD400);stroke-width:2;}
-.pid-frac-head line{stroke:var(--fld-sp,#FFD400);stroke-width:1.8;}
-.pid-frac-head path{fill:var(--fld-sp,#FFD400);}
-.pid-frac-head{transition:transform var(--dur-3,250ms) var(--ease-out,ease);}
-.pid-waste-hz{fill:url(#pid-hazard);opacity:.45;}
-.pid-waste-fill{fill:var(--svc-waste,#6B6B6B);opacity:.9;}
-.pid-lg-sw{stroke:var(--bev-dk,#4A4744);stroke-width:1;}
+.pid-root .pid-rail{stroke:var(--edge,${F['--edge']});stroke-width:1.6;}
+.pid-root .pid-vial{fill:var(--panel-lo,${F['--panel-lo']});stroke:var(--edge,${F['--edge']});
+  stroke-width:.8;}
+.pid-root .pid-vial-fill{fill:var(--svc-product,${F['--svc-product']});opacity:.7;}
+.pid-root .pid-vial.is-active{stroke:var(--fld-sp,${F['--fld-sp']});stroke-width:2;}
+.pid-root .pid-frac-head line{stroke:var(--fld-sp,${F['--fld-sp']});stroke-width:1.8;}
+.pid-root .pid-frac-head path{fill:var(--fld-sp,${F['--fld-sp']});}
+.pid-root .pid-frac-head{transition:transform var(--dur-3,250ms) var(--ease-out,ease);}
+.pid-root .pid-waste-hz{fill:url(#pid-hazard);opacity:.22;}
+.pid-root .pid-waste-fill{fill:var(--svc-waste,${F['--svc-waste']});opacity:.8;}
+.pid-root .pid-lg-sw{stroke:var(--edge,${F['--edge']});stroke-width:1;}
 
 /* ---- interaction ---------------------------------------------------------- */
-.pid-hit{fill:transparent;stroke:none;cursor:pointer;}
-.pid-hit:focus{outline:none;}
-.pid-hit:focus-visible{outline:2px solid var(--focus-ring);outline-offset:1px;}
-.pid-root.is-manual .pid-svg{outline:3px solid var(--lamp-warn);outline-offset:-4px;}
+.pid-root .pid-hit{fill:transparent;stroke:none;cursor:pointer;}
+.pid-root .pid-hit:focus{outline:none;}
+.pid-root .pid-hit:focus-visible{outline:2px solid var(--accent,${F['--accent']});
+  outline-offset:-2px;}
+.pid-root.is-manual .pid-svg{outline:2px solid var(--warn,${F['--warn']});outline-offset:-2px;}
 
 /* ---- toast + tooltip ------------------------------------------------------ */
-.pid-toast{position:absolute;left:50%;bottom:8px;transform:translateX(-50%);max-width:70%;
-  padding:4px 8px;background:var(--face-2,#BFBBB4);color:var(--ink,#101010);
-  font-size:11px;line-height:1.3;letter-spacing:.02em;border-radius:0;z-index:3;
-  box-shadow:inset 1px 1px 0 var(--bev-hi,#FFF),inset -1px -1px 0 var(--bev-dk,#4A4744),
-    inset 2px 2px 0 var(--bev-lt,#E6E2DA),inset -2px -2px 0 var(--bev-sh,#85817B);
+.pid-root .pid-toast{position:absolute;left:50%;bottom:8px;transform:translateX(-50%);max-width:70%;
+  padding:5px 9px;background:linear-gradient(180deg,var(--panel-hi,${F['--panel-hi']}),
+    var(--panel,${F['--panel']}));color:var(--ink,${F['--ink']});
+  font-size:11px;line-height:1.3;letter-spacing:.02em;border-radius:${R_BOX}px;z-index:3;
+  border:1px solid var(--edge,${F['--edge']});
+  box-shadow:var(--elev-raised,0 1px 2px ${F['--shade']},inset 0 1px 0 ${F['--spec']});
   opacity:0;pointer-events:none;transition:opacity var(--dur-2,160ms) var(--ease-out,ease);}
-.pid-toast.is-shown{opacity:1;}
-.pid-toast.is-warn{color:var(--ink,#101010);
-  box-shadow:inset 0 0 0 2px var(--lamp-warn,#FFC000),inset 1px 1px 0 var(--bev-hi,#FFF);}
-.pid-tip{position:absolute;z-index:4;max-width:250px;padding:6px 7px;pointer-events:none;
-  background:var(--face-2,#BFBBB4);color:var(--ink-2,#3A3A3A);font-size:11px;line-height:1.35;
-  border-radius:0;opacity:0;transition:opacity var(--dur-2,160ms) var(--ease-out,ease);
-  box-shadow:inset 1px 1px 0 var(--bev-hi,#FFF),inset -1px -1px 0 var(--bev-dk,#4A4744),
-    inset 2px 2px 0 var(--bev-lt,#E6E2DA),inset -2px -2px 0 var(--bev-sh,#85817B),
-    2px 2px 0 rgba(0,0,0,.28);}
-.pid-tip.is-shown{opacity:1;}
-.pid-tip b{display:block;color:var(--ink,#101010);font-size:10px;letter-spacing:.04em;
-  text-transform:uppercase;margin-bottom:2px;}
-.pid-tip .pid-tip-val{display:block;margin-top:4px;color:var(--ink,#101010);
-  font-family:var(--font-num,ui-monospace,Consolas,monospace);font-variant-numeric:tabular-nums;}
-.pid-tip .pid-tip-typ{display:block;margin-top:3px;color:var(--ink-off,#7A7A7A);font-size:10px;}
+.pid-root .pid-toast.is-shown{opacity:1;}
+.pid-root .pid-toast.is-warn{border-color:var(--warn,${F['--warn']});}
+.pid-root .pid-tip{position:absolute;z-index:4;max-width:250px;padding:6px 8px;pointer-events:none;
+  background:linear-gradient(180deg,var(--panel-hi,${F['--panel-hi']}),
+    var(--panel,${F['--panel']}));color:var(--ink-2,${F['--ink-2']});font-size:11px;line-height:1.35;
+  border:1px solid var(--edge,${F['--edge']});border-radius:${R_BOX}px;opacity:0;
+  transition:opacity var(--dur-2,160ms) var(--ease-out,ease);
+  box-shadow:var(--elev-float,0 8px 24px ${F['--shade-deep']},0 1px 3px ${F['--shade']});}
+.pid-root .pid-tip.is-shown{opacity:1;}
+.pid-root .pid-tip b{display:block;color:var(--ink,${F['--ink']});font-size:10px;
+  letter-spacing:.02em;text-transform:uppercase;margin-bottom:2px;}
+.pid-root .pid-tip .pid-tip-val{display:block;margin-top:4px;color:var(--ink,${F['--ink']});
+  font-family:var(--font-num,'Roboto Mono',Consolas,ui-monospace,monospace);
+  font-variant-numeric:tabular-nums;}
+.pid-root .pid-tip .pid-tip-typ{display:block;margin-top:3px;color:var(--ink-3,${F['--ink-3']});
+  font-size:10px;}
 
 @media (prefers-reduced-motion: reduce){
   .pid-root *{transition-duration:0ms !important;animation:none !important;}
@@ -1981,6 +2101,7 @@ export function createPID(rootEl, ctx) {
       body.setAttribute('y', String(VIAL_TOP));
       body.setAttribute('width', w.toFixed(2));
       body.setAttribute('height', String(VIAL_H));
+      body.setAttribute('rx', String(R_BOX));
       const fill = doc.createElementNS('http://www.w3.org/2000/svg', 'rect');
       fill.setAttribute('class', 'pid-vial-fill');
       fill.setAttribute('x', x.toFixed(2));
