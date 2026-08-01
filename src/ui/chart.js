@@ -15,9 +15,23 @@
  * WHY PV-VERSUS-SP IS THE WHOLE DESIGN
  * Every pen is a pair. The process variable is a SOLID 1.5 px stroke; its setpoint is the
  * SAME HUE, DASHED 5-4, at 1 px. FIC-101 (flow) and AIC-101 (%B) are true closed loops.
- * PT-101 and PDT-101 have no setpoint — they get their alarm LIMIT as a dashed line in their
- * own hue, captioned `LIM`, never `SP`. UV-101, CE-101, AE-101 and TT-101 are bare
- * measurements and show a PV field only. The rail never invents a setpoint.
+ * UV-101, CE-101, AE-101 and TT-101 are bare measurements and show a PV field only. The rail
+ * never invents a setpoint.
+ *
+ * A SETPOINT IS NOT AN ALARM LIMIT, AND THE RAIL MUST NOT PRETEND OTHERWISE
+ * A setpoint is a control TARGET the operator may move; an alarm limit is a protection
+ * THRESHOLD he may not. This rail used to print `LIM 1.60` in the SP field of PT-101 and
+ * PDT-101, which invites exactly the wrong assumption at 3 am — that the number is something
+ * the loop is driving towards. It does not any more:
+ *   - the SP column carries ONLY a real control setpoint, and is EMPTY for a tag that has
+ *     none. It is never reused and never borrowed;
+ *   - a LIMIT column of its own carries the ISA designation ({@link LIMIT_CODES} — HI, HH,
+ *     LO, LL), the threshold, its unit and its ALARM STATE (normal, in alarm, acknowledged);
+ *   - a setpoint is amber, the colour of a target. A limit is `--warn-ink` at rest and
+ *     `--alarm-ink` once the PV is through it, the colours of a protection threshold;
+ *   - on the plot the limit line is likewise NOT the pen's own hue on the setpoint's 5-4
+ *     dash. It is warn/alarm ink on a DASH-DOT of its own, captioned in full — `PT-101 HI
+ *     1.60 bar` — so it can be confused with neither the PV it guards nor any controller SP.
  *
  * WHICH PENS ARE LIT ON ARRIVAL. Pressure is the safety-critical variable on a column skid,
  * so PT-101 carries the default view together with its trip limit; UV-101 is the product
@@ -54,7 +68,7 @@
  */
 
 import { NUMERIC_CHANNELS, column, xIndexRange, decimateMinMax } from '../core/log.js';
-import { h, setText, cls } from './format.js';
+import { h, setText, setAttr, cls } from './format.js';
 import { glossaryFor } from '../data/glossary.js';
 
 /* -------------------------------------------------------------------------- */
@@ -76,8 +90,14 @@ const SHRINK_HYSTERESIS = 0.2;
 /** Top / bottom headroom on an autoscaled axis. */
 const HEADROOM_TOP = 0.08;
 const HEADROOM_BOTTOM = 0.04;
-/** Nested right-hand axis gutter width, css px. */
-const RIGHT_AXIS_STEP = 40;
+/** Nested right-hand axis gutter width, css px. Wide enough for a whole ISA tag. */
+const RIGHT_AXIS_STEP = 46;
+/** Left-hand axis gutter width, css px, when a left axis is in use. */
+const LEFT_AXIS_W = 48;
+/** Line height of the axis ownership caption block, css px. */
+const AXIS_LABEL_LINE = 10;
+/** Tag lines a single gutter may print before it collapses the rest into `+N`. */
+const AXIS_TAG_LINES_MAX = 2;
 /** Live edge sits at this fraction of the plot width while following. */
 const LIVE_EDGE_FRAC = 0.85;
 /** Below this samples-per-pixel the decimator is bypassed and raw points are drawn. */
@@ -90,8 +110,19 @@ const ARIA_PERIOD_MS = 400;
 const NICE_LADDER = [1, 2, 2.5, 5, 10];
 /** Finer ladder for the auto-fit window span, so growth still happens in rungs. */
 const SPAN_LADDER = [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
-/** The SP / limit dash signature. Binding: 5 on, 4 off, 1 px wide. */
+/** The SP dash signature. Binding: 5 on, 4 off, 1 px wide. Setpoints only. */
 const SP_DASH = [5, 4];
+/**
+ * The ALARM LIMIT signature: dash-DOT, never the setpoint's plain 5-4 dash. A protection
+ * threshold and a control target must not share a stroke, because they do not share a
+ * meaning — and the operator reads the plot before he reads any caption.
+ */
+const LIMIT_DASH = [7, 3, 2, 3];
+/** One period of {@link LIMIT_DASH}, for the phase-stable dash offset. */
+const LIMIT_DASH_PERIOD = 15;
+/** Limit line width, css px, at rest and while the PV is through the threshold. */
+const LIMIT_WIDTH = 1;
+const LIMIT_WIDTH_ALARM = 2;
 /** PV stroke width, css px. Binding: solid 1.5 px. */
 const PV_WIDTH = 1.5;
 /** SP stroke width, css px. */
@@ -117,6 +148,30 @@ const HELD_CHANNELS = new Set(['flow_setpoint_mL_min', 'pctB_setpoint']);
 
 /** Focusable controls inside the legend rail, in DOM order. */
 const RAIL_FOCUSABLE = 'input,button,select,textarea,a[href],[tabindex]';
+
+/**
+ * The four ISA-18.2 limit designations the rail can print. `HI` is the first high threshold
+ * an operator is expected to act on and `HH` the high-high one that trips; `LO` and `LL` are
+ * their falling twins. The designation is DERIVED from the alarm row that supplied the
+ * threshold — its comparison sense and its severity — never guessed from the value.
+ */
+const LIMIT_CODES = Object.freeze({ HI: 'HI', HH: 'HH', LO: 'LO', LL: 'LL' });
+
+/** Alarm severities that mean TRIP, and so designate `HH`/`LL` rather than `HI`/`LO`. */
+const TRIP_SEVERITIES = new Set(['CRITICAL', 'FAULT']);
+
+/**
+ * The three alarm states a limit field can show, and the word each one prints. Colour alone
+ * never carries this: a state an operator cannot read is a state he cannot hand over.
+ */
+const LIMIT_STATE_WORD = Object.freeze({ norm: 'NORM', alarm: 'ALM', ack: 'ACK' });
+
+/** The same three states spelled out for the screen reader and the tooltip. */
+const LIMIT_STATE_SAID = Object.freeze({
+  norm: 'normal',
+  alarm: 'in alarm, unacknowledged',
+  ack: 'in alarm, acknowledged',
+});
 
 /** Default x-channel names per x-mode. */
 const XCH_DEFAULT = Object.freeze({ volume: 'V_mL', time: 't_s', cv: 'V_CV' });
@@ -145,9 +200,10 @@ const DEFAULT_Y_AXES = Object.freeze([
 ]);
 
 /**
- * The eight default pens, in rail order. `sp` names a real log channel; `limitSignal`
- * names an `ALARM_TABLE` signal whose lowest rising threshold becomes the limit line.
- * A pen never has both.
+ * The eight default pens, in rail order. `sp` names a real log channel and fills the SP
+ * column; `limitSignal` names an `ALARM_TABLE` signal whose threshold fills the separate
+ * LIMIT column and draws the limit line. The two are different columns because they are
+ * different kinds of number — a pen may carry either, or neither.
  */
 const DEFAULT_PENS = Object.freeze([
   {
@@ -233,6 +289,11 @@ const FIXED_TOKENS = Object.freeze({
   '--fld-stale': '#6B7681',
   '--warn': '#FFB300',
   '--alarm': '#E53935',
+  // The two INK variants, for warn/alarm text and hairlines drawn ON the plot well rather
+  // than for a filled state chip. They are read live off the active theme like every other
+  // entry here, so the light palette's darker pair reaches the pale well correctly.
+  '--warn-ink': '#FFC24B',
+  '--alarm-ink': '#FF6B63',
   '--svc-a': '#4A7FB5',
   '--svc-b': '#8267AD',
   '--svc-sample': '#B58141',
@@ -479,6 +540,8 @@ function resolveColors(theme, pens) {
     fldStale: t['--fld-stale'],
     warn: t['--warn'],
     alarm: t['--alarm'],
+    warnInk: t['--warn-ink'],
+    alarmInk: t['--alarm-ink'],
     svcA: t['--svc-a'],
     svcB: t['--svc-b'],
     svcSample: t['--svc-sample'],
@@ -528,10 +591,25 @@ const SUNKEN =
 /** The focus ring, identical on every focusable control in the trend. */
 const FOCUS = 'outline:2px solid var(--accent);outline-offset:-2px';
 
+/**
+ * THE PEN RAIL'S NUMERIC GRID, declared once and consumed by both the sticky column header
+ * and every row, so PV sits under PV, SP under SP and LIMIT under LIMIT down the whole rail
+ * whatever each row happens to carry. `fr` rather than `px` because the rail may shrink on a
+ * narrow host: the three columns then compress together instead of one of them clipping.
+ *
+ * The tracks are sized from their WORST CASE, not their typical one, and the ratios below are
+ * a measured budget rather than a guess: 41 px buys the six monospace digits of `2500.0` mAU,
+ * 10 px a two-letter caption, 20 px a four-character unit, 24 px the widest state word, plus
+ * the padding and the internal gaps. LIMIT is the widest track because `HH 1.60 bar ALM` is
+ * the whole point of the column, and abbreviating it back into ambiguity would undo the fix.
+ */
+const RAIL_COLS = 'minmax(0,50fr) minmax(0,62fr) minmax(0,110fr)';
+
 const CHART_CSS = `
 .ftx{position:relative;display:flex;flex-direction:column;width:100%;height:100%;
-  min-height:150px;min-width:280px;background:var(--panel);color:var(--ink);
-  font-family:var(--font-ui);user-select:none;overflow:hidden}
+  min-height:150px;min-width:420px;background:var(--panel);color:var(--ink);
+  font-family:var(--font-ui);user-select:none;overflow:hidden;
+  --ftx-rail-cols:${RAIL_COLS}}
 .ftx *{box-sizing:border-box}
 .ftx__bar{flex:0 0 auto;display:flex;align-items:center;gap:3px;height:28px;padding:0 4px;
   background:var(--surface-raised);
@@ -569,32 +647,60 @@ const CHART_CSS = `
 .ftx__layer--s{z-index:1}
 .ftx__layer--t{z-index:2}
 .ftx__layer--o{z-index:3;touch-action:none}
-.ftx__rail{flex:0 0 auto;width:182px;display:flex;flex-direction:column;min-height:0;
-  border-radius:2px;overflow:hidden;${RAISED}}
-.ftx__railhd{flex:0 0 auto;display:grid;grid-template-columns:16px 1fr 14px;gap:1px 4px;
-  align-items:center;padding:3px 5px;font-size:10px;font-weight:600;line-height:1.2;
-  letter-spacing:.02em;text-transform:uppercase;color:var(--ink-2);
-  background:var(--surface-raised);
-  border-bottom:1px solid var(--edge)}
-.ftx__railhd b{grid-column:2;grid-row:1;font-weight:600}
-.ftx__railhd i{grid-column:2/4;grid-row:2;display:flex;gap:3px;font-style:normal}
-.ftx__railhd i span{text-align:right}
-.ftx__railhd i span:first-child{flex:1.35 1 0}
-.ftx__railhd i span:last-child{flex:1 1 0}
+/* THE PEN RAIL. Wide enough for three labelled numeric columns and a real line-style sample,
+   because everything above it is unreadable without them. The column header SCROLLS WITH the
+   rows inside one scroller and sticks to its top: a header in a separate box would sit one
+   scrollbar-width wider than the rows beneath it and put every caption a few pixels off its
+   own column, which is the alignment complaint this rail was rebuilt to answer. */
+/* 292 px by design, and it may give back four of them and no more: 288 is the MEASURED width
+   at which the widest reading — six monospace digits — still fits every one of the three
+   columns. Below that a number would start to clip, and a clipped number on an operator
+   screen is worse than no number, so the rail stops shrinking and the well gives instead. */
+.ftx__rail{flex:0 1 auto;width:292px;min-width:288px;display:flex;flex-direction:column;
+  min-height:0;border-radius:2px;overflow:hidden;${RAISED}}
 .ftx__rows{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden}
-.ftx__row{display:grid;grid-template-columns:16px 1fr 14px;gap:2px 4px;align-items:center;
-  padding:3px 5px;border-bottom:1px solid var(--edge-soft)}
+.ftx__railhd{position:sticky;top:0;z-index:2;display:grid;
+  grid-template-columns:30px minmax(0,1fr) 14px;gap:3px 5px;align-items:center;padding:4px 5px;
+  font-size:10px;font-weight:600;line-height:1.2;letter-spacing:.02em;text-transform:uppercase;
+  color:var(--ink-2);background:var(--surface-raised);
+  border-bottom:1px solid var(--edge)}
+.ftx__railhd em{grid-column:1;grid-row:1;font-style:normal;font-size:9px;color:var(--ink-3)}
+.ftx__railhd b{grid-column:2;grid-row:1;display:flex;justify-content:space-between;gap:6px;
+  font-weight:600}
+.ftx__railhd b span:last-child{color:var(--ink-3)}
+.ftx__railhd i{grid-column:2/4;grid-row:2;display:grid;
+  grid-template-columns:var(--ftx-rail-cols);gap:3px;font-style:normal}
+.ftx__railhd i span{padding:0 4px;text-align:right;white-space:nowrap;overflow:hidden}
+/* SP is a target and LIMIT is a threshold, so the two captions do not even share an ink. */
+.ftx__railhd i span.sp{color:var(--fld-sp)}
+.ftx__railhd i span.lim{text-align:left;color:var(--warn-ink)}
+.ftx__rowbox{display:block}
+.ftx__row{display:grid;grid-template-columns:30px minmax(0,1fr) 14px;gap:3px 5px;
+  align-items:center;padding:4px 5px;border-bottom:1px solid var(--edge-soft)}
 .ftx__row--focus{background:var(--accent-soft)}
-.ftx__row--off .ftx__tag{color:var(--ink-3)}
+.ftx__row--off .ftx__tag,.ftx__row--off .ftx__eu{color:var(--ink-3)}
 .ftx__row--off .ftx__chip{opacity:.4}
-.ftx__chip{grid-column:1;grid-row:1/3;align-self:center;position:relative;width:16px;
-  height:18px;border-radius:2px;background:var(--fld-bg);border:1px solid var(--fld-edge)}
-.ftx__chip i{position:absolute;left:2px;right:2px;display:block;font-style:normal}
+/* THE PEN SAMPLE. Sixteen pixels of tinted chip identified nothing; this is a real specimen
+   of every stroke the pen puts on the plot — solid PV, 5-4 dashed SP, dash-dot LIMIT — at the
+   same three heights in every row, so a line on the trend can be named from the rail. */
+.ftx__chip{grid-column:1;grid-row:1/3;align-self:center;position:relative;width:30px;
+  height:24px;border-radius:2px;overflow:hidden;background:var(--fld-bg);
+  border:1px solid var(--fld-edge)}
+.ftx__chip i{position:absolute;left:3px;right:3px;display:block;font-style:normal}
 .ftx__chip i.pv{top:5px;height:2px;background:currentColor}
-.ftx__chip i.sp{top:10px;height:1px;
-  background:repeating-linear-gradient(90deg,currentColor 0 3px,transparent 3px 6px)}
-.ftx__tag{grid-column:2;grid-row:1;font-size:11px;font-weight:600;letter-spacing:.02em;
+.ftx__chip i.sp{top:11px;height:1px;
+  background:repeating-linear-gradient(90deg,currentColor 0 5px,transparent 5px 9px)}
+.ftx__chip i.lim{top:16px;height:1px;background:repeating-linear-gradient(90deg,
+  var(--warn-ink) 0 7px,transparent 7px 10px,var(--warn-ink) 10px 12px,transparent 12px 15px)}
+.ftx__row--alm .ftx__chip i.lim{background:repeating-linear-gradient(90deg,
+  var(--alarm-ink) 0 7px,transparent 7px 10px,var(--alarm-ink) 10px 12px,transparent 12px 15px)}
+.ftx__hd{grid-column:2;grid-row:1;display:flex;align-items:baseline;gap:6px;min-width:0}
+.ftx__tag{flex:1 1 auto;min-width:0;font-size:11px;font-weight:600;letter-spacing:.02em;
   color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:help}
+/* Every row states its engineering unit, once, beside its tag: it governs the PV, the SP and
+   the limit alike, and one statement per row is what keeps the three numeric columns pure. */
+.ftx__eu{flex:0 0 auto;font:400 10px/1.3 var(--font-ui);letter-spacing:.02em;
+  color:var(--ink-2);white-space:nowrap}
 .ftx__cb{grid-column:3;grid-row:1;appearance:none;-webkit-appearance:none;margin:0;
   width:13px;height:13px;position:relative;border-radius:2px;cursor:pointer;${SUNKEN}}
 .ftx__cb:checked::after{content:'';position:absolute;left:2px;top:2px;width:7px;height:7px;
@@ -602,22 +708,52 @@ const CHART_CSS = `
 /* The one focus ring that sits OUTSIDE its control: a 2px inset ring on a 13px checkbox
    would cover the tick it exists to reveal. Same width, same accent. */
 .ftx__cb:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-.ftx__flds{grid-column:2/4;grid-row:2;display:flex;gap:3px;min-width:0}
-.ftx__fld{flex:1 1 0;min-width:0;display:flex;align-items:baseline;gap:3px;padding:1px 4px;
+.ftx__flds{grid-column:2/4;grid-row:2;display:grid;
+  grid-template-columns:var(--ftx-rail-cols);gap:3px;min-width:0}
+.ftx__fld{min-width:0;display:flex;align-items:baseline;gap:2px;padding:2px 3px;
   border-radius:2px;overflow:hidden;
   font:500 12px/1.35 var(--font-num);font-variant-numeric:tabular-nums lining-nums;
   letter-spacing:.01em;${SUNKEN}}
-.ftx__fld--pv{flex:1.35 1 0}
+/* Explicit tracks, so a tag with no setpoint leaves the SP cell EMPTY rather than letting the
+   limit slide left into it. An empty column is the honest answer; a borrowed one is not. */
+.ftx__fld--pv{grid-column:1}
+.ftx__fld--sp{grid-column:2}
+.ftx__fld--lim{grid-column:3}
 .ftx__fld em{flex:0 0 auto;font-style:normal;font-size:9px;font-weight:600;
   letter-spacing:.02em;color:var(--ink-3)}
-.ftx__fld b{flex:1 1 auto;font-weight:500;text-align:right;overflow:hidden;
-  color:var(--fld-pv)}
+/* An absent caption or unit must not spend a flex gap: the digits need every pixel. */
+.ftx__fld em:empty,.ftx__fld u:empty,.ftx__fld s:empty{display:none}
+.ftx__fld b{flex:1 1 auto;min-width:0;font-weight:500;text-align:right;overflow:hidden;
+  white-space:nowrap;color:var(--fld-pv)}
 .ftx__fld u{flex:0 0 auto;text-decoration:none;font-size:9px;font-weight:400;
-  letter-spacing:.02em;color:var(--ink-3)}
+  letter-spacing:.02em;white-space:nowrap;color:var(--ink-3)}
+.ftx__fld s{flex:0 0 auto;text-decoration:none;font:700 8.5px/1 var(--font-ui);
+  letter-spacing:.02em;white-space:nowrap;color:var(--ink-3)}
 .ftx__fld--sp b{color:var(--fld-sp)}
+.ftx__fld--sp em{color:var(--fld-sp)}
 .ftx__fld--x b{color:var(--fld-out)}
 .ftx__fld--alarm b{color:var(--fld-alarm)}
 .ftx__fld--stale b{color:var(--fld-stale)}
+/* THE LIMIT CELL. A protection threshold, not a target: warn ink at rest, alarm ink and a
+   tinted field once the PV is through it. It is a button because a limit in alarm can be
+   ACKNOWLEDGED here, and it is disabled — and so skipped by the rail's keyboard walk —
+   whenever there is nothing to acknowledge. */
+.ftx__fld--lim{appearance:none;-webkit-appearance:none;margin:0;text-align:left;
+  cursor:pointer;color:inherit}
+.ftx__fld--lim em,.ftx__fld--lim b,.ftx__fld--lim u{color:var(--warn-ink)}
+.ftx__fld--lim[disabled]{cursor:default}
+.ftx__fld--lim:focus-visible{${FOCUS}}
+.ftx__fld--lim.is-alm{border-color:var(--alarm);
+  background-image:linear-gradient(var(--alarm-soft),var(--alarm-soft))}
+.ftx__fld--lim.is-alm em,.ftx__fld--lim.is-alm b,.ftx__fld--lim.is-alm u,
+.ftx__fld--lim.is-alm s{color:var(--alarm-ink)}
+.ftx__fld--lim.is-ack{border-color:var(--warn);
+  background-image:linear-gradient(var(--warn-soft),var(--warn-soft))}
+.ftx__fld--lim.is-ack em,.ftx__fld--lim.is-ack b,.ftx__fld--lim.is-ack u{color:var(--alarm-ink)}
+.ftx__fld--lim.is-ack s{color:var(--warn-ink)}
+/* An unacknowledged alarm blinks its state word and nothing else — the digits stay readable. */
+@keyframes ftx-blink{0%,49%{opacity:1}50%,100%{opacity:.2}}
+.ftx__fld--lim.is-alm s{animation:ftx-blink 1.1s steps(1,end) infinite}
 .ftx__card{position:absolute;top:0;left:0;z-index:4;display:none;padding:3px;gap:3px;
   border-radius:2px;pointer-events:none;${RAISED}}
 .ftx__card--on{display:flex}
@@ -642,7 +778,8 @@ const CHART_CSS = `
 .ftx__table td:first-child,.ftx__table th:first-child{text-align:left;color:var(--fld-out)}
 .ftx__sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
   clip:rect(0 0 0 0);white-space:nowrap;border:0}
-@media (prefers-reduced-motion:reduce){.ftx__btn{transition:none}}
+@media (prefers-reduced-motion:reduce){.ftx__btn{transition:none}
+  .ftx__fld--lim.is-alm s{animation:none}}
 `;
 
 /**
@@ -734,16 +871,28 @@ function layout(chart) {
   const g = chart.geom;
   let nRight = 0;
   let hasLeft = false;
+  let tagLines = 0;
   for (let i = 0; i < chart.yAxes.length; i++) {
     const a = chart.yAxes[i];
     a.visible = axisHasVisiblePen(chart, a.id);
+    if (!a.tagPens) a.tagPens = [];
+    a.tagPens.length = 0;
     if (!a.visible) continue;
+    // WHO OWNS THIS SCALE. Collected here rather than in the painter because the answer sets
+    // the headroom the caption block needs, and headroom is a layout decision.
+    for (let j = 0; j < chart.pens.length; j++) {
+      const p = chart.pens[j];
+      if (p.visible && axisOf(chart, p) === a) a.tagPens.push(p);
+    }
+    const lines = Math.min(AXIS_TAG_LINES_MAX, a.tagPens.length);
+    if (lines > tagLines) tagLines = lines;
     if (a.side === 'left') hasLeft = true;
     else nRight++;
   }
-  g.padL = hasLeft ? 42 : 8;
+  g.padL = hasLeft ? LEFT_AXIS_W : 8;
   g.padR = 8 + RIGHT_AXIS_STEP * nRight;
-  g.padT = 16;
+  // Room for one caption line per tag the busiest gutter names, plus one for its unit.
+  g.padT = Math.max(16, 5 + AXIS_LABEL_LINE * (tagLines + 1));
   g.padB = 26;
   g.px0 = g.padL;
   g.py0 = g.padT;
@@ -2174,8 +2323,17 @@ function paintMarkers(chart, ctx, g, colors) {
       ctx.globalAlpha = 1;
     }
     if (text) {
+      // Keep the label INSIDE the plot. It is centre-aligned on the chevron, so a mark at the head
+      // of a run — where the event cluster always sits — hangs half its width into the left gutter
+      // and prints straight over the y-axis tick labels ("x3" landing on "30"). The chevron itself
+      // stays on the true x; only the text slides, which is the standard behaviour for an
+      // annotation that would otherwise leave its frame.
+      const half = w / 2;
+      const wanted = leader ? f.px + 9 + half : f.px;
+      const lo = g.px0 + half;
+      const hi = g.px1 - half;
       ctx.fillStyle = col;
-      ctx.fillText(text, leader ? f.px + 9 + w / 2 : f.px, ly);
+      ctx.fillText(text, hi > lo ? clamp(wanted, lo, hi) : wanted, ly);
     }
   }
   ctx.restore();
@@ -2319,9 +2477,12 @@ function paintYAxes(chart, ctx, g, colors) {
     }
     const showPrimary = primaryUsed || !altPen;
     const yp = yTickPlan(a, g);
-    // A gutter serving exactly one pen is tinted with that pen, which is how an operator
-    // finds the right scale without reading anything.
-    const primaryInk = ownPen && !altPen ? colors.pen[ownPen.id] : colors.plotAxis;
+    // A gutter serving exactly ONE pen is tinted with that pen, which is how an operator finds
+    // the right scale without reading anything. A gutter serving several is left in neutral
+    // axis ink and names its owners instead: tinting a shared scale with whichever pen
+    // happened to be first in the rail claims an ownership that is not true.
+    const soleOwner = ownPen && !altPen && (a.tagPens || []).length === 1;
+    const primaryInk = soleOwner ? colors.pen[ownPen.id] : colors.plotAxis;
     ctx.font = '10px ' + FONT_NUM;
     ctx.textAlign = left ? 'right' : 'left';
     for (let k = 0; k < yp.count; k++) {
@@ -2340,9 +2501,20 @@ function paintYAxes(chart, ctx, g, colors) {
     if (altPen && a.alt) {
       const span = a.aMax - a.aMin;
       const aspan = a.alt.max - a.alt.min;
+      // Clear the WIDEST primary label, rather than assuming a fixed 28 px of it. The primary can
+      // read "1000.0" or "30", so one constant either overprints the wide case or leaves a hole
+      // after the narrow one — the observed "x3" sitting on top of "30". Measured once per axis.
+      let widest = 0;
+      if (showPrimary) {
+        for (let k = 0; k < yp.count; k++) {
+          const w = ctx.measureText((yp.first + k * yp.step).toFixed(yp.decimals)).width;
+          if (w > widest) widest = w;
+        }
+      }
       ctx.fillStyle = colors.pen[altPen.id];
       ctx.font = '9px ' + FONT_NUM;
-      const off = showPrimary ? (left ? -28 : 28) : (left ? -5 : 5);
+      const clear = 5 + widest + 6;
+      const off = showPrimary ? (left ? -clear : clear) : (left ? -5 : 5);
       for (let k = 0; k < yp.count; k++) {
         const v = yp.first + k * yp.step;
         const py = a.b - v * a.k;
@@ -2352,14 +2524,30 @@ function paintYAxes(chart, ctx, g, colors) {
       }
     }
 
-    // engineering unit, at the top of its own gutter — never a sentence
-    ctx.font = '600 10px ' + FONT_UI;
+    // SCALE OWNERSHIP, at the top of the gutter: the ISA TAG or tags this scale serves, and
+    // then its engineering unit. A matching pen colour is a hint, not a statement — an
+    // operator reading a number off a gutter has to be able to say whose number it is, and
+    // on a shared gutter each tag is drawn in its own pen's hue so the pairing is exact.
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
+    const labelX = spineX + (left ? -g.padL + 2 : 2);
+    const budget = (left ? g.padL : RIGHT_AXIS_STEP) - 3;
+    ctx.font = '600 10px ' + FONT_UI;
     ctx.fillStyle = primaryInk;
     const euText = a.eu + (altPen && a.alt && a.alt.eu ? '/' + a.alt.eu : '');
-    const budget = (left ? g.padL : RIGHT_AXIS_STEP) - 3;
-    ctx.fillText(ellipsize(ctx, euText, budget), spineX + (left ? -g.padL + 2 : 2), g.py0 - 3);
+    ctx.fillText(ellipsize(ctx, euText, budget), labelX, g.py0 - 3);
+    const owners = a.tagPens || [];
+    const shown = Math.min(AXIS_TAG_LINES_MAX, owners.length);
+    ctx.font = '600 9px ' + FONT_UI;
+    for (let k = 0; k < shown; k++) {
+      const p = owners[k];
+      const more = owners.length - shown;
+      const txt = k === shown - 1 && more > 0 ? p.tag + ' +' + more : p.tag;
+      ctx.fillStyle = owners.length > 1 ? colors.pen[p.id] : primaryInk;
+      ctx.fillText(
+        ellipsize(ctx, txt, budget), labelX, g.py0 - 3 - AXIS_LABEL_LINE * (shown - k)
+      );
+    }
     ctx.textBaseline = 'middle';
   }
 }
@@ -2369,8 +2557,224 @@ function paintYAxes(chart, ctx, g, colors) {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Paint the alarm limit lines, the live edge, the crosshair, the drag rectangle and the
- * hover ribbon for narrow phase bands. Cleared and repainted every frame.
+ * The full caption of one pen's alarm limit: tag, ISA designation, threshold and unit —
+ * `PT-101 HI 1.60 bar`. A bare `1.60` floating on a dashed line names neither the instrument
+ * it guards nor the quantity it is measured in, and a line nobody can name is a line nobody
+ * acts on.
+ * @param {object} pen Pen carrying a finite `limit`.
+ * @returns {string} Caption text.
+ */
+function limitCaption(pen) {
+  return pen.tag + ' ' + (pen.limitCode || LIMIT_CODES.HI) + ' ' +
+    pen.limit.toFixed(pen.dec) + (pen.eu ? ' ' + pen.eu : '');
+}
+
+/**
+ * Draw a small captioned plate over the plot well, so a caption laid across live traces stays
+ * readable without hiding them.
+ * @param {CanvasRenderingContext2D} ctx Overlay context.
+ * @param {object} colors Colour map in use.
+ * @param {string} text Caption, already ellipsized by the caller if needed.
+ * @param {number} x Left edge of the plate, css px.
+ * @param {number} yBase Text baseline, css px.
+ * @param {string} ink Text and border colour.
+ * @returns {number} Plate width, css px.
+ */
+function captionPlate(ctx, colors, text, x, yBase, ink) {
+  const w = ctx.measureText(text).width + 6;
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = colors.plotBg;
+  ctx.fillRect(x, yBase - 9, w, 11);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(Math.round(x) + 0.5, Math.round(yBase - 9) + 0.5, Math.round(w) - 1, 10);
+  ctx.fillStyle = ink;
+  ctx.fillText(text, x + 3, yBase);
+  return w;
+}
+
+/**
+ * Find a baseline near `want` that no caption already occupies, so two limit lines a few
+ * pixels apart — or two loops whose setpoints happen to land together — print one above the
+ * other instead of on top of each other. Pushes DOWN first, then up, then gives up and takes
+ * the clamped position, because an overlapped caption is still better than a missing one.
+ * @param {number[]} used Baselines already taken this pass; the chosen one is appended.
+ * @param {number} want Preferred baseline, css px.
+ * @param {number} lo Lowest legal baseline.
+ * @param {number} hi Highest legal baseline.
+ * @returns {number} The baseline to use.
+ */
+function freeCaptionY(used, want, lo, hi) {
+  const step = 12;
+  let y = clamp(want, lo, hi);
+  for (let pass = 0; pass < 2; pass++) {
+    const dir = pass === 0 ? step : -step;
+    let cand = y;
+    for (let k = 0; k < 8; k++) {
+      let hit = false;
+      for (let i = 0; i < used.length; i++) {
+        if (Math.abs(used[i] - cand) < step) {
+          hit = true;
+          break;
+        }
+      }
+      if (!hit && cand >= lo && cand <= hi) {
+        used.push(cand);
+        return cand;
+      }
+      cand += dir;
+    }
+  }
+  used.push(y);
+  return y;
+}
+
+/**
+ * Format a PV-minus-SP deviation with an explicit sign, at the pen's own precision.
+ *
+ * A deviation that ROUNDS to zero prints as a plain `0.0`, never `-0.0`: a signed zero on an
+ * operator screen reads as a sign error in the instrument, not as a loop sitting on target.
+ * @param {number} dev PV minus SP, pen units.
+ * @param {number} dec Fixed decimals.
+ * @returns {string} Signed deviation, e.g. `'+1.2'`, `'-0.4'`, `'0.0'`.
+ */
+function signedDev(dev, dec) {
+  const body = Math.abs(dev).toFixed(dec);
+  if (parseFloat(body) === 0) return body;
+  return (dev < 0 ? '-' : '+') + body;
+}
+
+/**
+ * The newest logged row inside the visible window, or -1 when the window holds none. Used to
+ * anchor the setpoint chips at the live end of each loop.
+ * @param {object} chart The chart.
+ * @returns {number} Row index, or -1.
+ */
+function lastRowInWindow(chart) {
+  if (!chart.store || chart.store.n === 0) return -1;
+  const x = column(chart.store, xChannel(chart));
+  const n = x.length;
+  if (n === 0) return -1;
+  let i = lowerBoundF32(x, n, chart.x1);
+  if (i >= n || x[i] > chart.x1) i--;
+  if (i < 0 || x[i] < chart.x0) return -1;
+  return i;
+}
+
+/**
+ * Paint every visible pen's alarm limit line.
+ *
+ * NOT A SETPOINT, AND NOT DRESSED AS ONE. The line takes `--warn-ink` while the PV is inside
+ * it and `--alarm-ink`, one step heavier, once the PV is through — never the pen's own hue,
+ * which is what used to make a trip threshold look like the same kind of number as FIC-101's
+ * setpoint. Its dash is the dash-DOT of {@link LIMIT_DASH}, not the setpoint's 5-4. And it
+ * carries its whole identity — `PT-101 HI 1.60 bar` — on a plate at the left of the plot,
+ * where the axis gutters are not competing for the space.
+ * @param {object} chart The chart.
+ * @param {CanvasRenderingContext2D} ctx Overlay context.
+ * @param {object} g Geometry in use.
+ * @param {object} colors Colour map in use.
+ * @returns {void}
+ */
+function paintLimitLines(chart, ctx, g, colors) {
+  ctx.textBaseline = 'bottom';
+  ctx.textAlign = 'left';
+  ctx.font = '600 9px ' + FONT_UI;
+  const used = chart.captionY;
+  used.length = 0;
+  for (let i = 0; i < chart.pens.length; i++) {
+    const p = chart.pens[i];
+    if (!p.visible || !(p.limit === p.limit)) continue;
+    const py = p.bPix - p.limit * p.kPix;
+    if (py < g.py0 || py > g.py1) continue;
+    const bad = p.limitState !== 'norm';
+    const ink = bad ? colors.alarmInk : colors.warnInk;
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = bad ? LIMIT_WIDTH_ALARM : LIMIT_WIDTH;
+    ctx.setLineDash(LIMIT_DASH);
+    ctx.lineDashOffset = g.px0 % LIMIT_DASH_PERIOD;
+    ctx.beginPath();
+    ctx.moveTo(g.px0, Math.round(py) + 0.5);
+    ctx.lineTo(g.px1, Math.round(py) + 0.5);
+    ctx.stroke();
+    ctx.setLineDash(EMPTY_DASH);
+    ctx.lineDashOffset = 0;
+    // Two limits on one gutter can land within a caption's height of each other; the second
+    // one steps clear rather than printing on top of the first.
+    const cy = freeCaptionY(used, Math.round(py) - 3, g.py0 + 10, g.py1);
+    const text = ellipsize(ctx, limitCaption(p), Math.max(0, g.plotW - 12));
+    if (text) captionPlate(ctx, colors, text, g.px0 + 3, cy, ink);
+  }
+}
+
+/**
+ * Name every setpoint where it lives, at the live end of its own dashed line.
+ *
+ * A LOOP DOING ITS JOB HIDES ITS OWN SETPOINT. FIC-101 running 196.2 against 196.0 puts the
+ * PV and the SP within a pixel of each other, and two coincident lines in one hue identify
+ * nothing. So each closed loop gets, at the right of the window: a leader spanning PV to SP
+ * — visible as a tick even when the deviation is a fraction of a pixel — and a chip on the SP
+ * line reading `SP +0.2`, the signed deviation of the PV from its target. The chip is small,
+ * 9 px and quiet, so the setpoint stays subordinate to the measurement; it is unmistakable
+ * because it is captioned, and the deviation is legible precisely when the lines are not.
+ * @param {object} chart The chart.
+ * @param {CanvasRenderingContext2D} ctx Overlay context.
+ * @param {object} g Geometry in use.
+ * @param {object} colors Colour map in use.
+ * @returns {void}
+ */
+function paintSpChips(chart, ctx, g, colors) {
+  const row = lastRowInWindow(chart);
+  if (row < 0) return;
+  ctx.textBaseline = 'bottom';
+  ctx.textAlign = 'left';
+  ctx.font = '600 9px ' + FONT_UI;
+  // Shared with the limit captions this pass: the right edge is one crowded strip, and a
+  // setpoint chip must not land on a threshold caption any more than on another setpoint's.
+  const used = chart.captionY;
+  for (let i = 0; i < chart.pens.length; i++) {
+    const p = chart.pens[i];
+    if (!p.visible || p.dim || !p.spChannel) continue;
+    const spCol = column(chart.store, p.spChannel);
+    const sv = row < spCol.length ? spCol[row] : NaN;
+    if (!(sv === sv)) continue;
+    const spY = p.bPix - sv * p.kPix;
+    if (spY < g.py0 || spY > g.py1) continue;
+    const pvCol = column(chart.store, p.channel);
+    const pv = row < pvCol.length ? pvCol[row] : NaN;
+    const pvY = pv === pv ? clamp(p.bPix - pv * p.kPix, g.py0, g.py1) : NaN;
+    const ink = colors.pen[p.id];
+
+    // the PV-to-SP leader, with a cap at each end so a zero deviation still reads as a mark
+    const lx = Math.round(g.px1 - 5) + 0.5;
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (pvY === pvY) {
+      ctx.moveTo(lx, Math.round(pvY) + 0.5);
+      ctx.lineTo(lx, Math.round(spY) + 0.5);
+      ctx.moveTo(lx - 3, Math.round(pvY) + 0.5);
+      ctx.lineTo(lx + 3, Math.round(pvY) + 0.5);
+    }
+    ctx.moveTo(lx - 3, Math.round(spY) + 0.5);
+    ctx.lineTo(lx + 3, Math.round(spY) + 0.5);
+    ctx.stroke();
+
+    const text = pv === pv ? 'SP ' + signedDev(pv - sv, p.dec) : 'SP';
+    const w = ctx.measureText(text).width + 6;
+    // Sit the chip on the far side of the setpoint from the PV, so it never covers the pen
+    // whose deviation it is reporting.
+    const below = !(pvY === pvY) || spY >= pvY;
+    const cy = freeCaptionY(used, below ? spY + 11 : spY - 2, g.py0 + 10, g.py1);
+    const x = clamp(g.px1 - 9 - w, g.px0 + 2, g.px1 - w - 2);
+    if (w <= g.plotW - 4) captionPlate(ctx, colors, text, x, cy, ink);
+  }
+}
+
+/**
+ * Paint the alarm limit lines, the setpoint chips, the live edge, the crosshair, the drag
+ * rectangle and the hover ribbon for narrow phase bands. Cleared and repainted every frame.
  *
  * The limit lines live here, above the traces, because a trip threshold that a trace can
  * hide is worse than no threshold at all.
@@ -2388,28 +2792,8 @@ function paintOverlay(chart) {
   const kx = g.plotW / span;
   const bx = g.px0 - chart.x0 * kx;
 
-  // alarm limits: dashed, 1 px, the pen's own hue, captioned with the threshold value
-  ctx.font = '9px ' + FONT_NUM;
-  ctx.textBaseline = 'bottom';
-  ctx.textAlign = 'right';
-  for (let i = 0; i < chart.pens.length; i++) {
-    const p = chart.pens[i];
-    if (!p.visible || !(p.limit === p.limit)) continue;
-    const py = p.bPix - p.limit * p.kPix;
-    if (py < g.py0 || py > g.py1) continue;
-    ctx.strokeStyle = colors.pen[p.id];
-    ctx.lineWidth = SP_WIDTH;
-    ctx.setLineDash(SP_DASH);
-    ctx.lineDashOffset = g.px0 % (SP_DASH[0] + SP_DASH[1]);
-    ctx.beginPath();
-    ctx.moveTo(g.px0, Math.round(py) + 0.5);
-    ctx.lineTo(g.px1, Math.round(py) + 0.5);
-    ctx.stroke();
-    ctx.setLineDash(EMPTY_DASH);
-    ctx.lineDashOffset = 0;
-    ctx.fillStyle = colors.pen[p.id];
-    ctx.fillText(p.limit.toFixed(p.dec), g.px1 - 2, Math.round(py) - 1);
-  }
+  paintLimitLines(chart, ctx, g, colors);
+  paintSpChips(chart, ctx, g, colors);
 
   // live edge
   if (chart.store && chart.store.n > 0) {
@@ -2630,6 +3014,86 @@ function labelBox(kind, caption, eu) {
 }
 
 /**
+ * True when this pen owns an alarm limit and so earns a cell in the LIMIT column — either
+ * because it watches an `ALARM_TABLE` signal or because a caller set a threshold outright.
+ * @param {object} pen Pen.
+ * @returns {boolean} Whether the LIMIT column has anything to say about this pen.
+ */
+function hasLimit(pen) {
+  return !!pen.limitSignal || pen.limit === pen.limit;
+}
+
+/**
+ * Build the LIMIT cell: designation, threshold, unit and alarm state, in one recessed field
+ * that shares nothing but its geometry with the SP column beside it.
+ *
+ * It is a `button` because the one operator action a limit affords is ACKNOWLEDGE, and the
+ * place to acknowledge an alarm is the field that is announcing it. Disabled — and therefore
+ * skipped by {@link focusPenRail} and by the tab order — whenever nothing is in alarm.
+ * @returns {{el:Element, val:Element, eu:Element, cap:Element, state:Element}} The cell.
+ */
+function limitCell() {
+  const cap = h('em', {}, LIMIT_CODES.HI);
+  const val = h('b', {}, '----');
+  const euEl = h('u', {}, '');
+  const stEl = h('s', {}, LIMIT_STATE_WORD.norm);
+  const el = h(
+    'button',
+    { class: 'ftx__fld ftx__fld--lim', type: 'button', disabled: true },
+    cap, val, euEl, stEl
+  );
+  return { el, val, eu: euEl, cap, state: stEl };
+}
+
+/**
+ * Recompute one pen's alarm state from its newest PV, and return it.
+ *
+ * The excursion, not the acknowledgement, is what persists: an ACK holds only for as long as
+ * the PV stays through the threshold. A PV that recovers and then breaks the limit a second
+ * time is a NEW alarm and demands a new acknowledgement, which is the behaviour of every
+ * non-latching alarm on the skid and the only one an operator can trust at handover.
+ * @param {object} pen Pen.
+ * @param {number} pv Newest PV, or `NaN`.
+ * @returns {'norm'|'alarm'|'ack'} The alarm state, also cached on `pen.limitState`.
+ */
+function updateLimitState(pen, pv) {
+  if (!(pen.limit === pen.limit)) {
+    pen.limitAck = false;
+    pen.limitState = 'norm';
+    return 'norm';
+  }
+  const through = pv === pv && (pen.limitRising ? pv > pen.limit : pv < pen.limit);
+  if (!through) pen.limitAck = false;
+  pen.limitState = !through ? 'norm' : pen.limitAck ? 'ack' : 'alarm';
+  return pen.limitState;
+}
+
+/**
+ * Write one pen's LIMIT cell: the ISA designation, the threshold at the pen's own precision,
+ * the engineering unit and the state word. Nothing here is ever borrowed from the SP column.
+ * @param {object} pen Pen.
+ * @param {{el:Element, val:Element, eu:Element, cap:Element, state:Element}} box The cell.
+ * @param {'norm'|'alarm'|'ack'} state Current alarm state.
+ * @returns {void}
+ */
+function writeLimitCell(pen, box, state) {
+  const code = pen.limitCode || LIMIT_CODES.HI;
+  setText(box.cap, code);
+  setText(box.val, fmtBox(pen.limit, pen.dec));
+  setText(box.eu, pen.eu || '');
+  setText(box.state, LIMIT_STATE_WORD[state]);
+  cls(box.el, 'is-alm', state === 'alarm');
+  cls(box.el, 'is-ack', state === 'ack');
+  const canAck = state === 'alarm';
+  if (box.el.disabled === canAck) box.el.disabled = !canAck;
+  const said = pen.tag + ' ' + code + ' alarm limit ' + fmtBox(pen.limit, pen.dec) +
+    (pen.eu ? ' ' + pen.eu : '') + ', ' + LIMIT_STATE_SAID[state] +
+    (canAck ? '. Activate to acknowledge.' : '.');
+  setAttr(box.el, 'aria-label', said);
+  setAttr(box.el, 'title', said);
+}
+
+/**
  * The tooltip for one pen, taken verbatim from `data/glossary.js`. The screen carries no
  * prose; every word of explanation lives here.
  * @param {object} pen Pen.
@@ -2646,11 +3110,18 @@ function penTitle(pen) {
 }
 
 /**
- * Build the legend rail: one row per pen — colour chip carrying the pen's own solid/dashed
- * signature, ISA tag, a live PV field, an SP or LIM field where one exists, the EU, and the
- * pen's on/off checkbox. This rail is how the operator reads the trend, and it is fully
- * populated before the first sample: an extinguished pen and an unstarted run both show a
- * field of dashes in the stale ink, never an empty row.
+ * Build the legend rail: one row per pen — a line-style sample carrying every stroke that pen
+ * puts on the plot, its ISA tag, its engineering unit, its on/off checkbox, and then the
+ * three-column numeric grid PV | SP | LIMIT.
+ *
+ * THE THREE COLUMNS ARE NOT INTERCHANGEABLE. PV is the measurement. SP is a control target
+ * and appears ONLY for a tag that has a controller behind it — FIC-101 and AIC-101 here; for
+ * every other tag that cell is empty, and it is never filled with something else because
+ * there was room. LIMIT is a protection threshold, in its own column, in its own ink, with
+ * its own ISA designation and its own alarm state.
+ *
+ * The rail is fully populated before the first sample: an extinguished pen and an unstarted
+ * run both show a field of dashes in the stale ink, never an empty row.
  * @param {object} chart The chart.
  * @returns {void}
  */
@@ -2672,9 +3143,16 @@ function buildRail(chart) {
   while (rows.firstChild) rows.removeChild(rows.firstChild);
   for (let i = 0; i < chart.pens.length; i++) {
     const pen = chart.pens[i];
+    const limited = hasLimit(pen);
     const chip = h('span', { class: 'ftx__chip' }, h('i', { class: 'pv' }));
-    if (pen.spChannel || pen.limitSignal) chip.appendChild(h('i', { class: 'sp' }));
+    if (pen.spChannel) chip.appendChild(h('i', { class: 'sp' }));
+    if (limited) chip.appendChild(h('i', { class: 'lim' }));
     const tagEl = h('span', { class: 'ftx__tag', title: penTitle(pen) }, pen.tag);
+    const euEl = h('span', {
+      class: 'ftx__eu',
+      title: pen.eu ? pen.tag + ' engineering unit: ' + pen.eu : '',
+    }, pen.eu || '');
+    const hdEl = h('span', { class: 'ftx__hd' }, tagEl, euEl);
     const cb = h('input', {
       class: 'ftx__cb',
       type: 'checkbox',
@@ -2682,13 +3160,23 @@ function buildRail(chart) {
       title: pen.tag + ' pen on trend',
     });
     cb.checked = pen.visible;
-    const pv = labelBox('pv', '', pen.eu);
+    // The unit is stated once on the row's own header line, so the three numeric columns
+    // carry nothing but numbers and stay aligned across the whole rail.
+    const pv = labelBox('pv', '', '');
+    setAttr(pv.el, 'title', pen.tag + ' process variable' + (pen.eu ? ', ' + pen.eu : ''));
     const flds = h('div', { class: 'ftx__flds' }, pv.el);
     let sp = null;
-    if (pen.spChannel) sp = labelBox('sp', 'SP', '');
-    else if (pen.limitSignal) sp = labelBox('sp', 'LIM', '');
-    if (sp) flds.appendChild(sp.el);
-    const row = h('div', { class: 'ftx__row' }, chip, tagEl, cb, flds);
+    if (pen.spChannel) {
+      sp = labelBox('sp', 'SP', '');
+      setAttr(sp.el, 'title', pen.tag + ' control setpoint' + (pen.eu ? ', ' + pen.eu : ''));
+      flds.appendChild(sp.el);
+    }
+    let lim = null;
+    if (limited) {
+      lim = limitCell();
+      flds.appendChild(lim.el);
+    }
+    const row = h('div', { class: 'ftx__row' }, chip, hdEl, cb, flds);
     row.style.color = chart.colors.pen[pen.id];
     rows.appendChild(row);
 
@@ -2704,11 +3192,21 @@ function buildRail(chart) {
     const recB = [tagEl, 'click', onFocus];
     chart.listeners.push(recA, recB);
     chart.railListeners.push(recA, recB);
+    if (lim) {
+      const onAck = () => {
+        acknowledgeLimit(chart, pen.id);
+      };
+      lim.el.addEventListener('click', onAck);
+      const recC = [lim.el, 'click', onAck];
+      chart.listeners.push(recC);
+      chart.railListeners.push(recC);
+    }
 
-    pen.row = { el: row, chip, tagEl, cb, pv, sp };
+    pen.row = { el: row, chip, tagEl, euEl, cb, pv, sp, lim };
   }
   chart.railKey = railKey(chart);
   paintRailChips(chart);
+  updateRail(chart);
 }
 
 /**
@@ -2720,7 +3218,11 @@ function railKey(chart) {
   let k = '';
   for (let i = 0; i < chart.pens.length; i++) {
     const p = chart.pens[i];
-    k += p.id + ',' + p.tag + ',' + p.eu + ',' + (p.spChannel || '') + ',' + (p.limitSignal || '') + '|';
+    // Whether the LIMIT column exists at all is structural, so a threshold that arrives after
+    // the rail was built — the usual order, since `config.alarms` is applied after mount —
+    // grows the cell on the next rail tick instead of waiting for an unrelated rebuild.
+    k += p.id + ',' + p.tag + ',' + p.eu + ',' + (p.spChannel || '') +
+      ',' + (hasLimit(p) ? '1' : '0') + '|';
   }
   return k;
 }
@@ -2766,22 +3268,28 @@ function updateRail(chart) {
     cls(r.el, 'ftx__row--off', !pen.visible);
     cls(r.el, 'ftx__row--focus', chart.focusPen === pen.id);
     if (r.cb.checked !== pen.visible) r.cb.checked = pen.visible;
+    setText(r.euEl, pen.eu || '');
 
     const pv = atCursor && pen.pvTrace ? pen.pvTrace.cursorValue : lastValue(chart, pen.channel);
     setText(r.pv.val, fmtBox(pv, pen.dec));
-    const overLimit = pen.limit === pen.limit && pv === pv && pv > pen.limit;
-    cls(r.pv.el, 'ftx__fld--alarm', overLimit);
+    // ALARM STATE IS COMPUTED FROM THE LIMIT, in the limit's own sense: a rising threshold is
+    // broken from above and a falling one from below. It is evaluated for every pen, lit or
+    // not, so extinguishing a pen never extinguishes its alarm.
+    const state = updateLimitState(pen, pv);
+    cls(r.pv.el, 'ftx__fld--alarm', state !== 'norm');
     cls(r.pv.el, 'ftx__fld--stale', !(pv === pv));
+    cls(r.el, 'ftx__row--alm', state !== 'norm');
 
-    if (!r.sp) continue;
-    let sv = NaN;
-    if (pen.spChannel) {
-      sv = atCursor && pen.spTrace ? pen.spTrace.cursorValue : lastValue(chart, pen.spChannel);
-    } else {
-      sv = pen.limit;
+    // The SP cell exists only where a controller does. There is no fallback branch here on
+    // purpose: nothing else may ever be written into this field.
+    if (r.sp) {
+      const sv = atCursor && pen.spTrace
+        ? pen.spTrace.cursorValue
+        : lastValue(chart, pen.spChannel);
+      setText(r.sp.val, fmtBox(sv, pen.dec));
+      cls(r.sp.el, 'ftx__fld--stale', !(sv === sv));
     }
-    setText(r.sp.val, fmtBox(sv, pen.dec));
-    cls(r.sp.el, 'ftx__fld--stale', !(sv === sv));
+    if (r.lim) writeLimitCell(pen, r.lim, state);
   }
 }
 
@@ -3519,6 +4027,11 @@ function makePen(src, idx) {
     spChannel,
     limitSignal: src.limitSignal || null,
     limit: typeof src.limit === 'number' ? src.limit : NaN,
+    // The LIMIT column's own state, never shared with anything in the SP column.
+    limitCode: src.limitCode || LIMIT_CODES.HI,
+    limitRising: src.limitRising !== false,
+    limitState: 'norm',
+    limitAck: false,
     eu: src.eu !== undefined ? src.eu : src.unit !== undefined ? src.unit : metaEu,
     dec: typeof src.dec === 'number' ? src.dec
       : typeof src.decimals === 'number' ? src.decimals : meta ? meta.decimals : 2,
@@ -3734,15 +4247,31 @@ export function createChart(rootEl, opts) {
   wellEl.appendChild(hostEl);
   wellEl.appendChild(srLive);
 
-  const railRows = h('div', { class: 'ftx__rows' });
+  // The rail's column header scrolls WITH its rows and sticks to the top of the same
+  // scroller, which is the only way the captions and the numbers can share one grid: a header
+  // in its own box is a scrollbar wider than the rows below it, and every caption then sits
+  // a few pixels off the column it names.
+  const railRows = h('div', { class: 'ftx__rowbox' });
   const rail = h(
     'div', { class: 'ftx__rail' },
     h(
-      'div', { class: 'ftx__railhd' },
-      h('b', {}, 'TAG'),
-      h('i', {}, h('span', {}, 'PV'), h('span', {}, 'SP'))
-    ),
-    railRows
+      'div', { class: 'ftx__rows' },
+      h(
+        'div', { class: 'ftx__railhd' },
+        h('em', {}, 'PEN'),
+        h('b', {}, h('span', {}, 'TAG'), h('span', {}, 'UNIT')),
+        h(
+          'i', {},
+          h('span', { class: 'pv' }, 'PV'),
+          h('span', { class: 'sp', title: 'Control setpoint — a target the loop drives to' }, 'SP'),
+          h('span', {
+            class: 'lim',
+            title: 'Alarm limit — a protection threshold, with its ISA designation and state',
+          }, 'Limit')
+        )
+      ),
+      railRows
+    )
   );
   const body = h('div', { class: 'ftx__body' }, wellEl, rail);
 
@@ -3819,6 +4348,9 @@ export function createChart(rootEl, opts) {
     bands: [],
     markers: [],
     bandLabelSpots: [],
+    // Baselines already spent by a limit caption or a setpoint chip this overlay pass, so the
+    // two painters can keep out of each other's way without allocating per frame.
+    captionY: [],
     pool: { on: false, x0: 0, x1: 0 },
 
     pixelStart: new Int32Array(1),
@@ -3834,7 +4366,7 @@ export function createChart(rootEl, opts) {
 
     geom: {
       cssW: 0, cssH: 0, dpr: window.devicePixelRatio || 1,
-      padL: 42, padR: 48, padT: 16, padB: 26,
+      padL: LEFT_AXIS_W, padR: 48, padT: 16, padB: 26,
       px0: 42, py0: 16, px1: 100, py1: 100, plotW: 58, plotH: 84, pixels: 1,
     },
     colors: null,
@@ -4107,26 +4639,66 @@ export function setSeriesAlpha(chart, penId, alpha) {
 
 /**
  * Set one pen's alarm limit line explicitly, in the pen's own engineering unit.
+ *
+ * The DESIGNATION travels with the value, because a threshold with no designation is exactly
+ * the ambiguity this column exists to remove: `HI` and `HH` are the same kind of number at
+ * very different consequences, and only the caller knows which one it just handed over.
  * @param {object} chart The chart.
  * @param {string} penId Pen id.
  * @param {number|null} value Limit, or null to remove the line.
+ * @param {'HI'|'HH'|'LO'|'LL'} [code] ISA designation. Default `'HI'`; `'LO'` and `'LL'` also
+ *   set the limit's sense, so the alarm state is evaluated from below rather than above.
  * @returns {void}
  */
-export function setSeriesLimit(chart, penId, value) {
+export function setSeriesLimit(chart, penId, value, code) {
   const p = chart.penById.get(penId);
   if (!p) return;
   const v = typeof value === 'number' && isFinite(value) ? value : NaN;
-  if ((p.limit === v) || (p.limit !== p.limit && v !== v)) return;
+  const want = LIMIT_CODES[code] || (v === v ? p.limitCode || LIMIT_CODES.HI : LIMIT_CODES.HI);
+  const same = (p.limit === v) || (p.limit !== p.limit && v !== v);
+  if (same && p.limitCode === want) return;
   p.limit = v;
+  p.limitCode = want;
+  p.limitRising = want === LIMIT_CODES.HI || want === LIMIT_CODES.HH;
+  if (!same) p.limitAck = false;
   chart.railDue = 0;
   chart.dirty.overlay = true;
 }
 
 /**
- * Derive every pen's limit line from `config.alarms`. A pen declares which ALARM_TABLE
- * `signal` it watches; the LOWEST rising threshold at severity ALARM wins, falling back to
- * the lowest rising threshold of any severity, because the first line an operator must not
- * cross is the one that matters.
+ * Acknowledge one pen's limit alarm from the rail.
+ *
+ * An acknowledgement is a PRESENTATION act here — it steadies the field the operator is
+ * looking at and records that he has seen it. It never clears the alarm, never touches the
+ * threshold and never reaches the simulation: the PV is still through the limit, the line is
+ * still drawn in alarm ink, and the state word says `ACK`, not `NORM`.
+ * @param {object} chart The chart.
+ * @param {string} penId Pen id.
+ * @returns {boolean} True when an unacknowledged alarm was acknowledged.
+ */
+export function acknowledgeLimit(chart, penId) {
+  const p = chart.penById.get(penId);
+  if (!p || p.limitState !== 'alarm') return false;
+  p.limitAck = true;
+  p.limitState = 'ack';
+  if (p.row && p.row.lim) writeLimitCell(p, p.row.lim, 'ack');
+  chart.railDue = 0;
+  chart.dirty.overlay = true;
+  return true;
+}
+
+/**
+ * Derive every pen's limit line and ISA designation from `config.alarms`.
+ *
+ * A pen declares which ALARM_TABLE `signal` it watches. Among the RISING rows on that signal
+ * the LOWEST threshold at severity ALARM wins, falling back to the lowest rising threshold of
+ * any severity, because the first line an operator must not cross is the one that matters.
+ * When a signal carries no rising row at all the HIGHEST falling threshold wins, for the same
+ * reason read the other way up.
+ *
+ * The designation follows the chosen row rather than the number: a trip severity — CRITICAL
+ * or FAULT — designates `HH`/`LL`, anything else `HI`/`LO`. That is what lets the rail print
+ * `HI 1.60 bar` for PT-101 and mean it.
  * @param {object} chart The chart.
  * @param {Array<object>} alarms `config.alarms` rows.
  * @returns {void}
@@ -4136,18 +4708,33 @@ export function setLimitsFromAlarms(chart, alarms) {
   for (let i = 0; i < chart.pens.length; i++) {
     const p = chart.pens[i];
     if (!p.limitSignal) continue;
-    let best = NaN;
-    let bestAny = NaN;
+    let up = null;
+    let upAny = null;
+    let down = null;
+    let downAny = null;
     for (let k = 0; k < alarms.length; k++) {
       const row = alarms[k];
-      if (!row || row.signal !== p.limitSignal || row.op !== '>') continue;
+      if (!row || row.signal !== p.limitSignal) continue;
       const th = row.threshold;
       if (typeof th !== 'number' || !isFinite(th)) continue;
-      if (!(bestAny === bestAny) || th < bestAny) bestAny = th;
-      if (row.severity !== 'ALARM') continue;
-      if (!(best === best) || th < best) best = th;
+      if (row.op === '>') {
+        if (!upAny || th < upAny.threshold) upAny = row;
+        if (row.severity === 'ALARM' && (!up || th < up.threshold)) up = row;
+      } else if (row.op === '<') {
+        if (!downAny || th > downAny.threshold) downAny = row;
+        if (row.severity === 'ALARM' && (!down || th > down.threshold)) down = row;
+      }
     }
-    setSeriesLimit(chart, p.id, best === best ? best : bestAny === bestAny ? bestAny : null);
+    const win = up || upAny || down || downAny;
+    if (!win) {
+      setSeriesLimit(chart, p.id, null);
+      continue;
+    }
+    const trip = TRIP_SEVERITIES.has(win.severity);
+    const code = win.op === '<'
+      ? trip ? LIMIT_CODES.LL : LIMIT_CODES.LO
+      : trip ? LIMIT_CODES.HH : LIMIT_CODES.HI;
+    setSeriesLimit(chart, p.id, win.threshold, code);
   }
 }
 
@@ -4463,7 +5050,7 @@ export function exportPNG(chart, opts) {
     cssW: width,
     cssH: height - titleH - footerH,
     dpr: 1,
-    padL: 42, padR: 48, padT: 16, padB: 26,
+    padL: LEFT_AXIS_W, padR: 48, padT: 16, padB: 26,
     px0: 42, py0: 16, px1: width - 48, py1: height - titleH - footerH - 26,
     plotW: 1, plotH: 1, pixels: 1,
   };
@@ -4500,21 +5087,8 @@ export function exportPNG(chart, opts) {
       paintTraceBins(chart, ctx, geom, colors, 0, geom.pixels, starts, 0);
       ctx.restore();
     }
-    // limit lines, exactly as the operator sees them
-    for (let i = 0; i < chart.pens.length; i++) {
-      const p = chart.pens[i];
-      if (!p.visible || !(p.limit === p.limit)) continue;
-      const py = p.bPix - p.limit * p.kPix;
-      if (py < geom.py0 || py > geom.py1) continue;
-      ctx.strokeStyle = colors.pen[p.id];
-      ctx.lineWidth = SP_WIDTH;
-      ctx.setLineDash(SP_DASH);
-      ctx.beginPath();
-      ctx.moveTo(geom.px0, Math.round(py) + 0.5);
-      ctx.lineTo(geom.px1, Math.round(py) + 0.5);
-      ctx.stroke();
-      ctx.setLineDash(EMPTY_DASH);
-    }
+    // limit lines, exactly as the operator sees them — same ink, same dash-dot, same caption
+    paintLimitLines(chart, ctx, geom, colors);
     ctx.restore();
 
     if (title) {
@@ -4548,15 +5122,27 @@ export function exportPNG(chart, opts) {
       ctx.strokeStyle = colors.pen[p.id];
       ctx.lineWidth = PV_WIDTH;
       ctx.beginPath();
-      ctx.moveTo(lx - 14, ty - 2);
-      ctx.lineTo(lx, ty - 2);
+      ctx.moveTo(lx - 14, ty - 3);
+      ctx.lineTo(lx, ty - 3);
       ctx.stroke();
-      if (p.spChannel || p.limit === p.limit) {
+      // The same two signatures the rail's line sample carries: a setpoint dashes in the
+      // pen's hue, a limit dash-dots in warn ink. They are never drawn as the same stroke.
+      if (p.spChannel) {
         ctx.lineWidth = SP_WIDTH;
         ctx.setLineDash(SP_DASH);
         ctx.beginPath();
-        ctx.moveTo(lx - 14, ty + 3);
-        ctx.lineTo(lx, ty + 3);
+        ctx.moveTo(lx - 14, ty + 1);
+        ctx.lineTo(lx, ty + 1);
+        ctx.stroke();
+        ctx.setLineDash(EMPTY_DASH);
+      }
+      if (p.limit === p.limit) {
+        ctx.strokeStyle = p.limitState === 'norm' ? colors.warnInk : colors.alarmInk;
+        ctx.lineWidth = LIMIT_WIDTH;
+        ctx.setLineDash(LIMIT_DASH);
+        ctx.beginPath();
+        ctx.moveTo(lx - 14, ty + 5);
+        ctx.lineTo(lx, ty + 5);
         ctx.stroke();
         ctx.setLineDash(EMPTY_DASH);
       }

@@ -151,6 +151,66 @@ const DV_ARC_R = 20;
 /** Default ISA instrument-bubble radius. */
 const BUBBLE_R = 19;
 
+/* -----------------------------------------------------------------------------------------------
+ * PDT-101, the column differential-pressure indicator.
+ *
+ * A column can foul, compact or channel while every other number on the screen still looks
+ * ordinary, so dP is drawn as an analogue indication in its own enclosure hard against C-101:
+ * a vertical bargraph against its own scale, the alarm rows of `config.alarms` as HI / HH / TRIP
+ * ticks ON that scale, the value in large digits, a trend caret from a short rolling window and
+ * the remaining margin to the next limit.  The bubble sits between the enclosure and the column
+ * with an impulse line to each tap, so the tag reads as a DIFFERENTIAL and can never be mistaken
+ * for PT-101.
+ * ---------------------------------------------------------------------------------------------*/
+
+/** dP enclosure left edge. */
+const DP_X = 694;
+/** dP enclosure top edge — clear of the sample drop that crosses above it. */
+const DP_Y = 176;
+/** dP enclosure width. */
+const DP_W = 72;
+/** dP enclosure height. */
+const DP_H = 206;
+/** dP bargraph track left edge. */
+const DP_BAR_X = 716;
+/** dP bargraph track width. */
+const DP_BAR_W = 20;
+/** dP bargraph track top edge — the scale maximum. */
+const DP_BAR_Y = 242;
+/** dP bargraph track height — the full scale deflection, schematic units. */
+const DP_BAR_H = 126;
+/** Right end of a dP limit tick. */
+const DP_TICK_X = 744;
+/** Left edge of a dP limit-tick label. */
+const DP_LBL_X = 746;
+/** dP scale end-label right edge (right-aligned, left of the track). */
+const DP_SC_X = 714;
+/** PDT-101 bubble centre x. */
+const DP_BUB_X = 790;
+/** PDT-101 bubble centre y — the column's vertical midpoint. */
+const DP_BUB_Y = 267;
+/** Column wall x at which both impulse lines tap. */
+const DP_TAP_X = 812;
+/** Upstream (HIGH) tap y — the column inlet frit. */
+const DP_TAP_HI_Y = 158;
+/** Downstream (LOW) tap y — the column outlet frit. */
+const DP_TAP_LO_Y = 376;
+/** Trend-caret centre x. */
+const DP_DIR_X = 742;
+/** Trend-caret centre y. */
+const DP_DIR_Y = DP_Y + 10;
+/** How many dP limit ticks the drawing carries — one per `COMPONENT_ALARMS['PDT-101']` row. */
+const DP_TICKS = 4;
+
+/** Tank level-scale rail width, schematic units. */
+const TANK_RAIL_W = 7;
+/** Tank level-scale rail inset from the vessel's right edge. */
+const TANK_RAIL_DX = TANK_W - 9;
+/** Left end of a tank LO / LO-LO level mark, relative to the cell origin. */
+const TANK_MARK_DX = 88;
+/** Left edge of a tank LO / LO-LO label, relative to the cell origin. */
+const TANK_MARK_LBL_DX = 112;
+
 /** Corner radius on equipment bodies, label boxes and chips, schematic units.  Never 0, never > 3. */
 const R_BOX = 2;
 
@@ -452,6 +512,21 @@ function fmtTankVolume(v_mL) {
   return { value: v_mL.toFixed(0), unit: 'mL' };
 }
 
+/**
+ * Format a vessel's nominal capacity for the "of N" caption under a level readout.  Whole litres
+ * above 10 L, one decimal below, millilitres under a litre — so a 60 000 mL buffer tank and a
+ * 250 mL sample vial both read at a glance and the operator can see they are not the same size.
+ *
+ * @param {number} v_mL capacity, mL
+ * @returns {string} the caption, e.g. `'OF 60 L'`
+ */
+function fmtCapacity(v_mL) {
+  if (!Number.isFinite(v_mL) || v_mL <= 0) return 'OF —';
+  if (v_mL >= 10000) return 'OF ' + Math.round(v_mL / 1000) + ' L';
+  if (v_mL >= 1000) return 'OF ' + (v_mL / 1000).toFixed(1) + ' L';
+  return 'OF ' + Math.round(v_mL) + ' mL';
+}
+
 /* ===============================================================================================
  * 5.  SVG BUILDERS  (used once, at module load, to compose PID_TEMPLATE)
  * =============================================================================================*/
@@ -623,13 +698,33 @@ function leader(d) {
 }
 
 /**
+ * The tie between an instrument bubble and the label box that carries its value.
+ *
+ * A value box is only trustworthy if the operator can see, without reading anything, WHICH bubble
+ * it belongs to.  Every bubble/box pair in this drawing is therefore both immediately adjacent and
+ * joined by this short heavier stub — heavier than a leader, so the eye reads it as a tie rather
+ * than as another instrument line, and short enough that nothing can ever be drawn between them.
+ *
+ * @param {string} d the path data, from the bubble's edge to the box's edge
+ * @returns {string} SVG markup
+ */
+function bind(d) {
+  return `<path class="pid-bind" d="${d}"/>`;
+}
+
+/**
  * A vertical two-triangle gate-valve bowtie with a stem and handwheel to the right.
+ *
+ * The tag prints to the LEFT of the symbol, right-aligned: the drawing's inlet valves stand
+ * directly above the equipment they feed, and a tag hung off the bottom-right corner ran into
+ * whatever the next run down the sheet happened to be.
+ *
  * @param {string} id element id
  * @param {number} cx centre x
  * @param {number} cy centre y
  * @param {string} comp the `data-component` id
  * @param {string} label the accessible name
- * @param {string} tag the printed tag
+ * @param {string} tag the printed ISA tag, e.g. `XV-101`
  * @returns {string} SVG markup
  */
 function valveV(id, cx, cy, comp, label, tag) {
@@ -638,7 +733,7 @@ function valveV(id, cx, cy, comp, label, tag) {
     + '<path class="pid-vlv-body" d="M-8,11 L8,11 L0,0 Z"/>'
     + '<line class="pid-vlv-stem" x1="0" y1="0" x2="13" y2="0"/>'
     + '<line class="pid-vlv-stem" x1="13" y1="-6" x2="13" y2="6"/>'
-    + `<text class="pid-tag" x="17" y="14">${tag}</text>`
+    + `<text class="pid-tag" x="-14" y="4" text-anchor="end">${tag}</text>`
     + hit(comp, -13, -13, 32, 26, label)
     + '</g>';
 }
@@ -686,11 +781,35 @@ const IV_CHANNELS = {
  * =============================================================================================*/
 
 /**
- * One tank cell: vessel, level fill, LT bubble, level label box and low-level lamp.
+ * A percent-of-capacity graduation inside a tank vessel.
+ * @param {number} x the cell origin
+ * @param {number} f the fraction of nominal capacity the tick marks, 0..1
+ * @returns {string} SVG markup
+ */
+function tankTick(x, f) {
+  const y = (TANK_BOT - f * TANK_H).toFixed(1);
+  return `<line class="pid-scale-tk" x1="${x + TANK_RAIL_DX - 6}" y1="${y}" `
+    + `x2="${x + TANK_RAIL_DX}" y2="${y}"/>`;
+}
+
+/**
+ * One tank cell: vessel, level fill, level scale, LT bubble, level and percent label boxes,
+ * capacity caption and low-level lamp.
  *
  * The cell carries the SERVICE name and the level readout and nothing else.  The recipe
  * description that used to sit on the same 20 px baseline (and collided with it, and truncated) is
  * gone from the drawing — `liveLineFor` hands it to the tooltip and the faceplate instead.
+ *
+ * THE SCALE IS THE POINT.  A bare column of liquid in an identically-sized rectangle is not an
+ * analogue indication: ten litres in a small CIP vessel drew a taller column than fifty litres in
+ * a large buffer vessel, and nothing on the screen said so.  Every cell now carries a graduated
+ * rail at 0/25/50/75/100 % of THAT vessel's own nominal capacity, the LO (`tank.lowLevelPct`) and
+ * LO-LO (`tank.emptyLevel_mL`) marks read from config, the usable operating range shaded on the
+ * rail, and the percentage and capacity printed beside the volume — so the picture and the number
+ * tell the same proportional story.
+ *
+ * The marks and the two captions are POSITIONED AT RUNTIME: which tank sits behind a display slot
+ * follows the inlet valves, and its capacity and limits follow it.
  *
  * @param {number} i the display slot index (0 = A, 1 = B, 2 = S, 3 = CIP)
  * @param {string} comp the `data-component` id
@@ -702,6 +821,8 @@ const IV_CHANNELS = {
 function tankCell(i, comp, role, label, lt) {
   const x = TANK_X[i];
   const dx = x + TANK_DROP_DX;
+  const rx = x + TANK_RAIL_DX;
+  const mx = x + TANK_MARK_DX;
   return `<g id="pid-tk${i}" class="pid-tank">`
     + `<text id="pid-tk${i}-role" class="pid-tag" x="${x}" y="20">${role}</text>`
     + `<rect class="pid-tank-bg" x="${x}" y="${TANK_TOP}" width="${TANK_W}" height="${TANK_H}" `
@@ -714,13 +835,54 @@ function tankCell(i, comp, role, label, lt) {
     + '</g>'
     + sheen(x, TANK_TOP, TANK_W, TANK_H)
     + edgeBox(x, TANK_TOP, TANK_W, TANK_H, false)
+    /* ---- level scale: rail, usable-range shading, graduations, LO and LO-LO marks ---- */
+    + '<g class="pid-tank-scale" aria-hidden="true">'
+    + `<rect class="pid-scale-rail" x="${rx}" y="${TANK_TOP}" width="${TANK_RAIL_W}" `
+    + `height="${TANK_H}"/>`
+    + `<rect id="pid-tk${i}-lo-b" class="pid-scale-lo" x="${rx}" y="${TANK_BOT}" `
+    + `width="${TANK_RAIL_W}" height="0"/>`
+    + `<rect id="pid-tk${i}-ll-b" class="pid-scale-ll" x="${rx}" y="${TANK_BOT}" `
+    + `width="${TANK_RAIL_W}" height="0"/>`
+    + tankTick(x, 0.25) + tankTick(x, 0.5) + tankTick(x, 0.75)
+    + `<line id="pid-tk${i}-lo-m" class="pid-mark-lo" x1="${mx}" y1="${TANK_BOT}" `
+    + `x2="${rx + TANK_RAIL_W}" y2="${TANK_BOT}"/>`
+    + `<line id="pid-tk${i}-ll-m" class="pid-mark-ll" x1="${mx}" y1="${TANK_BOT}" `
+    + `x2="${rx + TANK_RAIL_W}" y2="${TANK_BOT}"/>`
+    + `<text id="pid-tk${i}-lo-t" class="pid-mark-t pid-mark-t--lo" `
+    + `x="${x + TANK_MARK_LBL_DX}" y="${TANK_BOT}">LO</text>`
+    + `<text id="pid-tk${i}-ll-t" class="pid-mark-t pid-mark-t--ll" `
+    + `x="${x + TANK_MARK_LBL_DX}" y="${TANK_BOT}">LL</text>`
+    + '</g>'
     + leader(`M${x + TANK_W},44 H${x + 123}`)
     + bubble('pid-tk' + i + '-bub', x + 142, 44, 'LT', lt)
+    + bind(`M${x + 161},44 H${x + 166}`)
     + fld('pid-tk' + i + '-lv', x + 166, 35, 52, 18, 'L')
+    /* The percentage and the capacity ride on two clear baselines rather than in boxes of their
+       own: the column return riser crosses this column of the sheet at y = 66, and a recessed
+       field deep enough to hold 12 px digits would have sat on top of it. */
+    + `<text id="pid-tk${i}-pc" class="pid-tag pid-tag--pct" x="${x + 218}" y="62" `
+    + 'text-anchor="end">— %</text>'
+    + `<text id="pid-tk${i}-cap" class="pid-tag pid-tag--cap" x="${x + 218}" y="78" `
+    + 'text-anchor="end">OF —</text>'
     + lamp('pid-tk' + i + '-lamp', x + 142, 78, 5.5)
     + hit(comp, x, TANK_TOP, TANK_W, TANK_H, label)
     + hit(comp + '-LT', x + 123, 25, 38, 38, label + ' level transmitter')
     + `<path class="pid-tank-nozzle" d="M${dx},${TANK_BOT} V${TANK_BOT + 6}"/>`
+    + '</g>';
+}
+
+/**
+ * One limit tick on the dP bargraph scale: a rule struck THROUGH the scale at the threshold plus
+ * a labelled stub outside it.  Positioned by a `translate(0, y)` on the group at runtime, because
+ * the threshold is `config.alarms`' to state, not the drawing's.
+ *
+ * @param {number} i the tick index, 0..`DP_TICKS`-1
+ * @returns {string} SVG markup
+ */
+function dpTick(i) {
+  return `<g id="pid-dp-tk${i}" class="pid-dp-tick">`
+    + `<line class="pid-dp-tick-l" x1="${DP_BAR_X + 2}" y1="0" x2="${DP_TICK_X}" y2="0"/>`
+    + `<text class="pid-dp-tick-t" x="${DP_LBL_X}" y="2.4">HI</text>`
     + '</g>';
 }
 
@@ -807,17 +969,20 @@ export const PID_TEMPLATE = `
     <path data-seg="s-drop-c"    d="M66,155 V176"/>
     <path data-seg="s-drop-a"    d="M296,155 V176"/>
     <path data-seg="s-drop-b"    d="M526,155 V176"/>
-    <path data-seg="s-drop-s"    d="M756,155 V300 H717"/>
+    <path data-seg="s-drop-s"    d="M756,155 V168 H672 V283"/>
     <path data-seg="s-hdr-2"     d="M526,176 H296"/>
     <path data-seg="s-hdr-1"     d="M296,176 H66 V228"/>
     <path data-seg="s-pump-out"  d="M90,252 H136"/>
     <path data-seg="s-mix-out"   d="M244,252 H282"/>
     <path data-seg="s-filt-out"  d="M350,252 H388"/>
     <path data-seg="s-trap-out"  d="M442,252 H538"/>
-    <path data-seg="s-samp-disc" d="M683,300 H610 V263 H579.05"/>
+    <path data-seg="s-samp-disc" d="M655,300 H610 V263 H579.05"/>
     <path data-seg="s-loop"      d="M540.95,241 L534,226 H586 L579.05,241"/>
     <path data-seg="s-iv-vent"   d="M540.95,263 L528,280 V424"/>
-    <path data-seg="s-iv-out"    d="M582,252 H744 A12,12 0 0,1 768,252 H790 V112 H880"/>
+    <!-- The feed to CV-101 rises at x=628 and runs the top of the sheet.  It used to rise at
+         x=790, straight through the only clear ground beside C-101; PDT-101's indication has
+         that ground now, and the sample drop hugs P-102 to keep it clear. -->
+    <path data-seg="s-iv-out"    d="M582,252 H628 V112 H744 A12,12 0 0,0 768,112 H880"/>
     <path data-seg="s-cv-top"    d="M900,132 V140"/>
     <path data-seg="s-col-bot"   d="M900,394 V412 H1000 V66 H900 V92"/>
     <path data-seg="s-cv-out"    d="M920,112 H988 A12,12 0 0,1 1012,112 H1115 V140"/>
@@ -841,11 +1006,14 @@ export const PID_TEMPLATE = `
   ${tankCell(1, 'TK-B', 'BUFFER B', 'Buffer B tank', '102')}
   ${tankCell(2, 'TK-S', 'SAMPLE', 'Sample tank', '103')}
 
-  <!-- ============================ INLET VALVES ============================ -->
-  ${valveV('pid-v-V4', 66, 144, 'V4', 'CIP inlet valve V4', 'V4')}
-  ${valveV('pid-v-V1', 296, 144, 'V1', 'Buffer A inlet valve V1', 'V1')}
-  ${valveV('pid-v-V2', 526, 144, 'V2', 'Buffer B inlet valve V2', 'V2')}
-  ${valveV('pid-v-V3', 756, 144, 'V3', 'Sample inlet valve V3', 'V3')}
+  <!-- ============================ INLET VALVES ============================
+       On-off block valves on the four inlet headers, tagged XV on the ISA-5.1 convention with a
+       loop number of their own.  "V1".."V4" survives as the data-component id, because that is
+       what the fluidics model and every ctx.sim call site call them. -->
+  ${valveV('pid-v-V4', 66, 144, 'V4', 'CIP inlet valve XV-104', 'XV-104')}
+  ${valveV('pid-v-V1', 296, 144, 'V1', 'Buffer A inlet valve XV-101', 'XV-101')}
+  ${valveV('pid-v-V2', 526, 144, 'V2', 'Buffer B inlet valve XV-102', 'XV-102')}
+  ${valveV('pid-v-V3', 756, 144, 'V3', 'Sample inlet valve XV-103', 'XV-103')}
 
   <!-- ============================ PUMPS ============================ -->
   <g id="pid-pump" class="pid-mach">
@@ -860,12 +1028,12 @@ export const PID_TEMPLATE = `
     ${hit('P-101', 42, 228, 48, 48, 'System pump P-101')}
   </g>
   <g id="pid-pump-s" class="pid-mach">
-    <circle class="pid-mach-b" cx="700" cy="300" r="17"/>
-    <path class="pid-impeller-static" d="M700,289.1 L702.9,300 L697.1,300 Z
-                                         M709.2,305.6 L700.9,303 L703.6,298.3 Z
-                                         M690.8,305.6 L696.4,298.3 L699.1,303 Z"/>
-    <text class="pid-tag" x="700" y="328" text-anchor="middle">P-102</text>
-    ${hit('P-102', 683, 283, 34, 34, 'Sample pump P-102')}
+    <circle class="pid-mach-b" cx="672" cy="300" r="17"/>
+    <path class="pid-impeller-static" d="M672,289.1 L674.9,300 L669.1,300 Z
+                                         M681.2,305.6 L672.9,303 L675.6,298.3 Z
+                                         M662.8,305.6 L668.4,298.3 L671.1,303 Z"/>
+    <text class="pid-tag" x="672" y="328" text-anchor="middle">P-102</text>
+    ${hit('P-102', 655, 283, 34, 34, 'Sample pump P-102')}
   </g>
 
   <!-- ============================ MIXER / FILTER / AIR TRAP ============================ -->
@@ -937,10 +1105,14 @@ export const PID_TEMPLATE = `
       <line x1="0" y1="-20" x2="0" y2="-27"/>
     </g>
     <circle id="pid-cv-arc" class="pid-move-arc" cx="0" cy="0" r="${CV_ARC_R}"/>
-    <text class="pid-tag" x="26" y="22">CV-101</text>
+    <text class="pid-tag" x="-26" y="22" text-anchor="end">CV-101</text>
     ${hit('CV-101', -21, -21, 42, 42, 'Column valve CV-101')}
   </g>
-  ${fld('pid-cv-pos', 610, 104, 96, 18, '')}
+  <!-- The position readout belongs to CV-101, so it is tied to CV-101.  It used to sit at x=610,
+       nearly 200 units away with a tank, a valve and two runs of pipe between it and the symbol
+       whose position it reports. -->
+  ${bind('M917,123 L922,127')}
+  ${fld('pid-cv-pos', 922, 118, 70, 17, '')}
 
   <!-- ============================ COLUMN ============================ -->
   <g id="pid-column" class="pid-col">
@@ -970,19 +1142,57 @@ export const PID_TEMPLATE = `
     ${hit('C-101', 812, 140, 176, 254, 'Chromatography column C-101')}
   </g>
 
-  <!-- ============================ PDT-101 ============================ -->
+  <!-- ============================ PDT-101 — COLUMN dP ============================
+       The one indication that says a column is fouling, compacting or channelling before anything
+       else on the screen does.  Impulse line to each tap, bubble between them, and the whole
+       analogue indication in a single enclosure hard against C-101. -->
   <g id="pid-dp" class="pid-inst">
-    <path class="pid-bracket" d="M820,158 H806 V376 H820"/>
-    ${leader('M806,376 H790')}
-    ${bubble('pid-dp-bub', 771, 376, 'PDT', '101')}
-    ${fld('pid-dp-f', 656, 367, 92, 18, 'bar')}
-    ${hit('PDT-101', 752, 357, 38, 38, 'Column differential pressure PDT-101')}
+    ${leader(`M${DP_TAP_X},${DP_TAP_HI_Y} H${DP_BUB_X} V${DP_BUB_Y - BUBBLE_R}`)}
+    ${leader(`M${DP_TAP_X},${DP_TAP_LO_Y} H${DP_BUB_X} V${DP_BUB_Y + BUBBLE_R}`)}
+    <text class="pid-tap-t" x="${(DP_TAP_X + DP_BUB_X) / 2}" y="${DP_TAP_HI_Y - 5}"
+          text-anchor="middle">H</text>
+    <text class="pid-tap-t" x="${(DP_TAP_X + DP_BUB_X) / 2}" y="${DP_TAP_LO_Y - 5}"
+          text-anchor="middle">L</text>
+    ${bubble('pid-dp-bub', DP_BUB_X, DP_BUB_Y, 'PDT', '101')}
+    ${bind(`M${DP_X + DP_W},${DP_BUB_Y} H${DP_BUB_X - BUBBLE_R}`)}
+    <g id="pid-dp-panel" class="pid-dp-panel">
+      <rect class="pid-encl" x="${DP_X}" y="${DP_Y}" width="${DP_W}" height="${DP_H}"
+            rx="${R_BOX}"/>
+      <text class="pid-dp-ttl" x="${DP_X + 6}" y="${DP_Y + 14}">&#916;P</text>
+      <path id="pid-dp-dir" class="pid-dp-dir" d=""/>
+      <text class="pid-fld-eu" x="${DP_X + DP_W - 4}" y="${DP_Y + 14}"
+            text-anchor="end">bar</text>
+      ${fld('pid-dp-f', DP_X + 4, DP_Y + 20, DP_W - 8, 24, '', 'big')}
+      <text id="pid-dp-mg" class="pid-dp-mg" x="${DP_BAR_X + 6}" y="${DP_Y + 57}"
+            text-anchor="end">—</text>
+      <text id="pid-dp-mgl" class="pid-dp-mgl" x="${DP_BAR_X + 10}" y="${DP_Y + 57}">—</text>
+      <g id="pid-dp-bar" class="pid-dp-bar">
+        <rect class="pid-dp-trk" x="${DP_BAR_X}" y="${DP_BAR_Y}" width="${DP_BAR_W}"
+              height="${DP_BAR_H}" rx="${R_BOX}"/>
+        <rect id="pid-dp-band" class="pid-dp-band" x="${DP_BAR_X}" y="${DP_BAR_Y}"
+              width="${DP_BAR_W}" height="0"/>
+        <rect id="pid-dp-fill" class="pid-dp-fill" x="${DP_BAR_X}"
+              y="${DP_BAR_Y + DP_BAR_H}" width="${DP_BAR_W}" height="0"/>
+        <line id="pid-dp-zero" class="pid-dp-zero" x1="${DP_BAR_X}"
+              y1="${DP_BAR_Y + DP_BAR_H}" x2="${DP_BAR_X + DP_BAR_W}"
+              y2="${DP_BAR_Y + DP_BAR_H}"/>
+        ${dpTick(0)}${dpTick(1)}${dpTick(2)}${dpTick(3)}
+        ${edgeBox(DP_BAR_X, DP_BAR_Y, DP_BAR_W, DP_BAR_H, true)}
+      </g>
+      <text id="pid-dp-shi" class="pid-dp-sc" x="${DP_SC_X}" y="${DP_BAR_Y + 6}"
+            text-anchor="end">—</text>
+      <text id="pid-dp-slo" class="pid-dp-sc" x="${DP_SC_X}" y="${DP_BAR_Y + DP_BAR_H}"
+            text-anchor="end">—</text>
+    </g>
+    ${hit('PDT-101', DP_X, DP_Y - 2, DP_TAP_X - DP_X, DP_H + 10,
+      'Column differential pressure PDT-101')}
   </g>
 
   <!-- ============================ PT-102 ============================ -->
   <g id="pid-pt102" class="pid-inst">
     ${leader('M1000,66 L1014,56')}
     ${bubble('pid-pt102-bub', 1030, 48, 'PT', '102')}
+    ${bind('M1049,48 H1056')}
     ${fld('pid-pt102-f', 1056, 39, 92, 18, 'bar')}
     ${hit('PT-102', 1011, 29, 38, 38, 'Post-column pressure transmitter PT-102')}
   </g>
@@ -991,6 +1201,7 @@ export const PID_TEMPLATE = `
   <g id="pid-ft" class="pid-inst">
     ${leader('M113,301 V254')}
     ${bubble('pid-ft-bub', 113, 320, 'FT', '101')}
+    ${bind('M132,320 H135 M135,311.5 V333.5 M135,311.5 H138 M135,333.5 H138')}
     ${fld('pid-ft-f', 138, 302, 96, 19, 'mL/min')}
     ${fld('pid-ft-sp', 138, 324, 96, 19, 'mL/min', 'sp')}
     ${hit('FT-101', 94, 301, 38, 38, 'Flow transmitter FT-101')}
@@ -998,6 +1209,7 @@ export const PID_TEMPLATE = `
   <g id="pid-pctb" class="pid-inst">
     ${leader('M285.6,307.6 L244,272')}
     ${bubble('pid-pctb-bub', 300, 320, 'AIC', '101')}
+    ${bind('M319,320 H321 M321,311.5 V333.5 M321,311.5 H324 M321,333.5 H324')}
     ${fld('pid-pctb-f', 324, 302, 96, 19, '%')}
     ${fld('pid-pctb-sp', 324, 324, 96, 19, '%', 'sp')}
     ${hit('PCTB', 281, 301, 38, 38, 'Gradient percent buffer B, AIC-101')}
@@ -1005,6 +1217,7 @@ export const PID_TEMPLATE = `
   <g id="pid-pt101" class="pid-inst">
     ${leader('M510,225 V252')}
     ${bubble('pid-pt101-bub', 510, 206, 'PT', '101')}
+    ${bind('M529,206 H534')}
     ${fld('pid-pt101-f', 534, 197, 92, 18, 'bar')}
     ${hit('PT-101', 491, 187, 38, 38, 'Pre-column pressure transmitter PT-101')}
   </g>
@@ -1023,21 +1236,25 @@ export const PID_TEMPLATE = `
   <g id="pid-uv-i" class="pid-inst">
     ${leader('M1170,189 H1189')}
     ${bubble('pid-uv-bub', 1208, 189, 'AT', '101')}
+    ${bind('M1227,189 H1232')}
     ${fld('pid-uv-f', 1232, 180, 92, 18, 'mAU')}
   </g>
   <g id="pid-ce-i" class="pid-inst">
     ${leader('M1170,263 H1189')}
     ${bubble('pid-ce-bub', 1208, 263, 'CE', '101')}
+    ${bind('M1227,263 H1232')}
     ${fld('pid-ce-f', 1232, 254, 92, 18, 'mS/cm')}
   </g>
   <g id="pid-ae-i" class="pid-inst">
     ${leader('M1170,337 H1189')}
     ${bubble('pid-ae-bub', 1208, 337, 'AE', '101')}
+    ${bind('M1227,337 H1232')}
     ${fld('pid-ae-f', 1232, 328, 92, 18, 'pH')}
   </g>
   <g id="pid-tt" class="pid-inst">
     ${leader('M1080,112 L1101,103')}
     ${bubble('pid-tt-bub', 1118, 96, 'TT', '101')}
+    ${bind('M1137,96 H1144')}
     ${fld('pid-tt-f', 1144, 87, 92, 18, '°C')}
     ${hit('TT-101', 1099, 77, 38, 38, 'Temperature transmitter TT-101')}
   </g>
@@ -1061,8 +1278,25 @@ export const PID_TEMPLATE = `
     </g>
     ${sheen(WASTE_X, WASTE_Y, WASTE_W, WASTE_H)}
     ${edgeBox(WASTE_X, WASTE_Y, WASTE_W, WASTE_H, false)}
+    <!-- Same scale contract as a source tank, read the other way up: the shaded rail is the
+         range that is NOT usable, here the HIGH and the FULL ends of the container. -->
+    <g class="pid-waste-scale" aria-hidden="true">
+      <rect class="pid-scale-rail" x="${WASTE_X + WASTE_W - 9}" y="${WASTE_Y}"
+            width="${TANK_RAIL_W}" height="${WASTE_H}"/>
+      <rect id="pid-waste-hi-b" class="pid-scale-lo" x="${WASTE_X + WASTE_W - 9}"
+            y="${WASTE_Y}" width="${TANK_RAIL_W}" height="0"/>
+      <rect id="pid-waste-hh-b" class="pid-scale-ll" x="${WASTE_X + WASTE_W - 9}"
+            y="${WASTE_Y}" width="${TANK_RAIL_W}" height="0"/>
+      <line id="pid-waste-hi-m" class="pid-mark-lo" x1="${WASTE_X + 76}" y1="${WASTE_Y}"
+            x2="${WASTE_X + WASTE_W - 2}" y2="${WASTE_Y}"/>
+      <line id="pid-waste-hh-m" class="pid-mark-ll" x1="${WASTE_X + 76}" y1="${WASTE_Y}"
+            x2="${WASTE_X + WASTE_W - 2}" y2="${WASTE_Y}"/>
+    </g>
     <text class="pid-tag" x="146" y="366">WASTE</text>
     ${fld('pid-waste-lv', 146, 372, 76, 18, 'L')}
+    ${fld('pid-waste-pc', 146, 392, 76, 16, '%')}
+    <text id="pid-waste-cap" class="pid-tag pid-tag--cap" x="222" y="418"
+          text-anchor="end">OF —</text>
     ${hit('WASTE', WASTE_X, WASTE_Y, WASTE_W, WASTE_H, 'Waste container')}
   </g>
 
@@ -1202,6 +1436,23 @@ const PID_CSS = `
 .pid-root .pid-tank-nozzle{stroke:var(--pipe-idle,${F['--pipe-idle']});stroke-width:3.5;fill:none;}
 .pid-root .pid-tank.is-empty .pid-tank-bg{fill:var(--panel-lo,${F['--panel-lo']});}
 
+/* ---- level scales: rail, usable-range shading, graduations, LO / LO-LO ------ */
+.pid-root .pid-scale-rail{fill:var(--panel-lo,${F['--panel-lo']});fill-opacity:.8;}
+.pid-root .pid-scale-lo{fill:var(--warn,${F['--warn']});fill-opacity:.32;}
+.pid-root .pid-scale-ll{fill:var(--alarm,${F['--alarm']});fill-opacity:.45;}
+.pid-root .pid-scale-tk{stroke:var(--ink-3,${F['--ink-3']});stroke-width:1;opacity:.85;}
+.pid-root .pid-mark-lo{stroke:var(--warn,${F['--warn']});stroke-width:1.2;}
+.pid-root .pid-mark-ll{stroke:var(--alarm,${F['--alarm']});stroke-width:1.2;}
+.pid-root .pid-mark-t{font-size:6.5px;font-weight:700;letter-spacing:.02em;}
+.pid-root .pid-mark-t--lo{fill:var(--warn,${F['--warn']});}
+.pid-root .pid-mark-t--ll{fill:var(--alarm,${F['--alarm']});}
+.pid-root .pid-tag--cap{font-size:7.5px;font-weight:600;fill:var(--ink-3,${F['--ink-3']});}
+.pid-root .pid-tag--pct{font-family:var(--font-num,'Roboto Mono',Consolas,ui-monospace,monospace);
+  font-variant-numeric:tabular-nums lining-nums;font-size:9px;font-weight:600;
+  text-transform:none;fill:var(--ink,${F['--ink']});}
+.pid-root .pid-tank.is-empty .pid-tag--pct{fill:var(--fld-alarm,${F['--fld-alarm']});}
+.pid-root .is-unknown{opacity:0;}
+
 /* ---- valves --------------------------------------------------------------- */
 .pid-root .pid-vlv-body{fill:var(--pipe-idle,${F['--pipe-idle']});
   stroke:var(--equip-edge,${F['--equip-edge']});stroke-width:1;}
@@ -1260,6 +1511,46 @@ const PID_CSS = `
 .pid-root .pid-inst.is-warn .pid-bub-c{stroke:var(--warn,${F['--warn']});stroke-width:2;}
 .pid-root .pid-inst.is-alarm .pid-bub-c{stroke:var(--alarm,${F['--alarm']});stroke-width:2;}
 .pid-root .pid-leader{fill:none;stroke:var(--edge,${F['--edge']});stroke-width:.8;}
+.pid-root .pid-bind{fill:none;stroke:var(--fld-edge,${F['--fld-edge']});stroke-width:1.8;}
+.pid-root .pid-encl{fill:var(--panel-lo,${F['--panel-lo']});fill-opacity:.42;
+  stroke:var(--edge-soft,${F['--edge-soft']});stroke-width:1;}
+.pid-root .pid-tap-t{font-size:6.5px;font-weight:700;fill:var(--ink-3,${F['--ink-3']});}
+
+/* ---- PDT-101: the analogue column-dP indication ---------------------------
+   The bar is deliberately achromatic at rest — saturated colour on this screen means STATE, and a
+   dP inside its normal band is not a state.  Crossing a limit is, and that is when the fill, the
+   enclosure edge and the margin all turn together. */
+.pid-root .pid-dp-ttl{font-size:11px;font-weight:700;fill:var(--ink,${F['--ink']});
+  letter-spacing:.02em;}
+.pid-root .pid-dp-dir{fill:var(--ink-2,${F['--ink-2']});}
+.pid-root .pid-fld--big .pid-fld-v{font-size:16px;}
+.pid-root .pid-dp-mg{font-family:var(--font-num,'Roboto Mono',Consolas,ui-monospace,monospace);
+  font-variant-numeric:tabular-nums lining-nums;font-size:9.5px;font-weight:600;
+  fill:var(--ink,${F['--ink']});}
+.pid-root .pid-dp-mgl{font-size:7.5px;font-weight:600;letter-spacing:.02em;
+  fill:var(--ink-3,${F['--ink-3']});}
+.pid-root .pid-dp-sc{font-family:var(--font-num,'Roboto Mono',Consolas,ui-monospace,monospace);
+  font-variant-numeric:tabular-nums;font-size:6.5px;fill:var(--ink-3,${F['--ink-3']});}
+.pid-root .pid-dp-trk{fill:var(--fld-bg,${F['--fld-bg']});}
+.pid-root .pid-dp-band{fill:var(--ok,${F['--ok']});opacity:.16;}
+.pid-root .pid-dp-fill{fill:var(--ink-2,${F['--ink-2']});}
+.pid-root .pid-dp-zero{stroke:var(--ink-3,${F['--ink-3']});stroke-width:1;}
+.pid-root .pid-dp-tick-l{fill:none;stroke:var(--ink-3,${F['--ink-3']});stroke-width:1.2;}
+.pid-root .pid-dp-tick-t{font-size:6.5px;font-weight:700;letter-spacing:.02em;
+  fill:var(--ink-3,${F['--ink-3']});}
+.pid-root .pid-dp-tick--warn .pid-dp-tick-l{stroke:var(--warn,${F['--warn']});}
+.pid-root .pid-dp-tick--warn .pid-dp-tick-t{fill:var(--warn,${F['--warn']});}
+.pid-root .pid-dp-tick--alarm .pid-dp-tick-l{stroke:var(--alarm,${F['--alarm']});}
+.pid-root .pid-dp-tick--alarm .pid-dp-tick-t{fill:var(--alarm,${F['--alarm']});}
+.pid-root .pid-dp-panel.is-warn .pid-dp-fill,
+.pid-root .pid-dp-panel.is-warn .pid-dp-dir{fill:var(--warn,${F['--warn']});}
+.pid-root .pid-dp-panel.is-warn .pid-encl{stroke:var(--warn,${F['--warn']});stroke-width:1.6;}
+.pid-root .pid-dp-panel.is-warn .pid-dp-mg{fill:var(--fld-sp,${F['--fld-sp']});}
+.pid-root .pid-dp-panel.is-alarm .pid-dp-fill,
+.pid-root .pid-dp-panel.is-alarm .pid-dp-dir{fill:var(--alarm,${F['--alarm']});}
+.pid-root .pid-dp-panel.is-alarm .pid-encl{stroke:var(--alarm,${F['--alarm']});stroke-width:1.6;}
+.pid-root .pid-dp-panel.is-alarm .pid-dp-mg{fill:var(--fld-alarm,${F['--fld-alarm']});}
+.pid-root .pid-dp-panel.is-blink .pid-dp-fill{animation:pid-blink 1s steps(1,end) infinite;}
 
 /* ---- collector / waste ---------------------------------------------------- */
 .pid-root .pid-rail{stroke:var(--edge,${F['--edge']});stroke-width:1.6;}
@@ -1802,7 +2093,16 @@ const COMPONENT_TAG = {
   'TK-B': 'LT-102', 'TK-B-LT': 'LT-102',
   'TK-S': 'LT-103', 'TK-S-LT': 'LT-103',
   'TK-CIP': 'LT-104', 'TK-CIP-LT': 'LT-104',
+  /* The inlet block valves.  `V1`..`V4` is the id the fluidics model and every ctx.sim call site
+     use, so it stays the data-component; XV-10x is what the operator is entitled to read. */
+  V1: 'XV-101', V2: 'XV-102', V3: 'XV-103', V4: 'XV-104',
 };
+
+/**
+ * The service each inlet block valve admits, for the accessible name.
+ * @type {Object<string,string>}
+ */
+const INLET_VALVE_SERVICE = { V1: 'buffer A', V2: 'buffer B', V3: 'sample', V4: 'CIP' };
 
 /**
  * Display slot (a {@link resolveTankSlots} key) behind each tank component id.
@@ -1835,6 +2135,26 @@ const FILTER_FS_bar = 1;
 
 /** Headroom applied to the highest alarm threshold when it, not a transmitter, sets the scale. */
 const SCALE_HEADROOM = 1.5;
+
+/**
+ * What an alarm row's severity is called on the dP scale.  An operator reads limits, not row ids:
+ * the WARN row is HI, the ALARM row is HH, the row that trips the skid is TRIP.  Derived, never
+ * hardcoded — a preset that moves 0.60/0.80/1.00 moves these ticks with it.
+ * @type {Object<string,string>}
+ */
+const DP_LIMIT_LABEL = {
+  INFO: 'HI', WARN: 'HI', ALARM: 'HH', CRITICAL: 'TRIP', FAULT: 'TRIP',
+};
+
+/**
+ * Samples in the dP trend window.  The slow lane runs at 10 Hz, so this is about four seconds of
+ * wall clock — long enough to reject sensor noise, short enough that a fouling column shows a
+ * rising caret while the operator is still looking at it.
+ */
+const DP_TREND_N = 40;
+
+/** Minimum dP trend deflection, as a fraction of the scale span, before the caret leaves STEADY. */
+const DP_TREND_DEADBAND = 0.004;
 
 /** Faceplate quality verdicts, per the FaceplateSpec contract. */
 const Q_OK = 'OK';
@@ -1900,6 +2220,20 @@ export function createPID(rootEl, ctx) {
   let profilePts = null;
   let profileMax = 1e-9;
   let alarmIndex = new Map();
+  /** Rising dP limits from `config.alarms`, ascending. @type {Array<{v:number,label:string,rank:number}>} */
+  let dpLimits = [];
+  /** The falling dP limit (the negative-dP / sensor-fault row), or null. */
+  let dpLo = null;
+  /** dP bargraph scale, bar. */
+  let dpScaleLo = 0;
+  /** @see dpScaleLo */
+  let dpScaleHi = 1;
+  /** Rolling dP window, bar; a plain ring so the trend costs no allocation per tick. */
+  const dpRing = new Float64Array(DP_TREND_N);
+  /** Samples currently held in {@link dpRing}. */
+  let dpRingN = 0;
+  /** Write cursor into {@link dpRing}. */
+  let dpRingI = 0;
   let slots = { a: -1, b: -1, s: -1, cip: -1, aIsCip: false };
   let lastAIdx = -1;
   let lastSlow = -1e9;
@@ -1990,6 +2324,89 @@ export function createPID(rootEl, ctx) {
   }
 
   /**
+   * Position one level mark — the rule across the vessel, its label and the shaded band of the
+   * rail it bounds — from a fraction of the vessel's nominal capacity.
+   *
+   * The two labels are deliberately hung on opposite sides of their rules: LO and LO-LO sit within
+   * a few percent of each other on most vessels, and two captions on the same baseline would be
+   * unreadable exactly when the tank is low enough for them to matter.
+   *
+   * @param {Element|null} mark the rule across the vessel
+   * @param {Element|null} label the caption
+   * @param {Element|null} band the shaded rail segment below (tank) or above (waste) the mark
+   * @param {number} frac the level as a fraction of nominal capacity, 0..1
+   * @param {number} dy the caption's baseline offset from the rule
+   * @param {boolean} below true when the band runs from the mark DOWN to the vessel floor
+   * @returns {void}
+   */
+  function setLevelMark(mark, label, band, frac, dy, below) {
+    const known = Number.isFinite(frac) && frac > 0;
+    const y = TANK_BOT - clamp(frac, 0, 1) * TANK_H;
+    cls(mark, 'is-unknown', !known);
+    cls(label, 'is-unknown', !known);
+    cls(band, 'is-unknown', !known);
+    if (!known) return;
+    if (mark) {
+      mark.setAttribute('y1', y.toFixed(2));
+      mark.setAttribute('y2', y.toFixed(2));
+    }
+    /* A dip tube a fraction of a percent off the floor would hang its caption below the vessel,
+       so the caption is clamped to the vessel and the two never swap places. */
+    if (label) {
+      label.setAttribute('y', clamp(y + dy, TANK_TOP + 7, TANK_BOT).toFixed(2));
+    }
+    if (band) {
+      band.setAttribute('y', (below ? y : TANK_TOP).toFixed(2));
+      band.setAttribute('height', (below ? TANK_BOT - y : y - TANK_TOP).toFixed(2));
+    }
+  }
+
+  /**
+   * Position one waste-container mark and the shaded rail segment above it.  The waste vessel's
+   * limits are HIGH and FULL, so the shading runs from the mark UP to the rim — the range the
+   * operator must not let the container reach.
+   * @param {Element|null} mark the rule across the vessel
+   * @param {Element|null} band the shaded rail segment above the mark
+   * @param {number} frac the threshold as a fraction of `wasteCapacity_mL`
+   * @returns {void}
+   */
+  function setWasteMark(mark, band, frac) {
+    const known = Number.isFinite(frac) && frac > 0 && frac <= 1;
+    cls(mark, 'is-unknown', !known);
+    cls(band, 'is-unknown', !known);
+    if (!known) return;
+    const y = WASTE_BOT - frac * WASTE_H;
+    if (mark) {
+      mark.setAttribute('y1', y.toFixed(2));
+      mark.setAttribute('y2', y.toFixed(2));
+    }
+    if (band) {
+      band.setAttribute('y', WASTE_Y.toFixed(2));
+      band.setAttribute('height', Math.max(0, y - WASTE_Y).toFixed(2));
+    }
+  }
+
+  /**
+   * Blank a tank cell: no fill, no percentage, no capacity and no level marks.  A display slot
+   * with no tank behind it, or a tank with no configured capacity, must read as UNKNOWN — never
+   * as a vessel that happens to be full.
+   * @param {object} nd the cached cell nodes
+   * @returns {void}
+   */
+  function clearTankCell(nd) {
+    text(nd.val, '—');
+    text(nd.pc, '— %');
+    text(nd.cap, 'OF —');
+    setLamp(nd.lamp, 'off', false);
+    cls(nd.g, 'is-empty', false);
+    cls(nd.box, 'is-alarm', false);
+    cls(nd.box, 'is-stale', false);
+    if (nd.fill) nd.fill.setAttribute('height', '0');
+    setLevelMark(nd.loM, nd.loT, nd.loB, NaN, 0, true);
+    setLevelMark(nd.llM, nd.llT, nd.llB, NaN, 0, true);
+  }
+
+  /**
    * Cache the `id`-tagged nodes the update loop writes to.
    * @returns {void}
    */
@@ -2016,17 +2433,32 @@ export function createPID(rootEl, ctx) {
       pt101G: q('pid-pt101'), pt101V: q('pid-pt101-f-v'), pt101Box: q('pid-pt101-f'),
       pt102G: q('pid-pt102'), pt102V: q('pid-pt102-f-v'), pt102Box: q('pid-pt102-f'),
       dpG: q('pid-dp'), dpV: q('pid-dp-f-v'), dpBox: q('pid-dp-f'),
+      dpPanel: q('pid-dp-panel'), dpFill: q('pid-dp-fill'), dpBand: q('pid-dp-band'),
+      dpZero: q('pid-dp-zero'), dpDir: q('pid-dp-dir'), dpMg: q('pid-dp-mg'),
+      dpMgl: q('pid-dp-mgl'), dpScHi: q('pid-dp-shi'), dpScLo: q('pid-dp-slo'),
+      dpTicks: [0, 1, 2, 3].map((k) => {
+        const g = q('pid-dp-tk' + k);
+        return { g, label: g ? g.querySelector('.pid-dp-tick-t') : null };
+      }),
+      dpHit: null,
       ttG: q('pid-tt'), ttV: q('pid-tt-f-v'), ttBox: q('pid-tt-f'),
       uvG: q('pid-uv'), uvI: q('pid-uv-i'), uvV: q('pid-uv-f-v'), uvBox: q('pid-uv-f'),
       ceG: q('pid-ce'), ceI: q('pid-ce-i'), ceV: q('pid-ce-f-v'), ceBox: q('pid-ce-f'),
       aeG: q('pid-ae'), aeI: q('pid-ae-i'), aeV: q('pid-ae-f-v'), aeBox: q('pid-ae-f'),
       wasteFill: q('pid-waste-fill'), wasteV: q('pid-waste-lv-v'), wasteBox: q('pid-waste-lv'),
+      wastePc: q('pid-waste-pc-v'), wasteCap: q('pid-waste-cap'),
+      wasteHiB: q('pid-waste-hi-b'), wasteHhB: q('pid-waste-hh-b'),
+      wasteHiM: q('pid-waste-hi-m'), wasteHhM: q('pid-waste-hh-m'),
       fracHead: q('pid-frac-head'), fracV: q('pid-frac-v'), fracBox: q('pid-frac'),
       vials: q('pid-vials'), profile: q('pid-profile-line'),
       tanks: [0, 1, 2, 3].map((i) => ({
         g: q('pid-tk' + i), role: q('pid-tk' + i + '-role'),
         fill: q('pid-tk' + i + '-fill'), men: q('pid-tk' + i + '-men'),
         val: q('pid-tk' + i + '-lv-v'), box: q('pid-tk' + i + '-lv'),
+        pc: q('pid-tk' + i + '-pc'), cap: q('pid-tk' + i + '-cap'),
+        loB: q('pid-tk' + i + '-lo-b'), llB: q('pid-tk' + i + '-ll-b'),
+        loM: q('pid-tk' + i + '-lo-m'), llM: q('pid-tk' + i + '-ll-m'),
+        loT: q('pid-tk' + i + '-lo-t'), llT: q('pid-tk' + i + '-ll-t'),
         lamp: q('pid-tk' + i + '-lamp'), hit: null,
       })),
       valves: { V1: q('pid-v-V1'), V2: q('pid-v-V2'), V3: q('pid-v-V3'), V4: q('pid-v-V4') },
@@ -2035,6 +2467,7 @@ export function createPID(rootEl, ctx) {
       const g = nodes.tanks[i].g;
       nodes.tanks[i].hit = g ? g.querySelector('.pid-hit') : null;
     }
+    nodes.dpHit = nodes.dpG ? nodes.dpG.querySelector('.pid-hit') : null;
   }
 
   /**
@@ -2142,6 +2575,208 @@ export function createPID(rootEl, ctx) {
     alarmIndex = new Map();
     const list = pid._config.alarms || [];
     for (let i = 0; i < list.length; i++) alarmIndex.set(list[i].id, i);
+    refreshDpLimits();
+  }
+
+  /**
+   * Read PDT-101's limits out of `config.alarms`, choose the bargraph scale from them and lay the
+   * HI / HH / TRIP ticks onto it.
+   *
+   * Nothing here is a constant of this module: the thresholds, their order, their severities and
+   * therefore the scale itself all come from the alarm table, so a preset that moves the dP rows
+   * moves the ticks, the shaded normal band and the margin arithmetic with them.  The scale runs
+   * from the negative-dP row (a transducer fault reads BELOW zero, and a bar that cannot show that
+   * is lying) up to the top rising limit plus headroom, capped at the column's hardware ceiling.
+   *
+   * @returns {void}
+   */
+  function refreshDpLimits() {
+    const config = pid._config;
+    const defs = config.alarms || [];
+    const ids = COMPONENT_ALARMS['PDT-101'] || [];
+    const hi = [];
+    let lo = null;
+    for (let i = 0; i < ids.length; i++) {
+      const k = alarmIndex.get(ids[i]);
+      if (k === undefined) continue;
+      const row = defs[k];
+      const t = row ? row.threshold : null;
+      if (typeof t !== 'number' || !Number.isFinite(t)) continue;
+      const rank = SEV_RANK[row.severity] || 1;
+      if (row.op === '<') {
+        if (!lo || t > lo.v) lo = { v: t, label: 'LO', rank: Math.min(rank, 2) };
+      } else if (row.op === '>') {
+        hi.push({ v: t, label: DP_LIMIT_LABEL[row.severity] || 'HI', rank });
+      }
+    }
+    hi.sort((a, b) => a.v - b.v);
+    dpLimits = hi;
+    dpLo = lo;
+
+    const fs = config.column.hardwarePressureLimit_bar;
+    const ceiling = (typeof fs === 'number' && fs > 0) ? fs : Infinity;
+    let top = Number.isFinite(ceiling) ? ceiling : 1;
+    if (hi.length) {
+      const worst = hi[hi.length - 1].v;
+      /* Headroom above the last limit, but never so much cap that the tick sits on the rim. */
+      top = Math.max(worst * 1.05, Math.min(ceiling, worst * SCALE_HEADROOM));
+    }
+    const bot = (lo && lo.v < 0) ? lo.v * 1.15 : 0;
+    dpScaleLo = bot;
+    dpScaleHi = (top > bot) ? top : bot + 1;
+
+    /* ---- lay the ticks, the shaded normal band and the zero rule onto the scale ---- */
+    const marks = dpLo ? [dpLo].concat(dpLimits) : dpLimits.slice();
+    for (let i = 0; i < DP_TICKS; i++) {
+      const nd = nodes.dpTicks ? nodes.dpTicks[i] : null;
+      if (!nd || !nd.g) continue;
+      const m = marks[i];
+      cls(nd.g, 'is-unknown', !m);
+      cls(nd.g, 'pid-dp-tick--warn', !!m && m.rank <= 1);
+      cls(nd.g, 'pid-dp-tick--alarm', !!m && m.rank >= 2);
+      if (!m) continue;
+      nd.g.setAttribute('transform', 'translate(0,' + dpY(m.v).toFixed(2) + ')');
+      text(nd.label, m.label);
+    }
+    const zeroY = dpY(clamp(0, dpScaleLo, dpScaleHi));
+    if (nodes.dpZero) {
+      nodes.dpZero.setAttribute('y1', zeroY.toFixed(2));
+      nodes.dpZero.setAttribute('y2', zeroY.toFixed(2));
+      cls(nodes.dpZero, 'is-unknown', !(dpScaleLo < 0));
+    }
+    if (nodes.dpBand) {
+      const bandTop = dpLimits.length ? dpY(dpLimits[0].v) : DP_BAR_Y;
+      nodes.dpBand.setAttribute('y', bandTop.toFixed(2));
+      nodes.dpBand.setAttribute('height', Math.max(0, zeroY - bandTop).toFixed(2));
+    }
+    /* Two decimals is the resolution of the dP rows; a scale wide enough to need three digits
+       ahead of the point gives one back, so the end labels always fit inside the enclosure. */
+    const scText = (v) => nfix(v, Math.abs(v) >= 10 ? 1 : 2);
+    text(nodes.dpScHi, scText(dpScaleHi));
+    text(nodes.dpScLo, scText(dpScaleLo));
+  }
+
+  /**
+   * Project a dP onto the bargraph, clamped to the track.
+   * @param {number} v_bar the value, bar
+   * @returns {number} the schematic y of that value
+   */
+  function dpY(v_bar) {
+    const span = dpScaleHi - dpScaleLo;
+    const f = (span > 0) ? clamp((v_bar - dpScaleLo) / span, 0, 1) : 0;
+    return DP_BAR_Y + DP_BAR_H * (1 - f);
+  }
+
+  /**
+   * The direction of travel over the rolling window: the newest third of the samples against the
+   * oldest third, with a deadband scaled to the bargraph so transducer noise never reads as a
+   * trend.
+   * @returns {number} +1 rising, -1 falling, 0 steady or not enough history
+   */
+  function dpDirection() {
+    if (dpRingN < 9) return 0;
+    const m = Math.floor(dpRingN / 3);
+    let older = 0;
+    let newer = 0;
+    for (let i = 0; i < m; i++) {
+      older += dpRing[(dpRingI - dpRingN + i + DP_TREND_N * 2) % DP_TREND_N];
+      newer += dpRing[(dpRingI - 1 - i + DP_TREND_N * 2) % DP_TREND_N];
+    }
+    const d = (newer - older) / m;
+    const dead = Math.max(1e-3, DP_TREND_DEADBAND * (dpScaleHi - dpScaleLo));
+    return (d > dead) ? 1 : (d < -dead ? -1 : 0);
+  }
+
+  /**
+   * The trend caret's outline, drawn around ({@link DP_DIR_X}, {@link DP_DIR_Y}).
+   * @param {number} dir +1 rising, -1 falling, 0 steady
+   * @returns {string} SVG path data
+   */
+  function dpCaret(dir) {
+    const x = DP_DIR_X;
+    const y = DP_DIR_Y;
+    if (dir > 0) return `M${x - 4.5},${y + 3.5} L${x + 4.5},${y + 3.5} L${x},${y - 3.5} Z`;
+    if (dir < 0) return `M${x - 4.5},${y - 3.5} L${x + 4.5},${y - 3.5} L${x},${y + 3.5} Z`;
+    return `M${x - 4.5},${y - 1.2} L${x + 4.5},${y - 1.2} L${x + 4.5},${y + 1.2} `
+      + `L${x - 4.5},${y + 1.2} Z`;
+  }
+
+  /**
+   * Drive the whole dP indication from one number: the fill against the scale, the trend caret,
+   * the margin to the next limit and the state of the enclosure.
+   *
+   * The state is taken from the VALUE against the thresholds, not from `run.alarmActive`: an alarm
+   * row carries a `persist_s` debounce, and the operator is entitled to see the bar cross its limit
+   * the moment it crosses.  An alarm that is already up (or latched) can only escalate the state,
+   * never soften it.
+   *
+   * @param {number} dp_bar the transmitter reading, bar
+   * @returns {void}
+   */
+  function updateDpBar(dp_bar) {
+    const ok = Number.isFinite(dp_bar);
+    if (ok) {
+      dpRing[dpRingI] = dp_bar;
+      dpRingI = (dpRingI + 1) % DP_TREND_N;
+      if (dpRingN < DP_TREND_N) dpRingN += 1;
+    }
+
+    /* ---- the fill, measured from zero so a negative dP reads as one ---- */
+    const zeroY = dpY(clamp(0, dpScaleLo, dpScaleHi));
+    const valY = ok ? dpY(dp_bar) : zeroY;
+    if (nodes.dpFill) {
+      nodes.dpFill.setAttribute('y', Math.min(zeroY, valY).toFixed(2));
+      nodes.dpFill.setAttribute('height', Math.abs(zeroY - valY).toFixed(2));
+    }
+
+    /* ---- trend ---- */
+    const dir = ok ? dpDirection() : 0;
+    if (nodes.dpDir) nodes.dpDir.setAttribute('d', dpCaret(dir));
+
+    /* ---- margin to the first limit that still matters ---- */
+    let margin = NaN;
+    let mLabel = '—';
+    let rank = 0;
+    if (ok) {
+      if (dpLo && dp_bar < dpLo.v) {
+        margin = dpLo.v - dp_bar;
+        mLabel = 'UNDER LO';
+        rank = Math.max(rank, dpLo.rank);
+      } else {
+        let next = -1;
+        for (let i = 0; i < dpLimits.length; i++) {
+          if (dp_bar >= dpLimits[i].v) rank = Math.max(rank, dpLimits[i].rank);
+          else if (next < 0) next = i;
+        }
+        if (next >= 0) {
+          margin = dpLimits[next].v - dp_bar;
+          mLabel = 'TO ' + dpLimits[next].label;
+        } else if (dpLimits.length) {
+          const topLim = dpLimits[dpLimits.length - 1];
+          margin = dp_bar - topLim.v;
+          mLabel = 'OVER ' + topLim.label;
+        }
+      }
+    }
+    text(nodes.dpMg, nfix(margin, 2));
+    text(nodes.dpMgl, mLabel);
+
+    /* ---- state ---- */
+    const sev = componentSeverity('PDT-101');
+    const warn = rank >= 1 || sev === 1;
+    const alarm = rank >= 2 || sev >= 2;
+    cls(nodes.dpPanel, 'is-warn', warn && !alarm);
+    cls(nodes.dpPanel, 'is-alarm', alarm);
+    cls(nodes.dpPanel, 'is-blink', rank >= 3 && !pid._reducedMotion);
+
+    if (nodes.dpHit) {
+      const state = alarm ? 'alarm' : (warn ? 'warning' : 'normal');
+      const way = (dir > 0) ? 'rising' : (dir < 0 ? 'falling' : 'steady');
+      nodes.dpHit.setAttribute('aria-label',
+        'Column differential pressure PDT-101, ' + nfix(dp_bar, 3) + ' bar, ' + way + ', '
+        + (Number.isFinite(margin) ? nfix(margin, 2) + ' bar ' + mLabel.toLowerCase() : 'no limit')
+        + ', ' + state);
+    }
   }
 
   /**
@@ -2401,14 +3036,22 @@ export function createPID(rootEl, ctx) {
       const k = slotIdx[i];
       text(nd.role, slotRole[i]);
       if (k < 0 || k >= config.tanks.length) {
-        text(nd.val, '—');
-        setLamp(nd.lamp, 'off', false);
-        if (nd.fill) nd.fill.setAttribute('height', '0');
+        clearTankCell(nd);
         continue;
       }
       const t = config.tanks[k];
       const vol = run.tankVolume_mL[k];
-      const cap = t.nominalVolume_mL || Math.max(vol, 1);
+      /* The vessel's OWN nominal capacity, and nothing else, sets the height of the column of
+         liquid.  The old fallback — the live volume — drew a tank with no configured capacity as
+         permanently 100 % full, which is exactly the indication an operator must never be given. */
+      const cap = (t.nominalVolume_mL > 0) ? t.nominalVolume_mL : 0;
+      if (!(cap > 0)) {
+        clearTankCell(nd);
+        text(nd.val, fmtTankVolume(vol).value);
+        cls(nd.box, 'is-stale', true);
+        continue;
+      }
+      cls(nd.box, 'is-stale', false);
       const frac = clamp(vol / cap, 0, 1);
       const yTop = TANK_BOT - frac * TANK_H;
       const colour = tankColour(config, theme, k, slots.cip, i === 1);
@@ -2423,15 +3066,26 @@ export function createPID(rootEl, ctx) {
       }
       const fv = fmtTankVolume(vol);
       text(nd.val, fv.value);
+      text(nd.pc, nfix(100 * vol / cap, 0) + ' %');
+      text(nd.cap, fmtCapacity(cap));
+
+      /* ---- LO and LO-LO, straight off this tank's own config row ---- */
+      const loFrac = clamp((t.lowLevelPct != null ? t.lowLevelPct : 0) / 100, 0, 1);
+      const llFrac = clamp((t.emptyLevel_mL || 0) / cap, 0, 1);
+      setLevelMark(nd.loM, nd.loT, nd.loB, loFrac, -2, true);
+      setLevelMark(nd.llM, nd.llT, nd.llB, llFrac, 6.5, true);
+
       const empty = vol <= (t.emptyLevel_mL || 0);
-      const low = frac < ((t.lowLevelPct != null ? t.lowLevelPct : 10) / 100) && !empty;
+      const low = frac < loFrac && !empty;
       cls(nd.g, 'is-empty', empty);
       cls(nd.box, 'is-alarm', empty);
       setLamp(nd.lamp, empty ? 'alarm' : (low ? 'warn' : (slotLive[i] ? 'run' : 'off')), empty);
       if (nd.hit) {
         nd.hit.setAttribute('aria-label',
-          slotRole[i] + ' tank, ' + (t.label || t.id) + ', ' + fv.value + ' ' + fv.unit + ', '
-          + Math.round(frac * 100) + ' percent full');
+          slotRole[i] + ' tank, ' + (t.label || t.id) + ', ' + fv.value + ' ' + fv.unit + ' of '
+          + fmtTankVolume(cap).value + ' ' + fmtTankVolume(cap).unit + ', '
+          + Math.round(frac * 100) + ' percent full'
+          + (empty ? ', empty' : (low ? ', below low level' : '')));
       }
     }
 
@@ -2443,7 +3097,6 @@ export function createPID(rootEl, ctx) {
       V3: tankColour(config, theme, slots.s, slots.cip, false),
       V4: theme['--svc-cip'],
     };
-    const vlabel = { V1: 'buffer A', V2: 'buffer B', V3: 'sample', V4: 'CIP' };
     for (const key of ['V1', 'V2', 'V3', 'V4']) {
       const g = nodes.valves[key];
       if (!g) continue;
@@ -2455,7 +3108,8 @@ export function createPID(rootEl, ctx) {
       const hitEl = g.querySelector('.pid-hit');
       if (hitEl) {
         hitEl.setAttribute('aria-label',
-          'Inlet valve ' + key + ', ' + vlabel[key] + ', ' + (vopen[key] ? 'open' : 'closed'));
+          'Inlet valve ' + COMPONENT_TAG[key] + ', ' + INLET_VALVE_SERVICE[key] + ', '
+          + (vopen[key] ? 'open' : 'closed'));
       }
     }
 
@@ -2571,13 +3225,19 @@ export function createPID(rootEl, ctx) {
     applyAlarm(nodes.dvG, nodes.fracBox, 'FC-101');
 
     /* ---- waste ---- */
-    const wasteFrac = clamp(run.wasteVolume_mL / Math.max(config.skid.wasteCapacity_mL, 1), 0, 1);
+    const wasteCap = config.skid.wasteCapacity_mL;
+    const wasteFrac = clamp(run.wasteVolume_mL / Math.max(wasteCap, 1), 0, 1);
     if (nodes.wasteFill) {
       const h = wasteFrac * WASTE_H;
       nodes.wasteFill.setAttribute('y', (WASTE_BOT - h).toFixed(2));
       nodes.wasteFill.setAttribute('height', h.toFixed(2));
     }
     text(nodes.wasteV, (run.wasteVolume_mL / 1000).toFixed(1));
+    text(nodes.wastePc, nfix(100 * wasteFrac, 0));
+    text(nodes.wasteCap, fmtCapacity(wasteCap));
+    /* The waste HIGH and FULL rows carry their thresholds as fractions of `wasteCapacity_mL`. */
+    setWasteMark(nodes.wasteHiM, nodes.wasteHiB, alarmThresholds(['WRN-TNK-04'])[0]);
+    setWasteMark(nodes.wasteHhM, nodes.wasteHhB, alarmThresholds(['ALM-TNK-03'])[0]);
     cls(nodes.wasteBox, 'is-alarm', componentSeverity('WASTE') >= 2);
 
     /* ---- label boxes ---- */
@@ -2587,7 +3247,11 @@ export function createPID(rootEl, ctx) {
     text(nodes.pctbSpV, nfix(run.pctB_set, 1));
     text(nodes.pt101V, nfix(run.press.P1disp_bar, 2));
     text(nodes.pt102V, nfix(run.press.P2disp_bar, 2));
-    text(nodes.dpV, nfix(run.dP_bar, 3));
+    /* Two decimals, at 16 px, in its own enclosure: the digit the third decimal carried is worth
+       less to an operator than the size of the ones that are left.  The faceplate and the hover
+       still report the full three. */
+    text(nodes.dpV, nfix(run.dP_bar, 2));
+    updateDpBar(run.dP_bar);
     text(nodes.ttV, nfix(run.T_fluid_C, 1));
     text(nodes.uvV, nfix(1000 * run.uv.Afilt[0], 1));
     text(nodes.ceV, nfix(run.cond.kappaDisp_mScm, 2));
@@ -2627,7 +3291,8 @@ export function createPID(rootEl, ctx) {
     /* ---- screen-reader summary ---- */
     srSummary.textContent = 'Column valve ' + pos + ', flow ' + nfix(60 * run.Q_actual_mLs, 0)
       + ' millilitres per minute, ' + nfix(run.pctB_actual, 0) + ' percent buffer B, inlet pressure '
-      + nfix(run.press.P1disp_bar, 2) + ' bar, UV 280 ' + nfix(1000 * run.uv.Afilt[0], 0)
+      + nfix(run.press.P1disp_bar, 2) + ' bar, column differential pressure '
+      + nfix(run.dP_bar, 2) + ' bar, UV 280 ' + nfix(1000 * run.uv.Afilt[0], 0)
       + ' milli absorbance units, outlet to ' + outlet + '.';
   }
 
@@ -3908,6 +4573,10 @@ export function createPID(rootEl, ctx) {
     pid._config = pid._ctx.config;
     pid._run = pid._ctx.run;
     lastAIdx = -1;
+    /* The dP trend window belongs to the run that produced it: a new config is a new column. */
+    dpRing.fill(0);
+    dpRingN = 0;
+    dpRingI = 0;
     indexAlarms();
     allocSnapshot();
     buildVials();

@@ -7,17 +7,35 @@
  * together and the two process widgets neither of them owns.
  *
  * SCREEN, top to bottom:
- *   1. P&ID panel      `flex: 1 1 0` — it claims every pixel the fixed bands leave behind.
- *   2. Fraction strip  waste + 12 ports, recessed cells that fill with product green as they
- *                      collect, the port under the head lamped and ringed.
- *   3. Splitter        6 px, `role="separator"`, drag / arrow keys / three snap points.
- *   4. Phase rail      a segmented progress bar: one block per segment, a service-tint cap, an
- *                      accent fill that sweeps across the active segment.
+ *   1. Simulation band a standing SIMULATION — NOT PLANT marker carrying the commanded speed.
+ *   2. P&ID panel      `flex: 1 1 0` — it claims every pixel the fixed bands leave behind.
+ *   3. Process band    ONE band, not two: the collector on the left, the phase rail on the right.
+ *   4. Splitter        6 px, `role="separator"`, drag / arrow keys / three snap points.
  *   5. Trend panel     the chromatogram, holding `ui/chart.js` whole.
  *
  * There is NO bottom value strip. It duplicated numbers that already sit beside their instruments
  * on the schematic and in the trend's pen rail, and it cost the two panels that matter their
  * height. Run state and quality indication live in the title bar, beside the alarm summary.
+ *
+ * THREE THINGS THIS SCREEN IS OPINIONATED ABOUT:
+ *
+ * · THE SIMULATION BAND is permanent, quiet and undismissable. It does not blink and it does not
+ *   borrow `--alarm` or `--warn`: a blinking marker is an event, and this is a condition that will
+ *   never clear. It carries the commanded speed inside itself on purpose — a 1000× button is only
+ *   safe on an operator screen while the screen itself says, without being asked, that nothing
+ *   here is connected to plant.
+ *
+ * · THE COLLECTOR spends its width on the one thing that changes: the ACTIVE destination, as a
+ *   sunken plaque naming the port, the volume it has taken and whether flow is being diverted to
+ *   waste. Every other port compresses to a 12 px cell that still carries its fill height and its
+ *   lamp, so "which have collected, and how full" survives the compaction. The width that buys is
+ *   handed to the phase rail, which now shares the band — one band where there were two.
+ *
+ * · EVENT MARKERS are DE-COLLIDED HERE, not in the trend. `ui/chart.js` places a flag label at a
+ *   fixed row under the plot's top edge, so two events a few millilitres apart overprint into a
+ *   smear. This view therefore measures every label at the trend's current pixel scale and merges
+ *   any that would touch into one chevron carrying `×N`, expanded on hover. The merge is redone
+ *   the moment the scale moves, which is what makes "nothing overprints" true at every zoom.
  *
  * BUS: this view listens, it does not drive. `key-action` carries the shortcuts `ui/app.js` does
  * not handle itself; `request-pane` carries `{ pane: 'pid' | 'trend' }` from the two nav buttons
@@ -64,12 +82,55 @@ const BLOCK_KIND = Object.freeze({
   STRIP: 'strip', CIP: 'strip', HOLD: 'hold', COLUMN_BYPASS: 'bypass', PACKING_TEST: 'test',
 });
 
-/** Event types that earn an axis chevron on the trend. */
+/**
+ * Event types that earn an axis chevron on the trend, as `[code, name]`.
+ *
+ * The CODE is what the plot draws — five characters at most, because the label is centred on the
+ * event's own x and every character it carries is a character that can collide with the next
+ * event's. The NAME, and the event's own message, are the hover card's, which is where a sentence
+ * is allowed to live.
+ */
 const MARKER_EVENTS = Object.freeze({
-  RUN_START: 'run start', ALARM_RAISED: 'alarm', WATCH_FIRED: 'watch',
-  OPERATOR_ACTION: 'operator', AUTOZERO: 'autozero', PEAK_MAX: 'peak max',
-  AIR_DETECTED: 'air', FLOW_REDUCTION_START: 'flow reduced', STATE_CHANGE: 'state',
+  RUN_START: ['START', 'Run start'],
+  ALARM_RAISED: ['ALARM', 'Alarm raised'],
+  WATCH_FIRED: ['WATCH', 'Watch fired'],
+  OPERATOR_ACTION: ['OPR', 'Operator action'],
+  AUTOZERO: ['ZERO', 'Autozero'],
+  PEAK_MAX: ['PEAK', 'Peak maximum'],
+  AIR_DETECTED: ['AIR', 'Air detected'],
+  FLOW_REDUCTION_START: ['FLOW', 'Flow reduced'],
+  STATE_CHANGE: ['STATE', 'State change'],
 });
+
+/**
+ * The font `ui/chart.js` paints a marker label in, mirrored here so this view can measure a label
+ * before handing it over. It is deliberately a copy and not an import: the trend owns its painter,
+ * this owns the decision about what is safe to give it. The `MARK_PAD` and `MARK_GAP` slack below
+ * absorb any drift between the two.
+ */
+const MARK_FONT = '700 9px "Roboto Mono", Consolas, ui-monospace, "Cascadia Mono", Menlo, '
+  + 'monospace';
+
+/** Padding `ui/chart.js` adds around a marker label, px. */
+const MARK_PAD = 6;
+
+/** Clear space demanded between two marker labels before they count as separable, px. */
+const MARK_GAP = 8;
+
+/** How far the pointer may sit from a chevron and still open its card, px. */
+const MARK_HIT = 9;
+
+/** Depth of the hoverable marker row below the plot's top edge, px. */
+const MARK_ROW_H = 26;
+
+/** Relative change in px-per-x-unit that forces the marker clusters to be recomputed. */
+const MARK_RESCALE = 0.004;
+
+/** Events listed in full on a cluster's hover card before it summarises the remainder. */
+const MARK_CARD_ROWS = 10;
+
+/** Severity rank, worst first — a cluster shows the worst thing inside it. */
+const SEVERITY_RANK = Object.freeze({ INFO: 0, WARN: 1, ALARM: 2, FAULT: 2, CRITICAL: 3 });
 
 /** Quality-flag lamps in the P&ID header, worst first. Four characters or fewer. */
 const QF_LAMPS = Object.freeze([
@@ -104,8 +165,14 @@ const PANE_FRAC = Object.freeze({ pid: 0.3, trend: 0.7 });
 /** Screen height assumed before the `ResizeObserver` has measured one, px. */
 const FALLBACK_H = 800;
 
-/** Fraction strip band height, px. Published as `--rv-frac-h`, which `styles/app.css` reads. */
-const FRAC_H = 34;
+/**
+ * Process band height, px — the collector and the phase rail share one band now, so this is the
+ * only band height the screen owns. Published as `--rv-frac-h`, which `styles/app.css` reads.
+ */
+const FRAC_H = 30;
+
+/** Simulation band height, px. */
+const SIM_H = 18;
 
 /**
  * Icon geometry, 16×16, stroked with `currentColor`. Only the two controls this screen owns need
@@ -155,6 +222,44 @@ function nfix(v, d) {
  */
 function clamp(x, lo, hi) {
   return x < lo ? lo : (x > hi ? hi : x);
+}
+
+/**
+ * The 2D context this module measures marker labels with. Built on first use, never attached to
+ * the document, and shared by every run view in the page.
+ * @type {CanvasRenderingContext2D|null}
+ */
+let measureCtx = null;
+
+/**
+ * The painted width of a marker label, in px, at the exact font `ui/chart.js` will use.
+ *
+ * Falls back to a deliberately GENEROUS per-character estimate when no 2D context can be had, so
+ * a environment without canvas over-merges rather than overprints.
+ *
+ * @param {string} text The label.
+ * @returns {number} Width including the padding `ui/chart.js` adds around it, px.
+ */
+function labelWidth(text) {
+  const s = String(text);
+  if (measureCtx === null) {
+    const cv = typeof document.createElement === 'function' ? document.createElement('canvas')
+      : null;
+    measureCtx = (cv && typeof cv.getContext === 'function') ? cv.getContext('2d') : null;
+    if (measureCtx) measureCtx.font = MARK_FONT;
+  }
+  if (!measureCtx) return s.length * 7 + MARK_PAD;
+  return measureCtx.measureText(s).width + MARK_PAD;
+}
+
+/**
+ * Rank an event severity so a collapsed cluster can be coloured by the worst thing inside it.
+ * @param {string} [sev] An event severity.
+ * @returns {number} 0 for INFO or unknown, 3 for CRITICAL.
+ */
+function severityRank(sev) {
+  const r = SEVERITY_RANK[sev];
+  return r === undefined ? 0 : r;
 }
 
 /**
@@ -347,18 +452,36 @@ const STYLE_SKELETON = '@layer skid-run{' + [
   /* -- header furniture --------------------------------------------------------------------- */
   '.rv-codes{display:flex;align-items:center;gap:3px;min-width:0;overflow:hidden}',
   '.rv-tb{flex:0 0 auto;min-width:0}',
-  /* -- bands (fraction strip, phase rail) ---------------------------------------------------- */
+  /* -- simulation band ------------------------------------------------------------------------ */
+  '.rv-sim{flex:0 0 auto;display:flex;align-items:center;gap:var(--sp-5);min-width:0;',
+  'height:' + SIM_H + 'px;padding:0 var(--sp-5) 0 0;overflow:hidden}',
+  '.rv-sim-t,.rv-sim-s,.rv-sim-x{flex:0 0 auto;white-space:nowrap}',
+  '.rv-sim-s{min-width:0;overflow:hidden;text-overflow:ellipsis}',
+  '.rv-sim-x{margin-left:auto}',
+  /* -- the one process band: collector on the left, phase rail on the right ------------------- */
   '.rv-band{flex:0 0 auto;display:flex;align-items:center;gap:var(--sp-5);',
   'padding:0 var(--sp-5);min-width:0}',
-  '.rv-frac{flex-basis:var(--rv-frac-h)}',
-  '.rv-vials{display:flex;align-items:stretch;gap:2px;flex:1 1 auto;min-width:0;height:26px}',
-  '.rv-vials>li{flex:1 1 0;min-width:0;display:flex}',
-  '.rv-vials>li.rv-wasteli{flex:0 0 36px}',
+  // Clipped, because below the narrow breakpoint's own budget the band's fixed readouts still
+  // outgrow the glass. Spilling would break the panel frame across the whole screen; clipping
+  // costs the trailing readout and nothing else.
+  '.rv-proc{flex-basis:var(--rv-frac-h);overflow:hidden}',
+  '.rv-band .lbl{flex:0 0 auto}',
+  /* -- collector: a prominent destination plaque, then a dense strip of the rest -------------- */
+  '.rv-dest{flex:0 0 auto;display:flex;align-items:center;gap:var(--sp-4);height:24px;',
+  'padding:0 var(--sp-5)}',
+  '.rv-dest-p{min-width:40px;text-align:right}',
+  // `0 0 12px` and not `1 1 0`: a cell is 12 px because 12 px is enough to read a fill height and
+  // a lamp, and no wider — the width a collector does not need is the phase rail's. The basis is
+  // rigid on purpose. A shrinkable one contributes its MINIMUM, not its basis, to the strip's own
+  // intrinsic width, and the strip then asks for half the room it needs and squeezes every cell to
+  // a hairline. The narrow screen gets a smaller rigid cell instead, below.
+  '.rv-vials{display:flex;align-items:stretch;gap:2px;flex:0 0 auto;min-width:0;height:22px}',
+  '.rv-vials>li{flex:0 0 12px;display:flex}',
+  '.rv-vials>li.rv-wasteli{flex:0 0 24px}',
   '.rv-vial{width:100%;height:100%;display:flex;align-items:flex-end;justify-content:center;',
   'padding:0 1px 1px;overflow:hidden;cursor:pointer}',
-  /* -- phase rail --------------------------------------------------------------------------- */
-  '.rv-railbar{flex-basis:26px;height:26px}',
-  '.rv-rail{display:flex;align-items:stretch;gap:1px;flex:1 1 auto;min-width:0;height:18px;',
+  /* -- phase rail: the width the collector gave back ----------------------------------------- */
+  '.rv-rail{display:flex;align-items:stretch;gap:1px;flex:1 1 auto;min-width:60px;height:18px;',
   'padding:1px}',
   '.rv-rail>li{min-width:7px;display:flex}',
   '.rv-blk{position:relative;width:100%;height:100%;display:flex;align-items:center;',
@@ -370,16 +493,24 @@ const STYLE_SKELETON = '@layer skid-run{' + [
   '.rv-trend>.rv-chart-host{margin:2px}',
   /* -- responsive ---------------------------------------------------------------------------- */
   '.rv.is-narrow .rv-codes{max-width:180px}',
+  '.rv.is-narrow .rv-band .lbl,.rv.is-narrow .rv-sim-s,.rv.is-narrow .rv-opt{display:none}',
+  '.rv.is-narrow .rv-vials>li{flex:0 0 9px}',
+  '.rv.is-narrow .rv-vials>li.rv-wasteli{flex:0 0 18px}',
   '.rv.is-short .rv-blk-t{display:none}',
-  '.rv.is-short .rv-railbar{flex-basis:18px;height:18px}',
+  '.rv.is-short .rv-proc{flex-basis:26px}',
   '.rv.is-short .rv-rail{height:14px}',
+  '.rv.is-short .rv-vials{height:20px}',
+  '.rv.is-short .rv-dest{height:22px}',
 ].join('') + '}';
 
 /**
- * The chrome this screen OWNS — panel frames, the phase rail, the fraction strip, the splitter.
+ * The chrome this screen OWNS — the simulation band, the panel frames, the phase rail, the
+ * collector and the splitter.
  *
  * Deliberately UNLAYERED and scoped under `.rv`, so it wins on both specificity and layer order:
- * these four widgets are this module's responsibility, not the shell's.
+ * these widgets are this module's responsibility, not the shell's. The last group is the one
+ * exception and says why: an overlay card and its anchor are mounted on `document.body`, so they
+ * are never inside `.rv` to be scoped by it.
  *
  * Every surface below is one of the depth recipes `styles/tokens.css` publishes: raised is
  * `--surface-raised` + `--border-edge` + `--elev-raised`, recessed is `--fld-bg` +
@@ -388,7 +519,23 @@ const STYLE_SKELETON = '@layer skid-run{' + [
  * No colour literal appears in this file at all.
  */
 const STYLE_CHROME = [
-  '.rv{background:var(--screen);gap:3px;padding:3px}',
+  // The gutter between the panels is hatched, not flat. It is the quietest surface on the screen
+  // and it is now the one surface that is never plant: whatever the operator is looking at, the
+  // frame around it says simulator. It costs no space and it cannot be dismissed.
+  '.rv{gap:3px;padding:3px;background:',
+  'repeating-linear-gradient(135deg,var(--screen) 0 7px,var(--neutral-soft) 7px 14px),',
+  'var(--screen)}',
+  /* -- simulation band: a standing condition, so no blink and no alarm colour ----------------- */
+  '.rv .rv-sim{background:',
+  'repeating-linear-gradient(135deg,var(--neutral-soft) 0 6px,var(--panel-lo) 6px 12px),',
+  'var(--panel-lo);border:var(--border-edge);border-left:3px solid var(--info);',
+  'border-radius:2px;box-shadow:var(--elev-raised)}',
+  '.rv .rv-sim-t{padding:2px var(--sp-5);background:var(--panel-lo);border-radius:2px;',
+  'color:var(--ink);font:700 10px/1 var(--font-ui);letter-spacing:.14em}',
+  '.rv .rv-sim-s{color:var(--ink-3);font:600 9px/1 var(--font-ui);letter-spacing:.06em}',
+  '.rv .rv-sim-x{padding:2px var(--sp-5);background:var(--panel-lo);border-radius:2px;',
+  'color:var(--ink-2);font:700 10px/1 var(--font-num);letter-spacing:.02em}',
+  '.rv .rv-sim-x.is-fast{color:var(--info-ink)}',
   /* -- panel frames -------------------------------------------------------------------------- */
   '.rv .rv-panel{background:var(--panel);border:var(--border-edge);border-radius:2px;',
   'box-shadow:var(--elev-raised)}',
@@ -412,6 +559,19 @@ const STYLE_CHROME = [
   '.rv .rv-code{flex:0 0 auto;display:inline-flex;align-items:center;gap:4px;height:16px;',
   'padding:0 5px;background:var(--panel-lo);border:var(--border-edge);border-radius:2px}',
   '.rv .rv-code-t{font:600 9px/1 var(--font-ui);letter-spacing:.02em;color:var(--ink-2)}',
+  /* -- destination plaque: the one collector fact that changes, at readable size -------------- */
+  '.rv .rv-dest{background:var(--fld-bg);border:var(--border-field);border-radius:2px;',
+  'box-shadow:var(--elev-sunken)}',
+  '.rv .rv-dest-k{color:var(--ink-2);font:600 9px/1 var(--font-ui);letter-spacing:.06em}',
+  '.rv .rv-dest-p{color:var(--fld-pv);font:700 14px/1 var(--font-num);letter-spacing:.02em}',
+  '.rv .rv-dest.is-waste .rv-dest-p{color:var(--fld-stale)}',
+  '.rv .rv-dest-v{color:var(--ink);font:600 11px/1 var(--font-num)}',
+  '.rv .rv-dest-u{margin-left:2px;color:var(--fld-eu);font:600 9px/1 var(--font-num)}',
+  // The divert chip is a STATE, not an alarm: it is outlined in the waste service tint and never
+  // borrows --alarm. Flow going to drain is normal for most of a run.
+  '.rv .rv-dest-w{padding:1px var(--sp-4);background:var(--neutral-soft);',
+  'border:1px solid var(--svc-waste);border-radius:2px;color:var(--ink-2);',
+  'font:700 9px/1 var(--font-ui);letter-spacing:.06em}',
   /* -- fraction strip: recessed cells that fill with product green ---------------------------- */
   '.rv .rv-vials{background:none;border:0;box-shadow:none;overflow:visible}',
   '.rv .rv-vial{position:relative;background:var(--fld-bg);border:var(--border-field);',
@@ -419,14 +579,23 @@ const STYLE_CHROME = [
   '.rv .rv-vial-f{position:absolute;left:0;right:0;bottom:0;height:0;z-index:0;',
   'background:var(--svc-product);pointer-events:none}',
   '.rv .rv-vial.is-waste .rv-vial-f{background:var(--svc-waste)}',
-  '.rv .rv-vial .lamp{position:absolute;top:2px;left:50%;margin-left:-4px;width:8px;height:8px;',
+  // A 12 px cell has no room for an 8 px lamp AND a fill, so the lamp compresses to a 4 px pip at
+  // the head of the cell. It still carries the whole three-state code: green under the head, amber
+  // collected, dark empty.
+  '.rv .rv-vial .lamp{position:absolute;top:2px;left:50%;margin-left:-2px;width:4px;height:4px;',
   'z-index:2}',
-  '.rv .rv-vial-id{position:relative;z-index:2;pointer-events:none;white-space:nowrap;',
-  'overflow:hidden;color:var(--ink-2);font:600 9px/1 var(--font-num);letter-spacing:.02em}',
-  '.rv .rv-vial.has-peak .rv-vial-id{color:var(--ink)}',
+  '.rv .rv-vial.is-waste .lamp{margin-left:-4px;width:8px;height:8px}',
+  // Twelve port names at 12 px would be twelve ellipses. The name of the port that matters is on
+  // the plaque; the rest carry theirs in `title` and `aria-label`.
+  '.rv .rv-vial-id{display:none}',
+  '.rv .rv-vial.is-waste .rv-vial-id{position:relative;z-index:2;display:block;',
+  'pointer-events:none;white-space:nowrap;overflow:hidden;color:var(--ink-2);',
+  'font:600 8px/1 var(--font-num);letter-spacing:.02em}',
+  // A fraction that caught the peak is the one an operator hunts for, so it keeps a mark of its
+  // own even at 12 px: a full-height product-green edge down the cell.
+  '.rv .rv-vial.has-peak{border-color:var(--svc-product)}',
   '.rv .rv-vial.is-pooling{background:var(--accent-soft);border-color:var(--accent)}',
   '.rv .rv-vial.is-pooling .rv-vial-f{background:var(--svc-product)}',
-  '.rv .rv-vial.is-pooling .rv-vial-id{color:var(--ink)}',
   // The port under the head is lamped AND ringed, and carries the same 25 % outer glow a lit lamp
   // does — colour is state, and this is the one cell whose state is changing.
   '.rv .rv-vial.is-open{border-color:var(--ok);',
@@ -461,10 +630,26 @@ const STYLE_CHROME = [
   '.rv .rv-blk.is-done .rv-blk-t{color:var(--ink-3)}',
   '.rv .rv-blk.is-off{opacity:.45}',
   '.rv .rv-blk:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}',
-  /* -- the two label boxes each band carries ------------------------------------------------- */
+  /* -- the label boxes the band carries ------------------------------------------------------- */
   '.rv .rv-band .lbl{color:var(--ink-2);font:600 10px/1 var(--font-ui);letter-spacing:.02em}',
   '.rv .rv-band .tb-sep{width:1px;height:14px;flex:0 0 1px;margin:0 2px;',
   'background:var(--edge-soft);box-shadow:none}',
+  /* -- the trend's marker anchor and cluster card --------------------------------------------- */
+  // The last two groups are the only rules here NOT scoped under `.rv`: the anchor lives on
+  // document.body, where nothing can become its containing block, and the card is built by the
+  // overlay host, which mounts it there too.
+  '.rv-markanchor{position:fixed;left:0;top:0;width:1px;height:1px;',
+  'pointer-events:none;opacity:0}',
+  '.rv-mark-h{color:var(--ink);font:700 10px/1.2 var(--font-ui);letter-spacing:.04em}',
+  '.rv-mark-l{display:grid;grid-template-columns:auto auto 1fr;gap:2px var(--sp-5);',
+  'align-items:baseline;margin-top:var(--sp-4);font:600 10px/1.3 var(--font-num)}',
+  '.rv-mark-x{color:var(--ink-3);white-space:nowrap}',
+  '.rv-mark-c{color:var(--ink-2);white-space:nowrap}',
+  '.rv-mark-c.is-warn{color:var(--warn-ink)}',
+  '.rv-mark-c.is-alarm{color:var(--alarm-ink)}',
+  '.rv-mark-m{color:var(--ink)}',
+  '.rv-mark-more{margin-top:var(--sp-4);color:var(--ink-3);font:600 9px/1 var(--font-ui);',
+  'letter-spacing:.04em}',
 ].join('');
 
 const STYLE_TEXT = STYLE_SKELETON + STYLE_CHROME;
@@ -522,6 +707,35 @@ export function createRunView(rootEl, ctx) {
   const openBands = [];
   let lastBandExtend = -1e9;
 
+  /**
+   * Every event that earns a chevron, in x order, each carrying its own painted label width. The
+   * width is measured once here because the clustering below runs whenever the trend rescales.
+   * @type {Array<{x:number, code:string, name:string, message:string, severity:string,
+   *   t_s:number, V_mL:number, w:number}>}
+   */
+  let evMarks = [];
+
+  /** The fraction ticks, kept apart from the chevrons because only chevrons carry a label. */
+  let tickMarks = [];
+
+  /**
+   * The chevrons as they are currently drawn: one per non-overlapping label box, each owning the
+   * events it swallowed.
+   * @type {Array<{x:number, lo:number, hi:number, w:number, items:Array<object>}>}
+   */
+  let markClusters = [];
+
+  /** px per x unit at the last clustering. The clusters are only correct at this scale. */
+  let lastScale = NaN;
+
+  /** The cluster whose card is open, its handle, and the timer that will open the next one. */
+  let hoverCluster = null;
+  let hoverHandle = null;
+  let hoverTimer = 0;
+
+  /** The trend element the marker-row listeners are on, so they can be taken off again. */
+  let markHoverEl = null;
+
   /** The last window this view asked the trend for, used before the trend owns one. */
   const viewWindow = { x0: NaN, x1: NaN };
 
@@ -565,7 +779,25 @@ export function createRunView(rootEl, ctx) {
   el.style.setProperty('--rv-trend-h', '40%');
   el.style.setProperty('--rv-frac-h', FRAC_H + 'px');
 
-  /* -- 1. P&ID panel -- */
+  /* -- 1. simulation band: the one thing on this screen that is never a process value -- */
+  // It is NOT a lamp, NOT an alarm and NOT dismissible: no blink, no --alarm, no close control. A
+  // banner that can be silenced is a banner an operator eventually silences, and the condition it
+  // reports — that nothing here is wired to a column — will not clear for the life of the session.
+  // Not `.rv-band`: the band recipe would repaint the hatch flat, and this strip is not one of the
+  // process bands anyway. Its skeleton rule carries the same flex behaviour.
+  const simBand = mk('div', 'rv-sim');
+  simBand.setAttribute('role', 'note');
+  simBand.setAttribute('aria-label',
+    'Simulation. This screen is not connected to plant and no value on it is measured.');
+  simBand.appendChild(mk('span', 'rv-sim-t', 'SIMULATION — NOT PLANT'));
+  simBand.appendChild(mk('span', 'rv-sim-s', 'MODELLED VALUES · NO PLANT I/O'));
+  const simSpeed = mk('span', 'rv-sim-x', fmt.NO_VALUE);
+  simSpeed.title = 'Commanded simulation speed — a multiplier on simulated time, not on the '
+    + 'process';
+  simBand.appendChild(simSpeed);
+  el.appendChild(simBand);
+
+  /* -- 2. P&ID panel -- */
   const pidPanel = mk('section', 'rv-panel rv-pidpanel');
   pidPanel.setAttribute('aria-label', 'Process schematic');
   // The one layout fact this view must guarantee: the schematic claims the leftover height.
@@ -599,13 +831,44 @@ export function createRunView(rootEl, ctx) {
     nodes.qfLamps.push(c);
   }
 
-  /* -- 2. fraction strip -- */
-  const fracBand = mk('div', 'rv-band rv-frac');
-  fracBand.setAttribute('role', 'group');
-  fracBand.setAttribute('aria-label', 'Fraction collector');
-  fracBand.appendChild(mk('span', 'lbl', 'FC-101'));
+  /* -- 3. the process band: collector left, phase rail right, ONE row -- */
+  // Twelve empty cells across a metre of glass told the operator nothing twelve times over. What
+  // changes is the DESTINATION, so the destination gets the plaque and the rest of the carousel
+  // gets 12 px each — and the width that buys is handed straight to the phase rail, which used to
+  // need a band of its own.
+  const procBand = mk('div', 'rv-band rv-proc');
+  procBand.setAttribute('role', 'group');
+  procBand.setAttribute('aria-label', 'Fraction collector and method progress');
+  procBand.appendChild(mk('span', 'lbl', 'FC-101'));
   const fracModeLamp = lamp('');
-  fracBand.appendChild(fracModeLamp);
+  procBand.appendChild(fracModeLamp);
+
+  const destBox = mk('div', 'rv-dest');
+  destBox.setAttribute('role', 'group');
+  destBox.setAttribute('aria-label', 'Active collector destination');
+  destBox.title = 'Where the column outlet is going right now, and how much that port holds';
+  destBox.appendChild(mk('span', 'rv-dest-k', 'DEST'));
+  const destPort = mk('span', 'rv-dest-p', fmt.NO_VALUE);
+  const destVol = mk('span', 'rv-dest-v', fmt.NO_VALUE);
+  const destUnit = mk('span', 'rv-dest-u', 'mL');
+  const destWaste = mk('span', 'rv-dest-w', 'DIVERT');
+  destWaste.title = 'The outlet is going to waste, not to a port';
+  destWaste.hidden = true;
+  destBox.appendChild(destPort);
+  destBox.appendChild(destVol);
+  destBox.appendChild(destUnit);
+  destBox.appendChild(destWaste);
+  procBand.appendChild(destBox);
+
+  const vialList = mk('ul', 'rv-vials');
+  vialList.setAttribute('role', 'listbox');
+  vialList.setAttribute('aria-label', 'Fraction collector positions');
+  procBand.appendChild(vialList);
+  const fracCountBox = labelBox('FR', '', {
+    title: 'Fractions collected so far',
+    onInfo: (anchor) => openGlossary(anchor, 'FRACTION'),
+  });
+  procBand.appendChild(fracCountBox.el);
   const fracMarkBtn = iconButton('mark', 'Mark a fraction now (M)', 'MARK',
     () => act('markFraction'));
   const fracClearBtn = iconButton('clear', 'Clear the pool selection', 'CLEAR', () => {
@@ -613,41 +876,28 @@ export function createRunView(rootEl, ctx) {
     selTo = -1;
     applySelection();
   });
-  fracBand.appendChild(fracMarkBtn);
-  fracBand.appendChild(fracClearBtn);
-  fracBand.appendChild(mk('span', 'tb-sep'));
-  const vialList = mk('ul', 'rv-vials');
-  vialList.setAttribute('role', 'listbox');
-  vialList.setAttribute('aria-label', 'Fraction collector positions');
-  fracBand.appendChild(vialList);
-  fracBand.appendChild(mk('span', 'tb-sep'));
-  const fracCountBox = labelBox('FR', '', {
-    title: 'Fractions collected so far',
-    onInfo: (anchor) => openGlossary(anchor, 'FRACTION'),
-  });
-  const fracVolBox = labelBox('PORT', 'mL', { title: 'Volume in the port now under the head' });
-  fracBand.appendChild(fracCountBox.el);
-  fracBand.appendChild(fracVolBox.el);
-  el.appendChild(fracBand);
+  procBand.appendChild(fracMarkBtn);
+  procBand.appendChild(fracClearBtn);
+  procBand.appendChild(mk('span', 'tb-sep'));
 
-  /* -- 3. splitter -- */
-  const splitter = mk('div', 'splitter splitter--h');
-  el.appendChild(splitter);
-
-  /* -- 4. phase rail -- */
-  const railBand = mk('div', 'rv-band rv-railbar');
-  railBand.appendChild(mk('span', 'lbl', 'PHASE'));
+  procBand.appendChild(mk('span', 'lbl', 'PHASE'));
   const railList = mk('ol', 'rv-rail');
   railList.setAttribute('aria-label', 'Method blocks, widths proportional to volume');
-  railBand.appendChild(railList);
-  railBand.appendChild(mk('span', 'tb-sep'));
+  procBand.appendChild(railList);
   const blkBox = labelBox('BLK', '', { title: 'Current block of the method total' });
   const progBox = labelBox('PROG', '%', { title: 'Progress through the current block' });
   const remBox = labelBox('REM', 'mL', { title: 'Volume remaining in the current block' });
-  railBand.appendChild(blkBox.el);
-  railBand.appendChild(progBox.el);
-  railBand.appendChild(remBox.el);
-  el.appendChild(railBand);
+  // The first readout to go on a narrow screen, and the only one that can: the rail's own sweep
+  // already draws the same fraction, so PROG is the one number the screen says twice.
+  progBox.el.classList.add('rv-opt');
+  procBand.appendChild(blkBox.el);
+  procBand.appendChild(progBox.el);
+  procBand.appendChild(remBox.el);
+  el.appendChild(procBand);
+
+  /* -- 4. splitter -- */
+  const splitter = mk('div', 'splitter splitter--h');
+  el.appendChild(splitter);
 
   /* -- 5. trend panel: a frame around ui/chart.js, which owns its own toolbar and pen rail -- */
   const trendPanel = mk('section', 'rv-panel rv-trend');
@@ -657,11 +907,18 @@ export function createRunView(rootEl, ctx) {
   trendPanel.appendChild(chartHost);
   el.appendChild(trendPanel);
 
-  /* There is deliberately no sixth band. The FLOW / %B / P1 / dP / UV / COND / pH / CV strip that
+  /* There is deliberately no further band. The FLOW / %B / P1 / dP / UV / COND / pH / CV strip that
      used to run along the bottom of this screen is gone: every one of those numbers already sits
      beside its instrument on the schematic above and on the trend's pen rail below, and the strip
      was charging the two panels that matter 24 px for the duplication. Run state and quality
      indication are the title bar's, next to the alarm summary. */
+
+  // The rect the trend's marker cards are placed against. On document.body because a `position:
+  // fixed` element is only viewport-relative while no ancestor has a transform, and body is the
+  // one ancestor nothing can style out from under this view.
+  const markAnchor = mk('span', 'rv-markanchor');
+  markAnchor.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(markAnchor);
 
   rootEl.appendChild(el);
 
@@ -974,6 +1231,7 @@ export function createRunView(rootEl, ctx) {
    * @returns {void}
    */
   function buildChart() {
+    unwireMarkHover();
     if (chart) {
       chartlib.destroyChart(chart);
       chart = null;
@@ -981,7 +1239,10 @@ export function createRunView(rootEl, ctx) {
     }
     chart = chartlib.createChart(chartHost, {
       xAxis: { mode: xMode },
-      overview: true,
+      // No history strip on the operating screen. It was a 26 px band across the full width that
+      // spent most of a run as an empty box, and the operator reads the plot, not a navigator.
+      // The Results screen keeps it, where scrubbing a finished run is the actual task.
+      overview: false,
       alarms: ctx.config.alarms,
     });
     boundStore = ctx.run.log;
@@ -991,8 +1252,35 @@ export function createRunView(rootEl, ctx) {
       onSelect: onChartZoom,
       onPoolDrag: onChartPool,
     });
+    lastScale = NaN;
+    wireMarkHover();
     annotationsDirty = true;
     applySelection();
+  }
+
+  /**
+   * Listen for the pointer over the trend's marker row. Added ALONGSIDE `ui/chart.js`'s own
+   * handlers on the same element rather than in front of them — the chevron cards are this view's
+   * annotation of the trend, never an interception of it.
+   * @returns {void}
+   */
+  function wireMarkHover() {
+    if (!chart || !chart.wellEl) return;
+    markHoverEl = chart.wellEl;
+    markHoverEl.addEventListener('mousemove', onWellMove);
+    markHoverEl.addEventListener('mouseleave', closeMarkCard);
+  }
+
+  /**
+   * Drop the marker-row listeners and any card they left open.
+   * @returns {void}
+   */
+  function unwireMarkHover() {
+    closeMarkCard();
+    if (!markHoverEl) return;
+    markHoverEl.removeEventListener('mousemove', onWellMove);
+    markHoverEl.removeEventListener('mouseleave', closeMarkCard);
+    markHoverEl = null;
   }
 
   /**
@@ -1055,7 +1343,8 @@ export function createRunView(rootEl, ctx) {
     const run = ctx.run;
     const events = run.events || [];
     bands = [];
-    markers = [];
+    evMarks = [];
+    tickMarks = [];
     openBands.length = 0;
 
     let open = null;
@@ -1081,8 +1370,12 @@ export function createRunView(rootEl, ctx) {
       if (m) {
         if (ev.type === 'STATE_CHANGE'
           && !(ev.message && /HELD|PAUSED|ALARM|FAULT/.test(ev.message))) continue;
-        markers.push({
-          x: toX(ev.V_mL, ev.t_s), label: ev.message || m, kind: 'flag', severity: ev.severity,
+        // The CODE goes on the plot and the MESSAGE goes on the hover card. The message used to be
+        // the label, which is how "Autozero all UV channels" came to be painted across "pH out of
+        // range" — a plot label may not be a sentence, and this one now never is.
+        evMarks.push({
+          x: toX(ev.V_mL, ev.t_s), code: m[0], name: m[1], message: ev.message || '',
+          severity: ev.severity || 'INFO', t_s: ev.t_s, V_mL: ev.V_mL, w: labelWidth(m[0]),
         });
       }
     }
@@ -1093,19 +1386,293 @@ export function createRunView(rootEl, ctx) {
     }
     const recs = run.frac.records;
     for (let i = 0; i < recs.length; i++) {
-      markers.push({
+      tickMarks.push({
         x: toX(recs[i].endVolume_mL, recs[i].endTime_s), label: recs[i].port, kind: 'tick',
       });
     }
+    // Clustering sweeps left to right, so it needs x order. Events are logged in time order and
+    // every x channel is monotonic in time, but a re-projection is not the place to bet on that.
+    evMarks.sort((a, b) => a.x - b.x);
     evCursor = events.length;
     xMode = chart ? chart.xMode : xMode;
     if (chart) {
       chartlib.setBands(chart, bands);
-      chartlib.setMarkers(chart, markers);
       chartlib.invalidate(chart, 'static');
     }
+    projectMarkers(true);
     annotationsDirty = false;
     lastBandExtend = -1e9;
+  }
+
+  /**
+   * Fold one event into a cluster and restate the cluster's centre and label width.
+   *
+   * The centre is the midpoint of the events the cluster actually spans, not their mean, so the
+   * chevron sits over the middle of the run of events it stands for however lopsided that run is.
+   *
+   * @param {object} c The cluster.
+   * @param {object} m The event mark.
+   * @returns {void}
+   */
+  function absorbMark(c, m) {
+    c.items.push(m);
+    if (m.x < c.lo) c.lo = m.x;
+    if (m.x > c.hi) c.hi = m.x;
+    c.x = 0.5 * (c.lo + c.hi);
+    c.w = c.items.length === 1 ? c.items[0].w : labelWidth(clusterLabel(c.items.length));
+  }
+
+  /**
+   * The label a cluster carries: its own code when it stands for one event, otherwise the count.
+   * @param {number} n Events in the cluster.
+   * @returns {string} The label text.
+   */
+  function clusterLabel(n) {
+    return '×' + n;
+  }
+
+  /**
+   * Merge the event marks into as many chevrons as will fit WITHOUT their labels touching, at one
+   * given pixel scale.
+   *
+   * This is the whole defect fix. `ui/chart.js` paints every flag label on one fixed row under the
+   * plot's top edge — its three-row stagger collapses because each row is clamped back to that
+   * same y — so two labels that overlap in x overprint, and at the head of a run half a dozen of
+   * them land inside a few millilitres of each other. Nothing downstream can separate them, so
+   * nothing overlapping is ever handed downstream.
+   *
+   * The sweep is left to right and a merge is allowed to cascade backwards: swallowing an event
+   * moves a cluster's centre and changes its label from a code to a count, either of which can
+   * push it into the cluster before it. The backward loop settles that before moving on, so the
+   * result is stable — the property "no two boxes are closer than `MARK_GAP`" holds over the whole
+   * array when the sweep ends, not just over the pair last examined.
+   *
+   * @param {Array<object>} list Event marks in ascending x, each carrying its label width.
+   * @param {number} scale px per x unit.
+   * @returns {Array<object>} The clusters, in ascending x.
+   */
+  function clusterMarks(list, scale) {
+    const out = [];
+    for (let i = 0; i < list.length; i++) {
+      const m = list[i];
+      if (!Number.isFinite(m.x)) continue;
+      let last = out.length ? out[out.length - 1] : null;
+      if (last && m.x * scale - m.w / 2 < last.x * scale + last.w / 2 + MARK_GAP) {
+        absorbMark(last, m);
+        while (out.length > 1) {
+          const prev = out[out.length - 2];
+          if (last.x * scale - last.w / 2 >= prev.x * scale + prev.w / 2 + MARK_GAP) break;
+          for (let k = 0; k < last.items.length; k++) absorbMark(prev, last.items[k]);
+          out.pop();
+          last = prev;
+        }
+      } else {
+        out.push({ x: m.x, lo: m.x, hi: m.x, w: m.w, items: [m] });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Whether two cluster arrays group the same events at the same places.
+   *
+   * Cluster centres are derived from event positions, which only move when the annotations are
+   * rebuilt — and that path forces a publish — so identical counts at identical centres means an
+   * identical marker set.
+   *
+   * @param {Array<object>} a One cluster array.
+   * @param {Array<object>} b The other.
+   * @returns {boolean} True when nothing the trend can see has changed.
+   */
+  function sameClusters(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i].items.length !== b[i].items.length || a[i].x !== b[i].x) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Re-cluster the chevrons for the trend's CURRENT pixel scale and publish the marker set.
+   *
+   * Only the scale matters, never the pan: two labels keep the same pixel gap wherever the window
+   * sits, so panning cannot create a collision and does not cost a repaint. A zoom changes the
+   * scale and is picked up on the very next frame, which is what makes the guarantee hold at every
+   * zoom rather than at the one the run started on.
+   *
+   * @param {boolean} force True to re-cluster even when the scale has not moved.
+   * @returns {void}
+   */
+  function projectMarkers(force) {
+    if (!chart) return;
+    const g = chart.geom;
+    const span = chart.x1 - chart.x0;
+    const scale = (g && g.plotW > 0 && span > 0) ? g.plotW / span : NaN;
+    if (!Number.isFinite(scale)) return;
+    if (!force && Number.isFinite(lastScale)
+      && Math.abs(scale - lastScale) <= Math.abs(lastScale) * MARK_RESCALE) return;
+    lastScale = scale;
+    const next = clusterMarks(evMarks, scale);
+    // A following window rescales on nearly every frame, and almost none of those rescales change
+    // which events group together. Re-clustering is cheap; a static repaint is not, so the trend
+    // only hears about it when the grouping actually moved.
+    if (!force && sameClusters(next, markClusters)) return;
+    markClusters = next;
+    markers = tickMarks.slice();
+    for (let i = 0; i < markClusters.length; i++) {
+      const c = markClusters[i];
+      const n = c.items.length;
+      let worst = c.items[0];
+      for (let k = 1; k < n; k++) {
+        if (severityRank(c.items[k].severity) > severityRank(worst.severity)) worst = c.items[k];
+      }
+      const m = {
+        x: c.x, label: n === 1 ? c.items[0].code : clusterLabel(n), kind: 'flag',
+        severity: worst.severity,
+      };
+      // A count has to point at something. `x0`/`x1` collapsed onto the chevron's own x draw the
+      // one dashed rule down to the axis that says WHICH millilitre the ×N stands for; a single
+      // named event does not need it and does not get it.
+      if (n > 1) {
+        m.x0 = c.x;
+        m.x1 = c.x;
+      }
+      markers.push(m);
+    }
+    chartlib.setMarkers(chart, markers);
+    chartlib.invalidate(chart, 'static');
+    if (hoverCluster && markClusters.indexOf(hoverCluster) < 0) closeMarkCard();
+  }
+
+  /**
+   * The chevron under the pointer, if any.
+   *
+   * Both coordinates are canvas-relative — `offsetX`/`offsetY` on a canvas target are exactly the
+   * space `chart.geom` is expressed in, which is how this reads the trend's geometry without ever
+   * measuring the document.
+   *
+   * @param {number} px Pointer x in canvas px.
+   * @param {number} py Pointer y in canvas px.
+   * @returns {{cluster:object, px:number}|null} The cluster and its own pixel x, or null.
+   */
+  function clusterAt(px, py) {
+    if (!chart || markClusters.length === 0) return null;
+    const g = chart.geom;
+    const span = chart.x1 - chart.x0;
+    if (!(span > 0) || !(g.plotW > 0)) return null;
+    if (py < g.py0 - 4 || py > g.py0 + MARK_ROW_H) return null;
+    const kx = g.plotW / span;
+    const bx = g.px0 - chart.x0 * kx;
+    let best = null;
+    let bestD = Infinity;
+    for (let i = 0; i < markClusters.length; i++) {
+      const c = markClusters[i];
+      const cx = c.x * kx + bx;
+      if (cx < g.px0 - MARK_HIT || cx > g.px1 + MARK_HIT) continue;
+      const d = Math.abs(cx - px);
+      if (d <= Math.max(MARK_HIT, c.w / 2) && d < bestD) {
+        bestD = d;
+        best = { cluster: c, px: cx };
+      }
+    }
+    return best;
+  }
+
+  /**
+   * The card a chevron expands into: every event it stands for, in x order, with the position it
+   * happened at, its code and the message the plot is no longer allowed to paint.
+   *
+   * @param {object} c The cluster.
+   * @returns {HTMLElement} The card body.
+   */
+  function markCard(c) {
+    const config = ctx.config;
+    const n = c.items.length;
+    // `c.lo`/`c.hi` are in the trend's CURRENT x channel, which is seconds or column volumes as
+    // often as it is millilitres. The card states volume, so it takes it from the events.
+    let v0 = c.items[0].V_mL;
+    let v1 = v0;
+    for (let i = 1; i < n; i++) {
+      if (c.items[i].V_mL < v0) v0 = c.items[i].V_mL;
+      if (c.items[i].V_mL > v1) v1 = c.items[i].V_mL;
+    }
+    const wrap = mk('div', 'rv-pop');
+    wrap.appendChild(mk('div', 'rv-mark-h', n === 1
+      ? c.items[0].name
+      : n + ' EVENTS · ' + fmt.fmtVolume(v0, config) + ' – ' + fmt.fmtVolume(v1, config)));
+    const list = mk('div', 'rv-mark-l');
+    const shown = Math.min(n, MARK_CARD_ROWS);
+    for (let i = 0; i < shown; i++) {
+      const m = c.items[i];
+      const rank = severityRank(m.severity);
+      list.appendChild(mk('span', 'rv-mark-x', fmt.fmtVolume(m.V_mL, config)));
+      list.appendChild(mk('span', 'rv-mark-c'
+        + (rank >= 2 ? ' is-alarm' : (rank === 1 ? ' is-warn' : '')), m.code));
+      list.appendChild(mk('span', 'rv-mark-m', m.message || m.name));
+    }
+    wrap.appendChild(list);
+    if (n > shown) wrap.appendChild(mk('div', 'rv-mark-more', 'AND ' + (n - shown) + ' MORE'));
+    return wrap;
+  }
+
+  /**
+   * Close the open chevron card and cancel any card that was about to open.
+   * @returns {void}
+   */
+  function closeMarkCard() {
+    if (hoverTimer) {
+      clearTimeout(hoverTimer);
+      hoverTimer = 0;
+    }
+    if (hoverHandle) {
+      overlaylib.dismiss(hoverHandle);
+      hoverHandle = null;
+    }
+    hoverCluster = null;
+  }
+
+  /**
+   * Track the pointer across the trend's marker row and open, move or close the cluster card.
+   *
+   * This listener never calls `preventDefault` or `stopPropagation`: the trend's own zoom, pan and
+   * pool handlers are bound to the same element and must keep every event this one sees.
+   *
+   * @param {MouseEvent} e The pointer move.
+   * @returns {void}
+   */
+  function onWellMove(e) {
+    const target = e.target;
+    if (!target || target.tagName !== 'CANVAS') {
+      closeMarkCard();
+      return;
+    }
+    const hit = clusterAt(e.offsetX, e.offsetY);
+    if (!hit) {
+      closeMarkCard();
+      return;
+    }
+    if (hit.cluster === hoverCluster) return;
+    closeMarkCard();
+    hoverCluster = hit.cluster;
+    // The canvas' own viewport origin, free: the pointer is at `clientX` and, in the canvas' own
+    // coordinates, at `offsetX`. No rect is read on a pointer move.
+    const left = Math.round(e.clientX - e.offsetX + hit.px);
+    const top = Math.round(e.clientY - e.offsetY + chart.geom.py0);
+    hoverTimer = setTimeout(() => {
+      hoverTimer = 0;
+      if (!hoverCluster || !mounted) return;
+      markAnchor.style.left = left + 'px';
+      markAnchor.style.top = top + 'px';
+      hoverHandle = overlaylib.showPopover(host, {
+        anchorEl: markAnchor,
+        content: markCard(hoverCluster),
+        placement: 'top',
+        maxWidth: 340,
+        role: 'tooltip',
+        closeOnOutside: true,
+        onDismiss: () => { hoverHandle = null; hoverCluster = null; },
+      });
+    }, 180);
   }
 
   /**
@@ -1555,7 +2122,8 @@ export function createRunView(rootEl, ctx) {
 
   /**
    * Refresh the P&ID header: the quality-flag lamps, the manual-override ring and the active
-   * alarm count.
+   * alarm count. The simulation band's speed readout rides along, because it changes on the same
+   * cadence and for the same reason — it is a statement about the machine, not about the process.
    * @param {Set<string>} activeIds Ids of the alarms currently active.
    * @returns {void}
    */
@@ -1571,6 +2139,12 @@ export function createRunView(rootEl, ctx) {
     fmt.cls(pidPanel, 'is-manual', !!run.manualOverride);
     const n = activeIds.size;
     almBox.set(String(n), n > 0 ? 'alarm' : 'pv');
+    // The speed lives INSIDE the simulation band and nowhere else on this screen. A 1000× that is
+    // only ever read next to the words SIMULATION — NOT PLANT cannot be mistaken for a plant rate.
+    const spd = run.speed;
+    fmt.setText(simSpeed,
+      'SPEED ' + (Number.isFinite(spd) ? nfix(spd, 0) + '×' : fmt.NO_VALUE));
+    fmt.cls(simSpeed, 'is-fast', Number.isFinite(spd) && spd > 1);
   }
 
   /**
@@ -1609,7 +2183,11 @@ export function createRunView(rootEl, ctx) {
   }
 
   /**
-   * Refresh the fraction strip: cell fills, per-cell state, the head lamp and the two label boxes.
+   * Refresh the collector: the destination plaque, every cell's fill and state, and the counters.
+   *
+   * The plaque is the prominent half of this and the strip is the dense half, but both are driven
+   * from the same reads they always were — `run.frac`, `run.portVolume_mL` and `run.wasteVolume_mL`
+   * — because the compaction was a decision about width, not about what is true.
    * @returns {void}
    */
   function updateFractions() {
@@ -1653,11 +2231,22 @@ export function createRunView(rootEl, ctx) {
     setLamp(fracModeLamp, mode === 'OFF' ? '' : 'is-run');
     fracModeLamp.title = 'FC-101 mode: ' + mode;
     fracCountBox.set(String(run.frac.records.length), 'pv');
+
+    // The destination plaque. `k < 0` means the head is not over a configured port, which is the
+    // same condition the waste cell lamps on: the outlet is going to drain.
     const k = ports.indexOf(run.frac.port);
+    const diverting = k < 0 || !run.frac.open;
     const pv = k >= 0 && run.portVolume_mL ? run.portVolume_mL[k] : run.wasteVolume_mL;
     const d = fmt.toDisplay('volume', pv, config);
-    fracVolBox.setUnit(d.unit);
-    fracVolBox.set(nfix(d.value, d.decimals), k >= 0 ? 'pv' : 'stale');
+    fmt.setText(destPort, k >= 0 ? ports[k] : 'WASTE');
+    fmt.setText(destVol, nfix(d.value, d.decimals));
+    fmt.setText(destUnit, d.unit);
+    fmt.cls(destBox, 'is-waste', diverting);
+    if (destWaste.hidden === diverting) destWaste.hidden = !diverting;
+    fmt.setAttr(destBox, 'aria-label', 'Destination '
+      + (k >= 0 ? ports[k] : 'waste') + ', ' + nfix(d.value, d.decimals) + ' ' + d.unit
+      + (diverting ? ', diverting to waste' : ''));
+
     fracMarkBtn.disabled = !(run.state === 'RUNNING' || run.state === 'HELD') || mode === 'OFF';
   }
 
@@ -1722,6 +2311,11 @@ export function createRunView(rootEl, ctx) {
       cachedW = box.width;
       cachedH = box.height;
       cachedTrendH = trendPanel.getBoundingClientRect().height;
+      // The responsive classes were the observer's alone, which left the first frame laid out for
+      // a screen this may not be. The process band is one row now and has no slack to spare, so
+      // the breakpoints are stated here too, from the measurement already in hand.
+      fmt.cls(el, 'is-narrow', cachedW < 900);
+      fmt.cls(el, 'is-short', cachedH < 620);
     }
 
     updateHeader(activeAlarmIds());
@@ -1775,6 +2369,10 @@ export function createRunView(rootEl, ctx) {
       rebuildAnnotations();
     } else {
       extendOpenBand(now);
+      // Every frame, not every 500 ms: a zoom changes the pixel scale and therefore which labels
+      // collide, and a frame of overprint is still overprint. The call costs two divisions and a
+      // comparison unless the scale actually moved.
+      projectMarkers(false);
     }
 
     // `rebuildAnnotations` re-projects the bands and the markers, but the pool window belongs to
@@ -1809,12 +2407,17 @@ export function createRunView(rootEl, ctx) {
     }
     busHandlers.length = 0;
     if (unwireSplitter) unwireSplitter();
+    unwireMarkHover();
     for (let i = 0; i < openHandles.length; i++) overlaylib.dismiss(openHandles[i]);
     openHandles.length = 0;
     if (chart) { chartlib.destroyChart(chart); chart = null; }
     if (pid && typeof pid.destroy === 'function') pid.destroy();
     pid = null;
     boundStore = null;
+    evMarks = [];
+    tickMarks = [];
+    markClusters = [];
+    if (markAnchor.parentNode) markAnchor.parentNode.removeChild(markAnchor);
     if (el.parentNode) el.parentNode.removeChild(el);
   }
 

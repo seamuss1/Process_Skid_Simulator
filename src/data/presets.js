@@ -51,7 +51,11 @@ const SIM_DEFAULTS = {
   maxTicksPerFrame: 150, speedOptions: [1, 2, 5, 10, 60, 300, 1000],
 };
 
-const UI_DEFAULTS = { theme: 'auto', xMode: 'volume', bedCells: 120, hintsEnabled: true };
+// hintsEnabled defaults to FALSE. The coach hints were paragraph-length cards that stacked over
+// the trend while the operator was trying to read it — three at a time, unprompted. An operating
+// screen does not lecture. The machinery and the shell's Hints toggle both remain, so anyone who
+// wants the teaching commentary can switch it on.
+const UI_DEFAULTS = { theme: 'auto', xMode: 'volume', bedCells: 120, hintsEnabled: false };
 
 const COLUMN_DEFAULTS = {
   id_cm: 10.0, L_cm: 20.0,

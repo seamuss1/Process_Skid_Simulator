@@ -10,23 +10,32 @@
  * FOUR bands. The fifth — the bottom value strip of FLOW %B P1 dP UV COND pH CV boxes — is gone.
  * Every number it carried already sits beside its own instrument on the P&ID and in the trend's
  * pen rail, so the band was duplication that cost the workspace 24 px; the workspace has that
- * height back. Its run-state and data-quality indication moved UP into band 1, which already
- * carried the alarm summary and is therefore the screen's one status line.
+ * height back.
  *
- *   1. TITLE STRIP  26 px — unit name (the SIMULATED honesty note lives behind it), the block
- *                           counter, the sim clock with the method-progress bar, the run-state
- *                           chip and the data-quality lamp, and the alarm-summary lamps with the
- *                           active-alarm count.
+ * WHAT WINS THE PRIME REAL ESTATE. The centre of band 2 — the widest, most-looked-at strip on the
+ * screen — carries PROCESS STATUS: the run-state chip, the data-quality chip and the alarm summary,
+ * at 40 px instead of squeezed into a 26 px title strip, and the alarm tally is no longer parked in
+ * the far-right corner. That space used to hold the seven simulation multipliers and the two run
+ * actions an operator touches least. Nothing was removed: skip and reset are one press behind
+ * [more], the multipliers one press behind [speed], and every keyboard shortcut they ever had still
+ * works from anywhere. E-STOP keeps its exact position, its exact size and its exact treatment.
+ *
+ *   1. TITLE STRIP  26 px — identity and time: unit name (the SIMULATED honesty note lives behind
+ *                           it), the block counter, and the sim clock with the method-progress bar.
  *   2. TOOLBAR      40 px — 34×34 gradient-and-border icon buttons in groups split by grooves:
- *                           [run][hold][continue][skip][stop][reset] ‖ [estop] ‖
- *                           speed chips 1× … 1000× + [pause] + LIMITED lamp + SPD box ‖
- *                           [P&ID][TREND][METHOD][RESULTS][CONFIG] ‖
- *                           [ack][manual][scenarios][help][theme]
- *   3. ALARM BANNER 24 px — present only while an alarm is active or a shell error is showing:
- *                           blinking lamp, severity code, ISA tag, alarm code, trip condition,
- *                           acknowledge and silence. The band is TINTED BY SEVERITY through an
- *                           `.banner--*` modifier, never flat. Carries the two `aria-live`
- *                           regions.
+ *                           [run][hold][continue][pause][stop][more] ‖ [estop] ‖
+ *                           STATUS: run-state chip · data-quality chip · alarm summary ‖
+ *                           [P&ID][TREND][METHOD][RESULTS][CONFIG] · · ·
+ *                           [ack][manual][scenarios][help][theme] ‖ [speed] SPD + LIMITED lamp
+ *   3. FIRST-OUT ALARM BANNER — present ONLY while an alarm is active or a shell error is showing,
+ *                           and taking no height whatever when there is neither. It carries the
+ *                           FIRST alarm of the current flurry with its priority word, its ISA tag,
+ *                           its identifier and name, the condition AND the consequence in plain
+ *                           language, the run-clock time it came in, its acknowledgement state, and
+ *                           how many alarms stand behind it. Acknowledge, silence, step to the next
+ *                           row and open the alarm list are all on the band. It is TINTED BY
+ *                           SEVERITY through a `.banner--*` modifier, never flat, and it carries
+ *                           the two `aria-live` regions.
  *   4. WORKSPACE          — everything below the banner, the 24 px the value strip used to hold
  *                           included. One `.view` per screen, stacked and shown one at a time. The
  *                           MAIN screen is `ui/view_run.js`, which holds the P&ID panel over the
@@ -34,6 +43,15 @@
  *                           TREND nav buttons therefore select the SAME screen and only hint which
  *                           pane to favour, because the co-visibility of schematic and trend is the
  *                           requirement and no navigation may take it away.
+ *
+ * FIRST OUT, NOT WORST NOW. The banner defaults to the EARLIEST alarm still standing, not the
+ * highest-ranked one at this instant, because the first row is the one that says what actually
+ * happened; a cascade ranked by severity puts the loudest symptom on the band and buries its cause.
+ * `app.firstOut` records the arrival order and the run-clock time of every raised row — stamped
+ * from the `ALARM_RAISED` events, so a row that arrived while the tab was hidden still sorts
+ * correctly — and empties when the last row clears. That emptying is what makes it a FLURRY rather
+ * than a session tally: the next alarm to arrive starts a new first-out story. The step control
+ * walks the rest in arrival order and wraps back to the first-out.
  *
  * NO PROSE ON A NORMAL SCREEN. Every control is an icon with `title` + `aria-label`; every number
  * sits in a label box carrying its tag and its engineering unit. Sentences live in tooltips, in the
@@ -48,8 +66,9 @@
  *   - Own the persistent chrome and every global keyboard shortcut.
  *   - Route every `sim.*` action's `{ ok, reason }` to a toast when `ok` is false — never a silent
  *     refusal.
- *   - Surface `run.speedDeficit` honestly: a LIMITED lamp beside the speed chips plus the achieved
- *     multiplier in the SPD label box.
+ *   - Surface `run.speedDeficit` honestly. Demoting the multipliers into a popover must NOT hide
+ *     the deficit, so the LIMITED lamp and the SPD label box carrying the achieved multiplier stay
+ *     on the toolbar beside the [speed] button, where they are visible without opening anything.
  *
  * THE UI IS READ-ONLY OVER `run` AND `config`. Nothing in this file assigns to either; every
  * mutation goes through `core/sim.js`.
@@ -63,11 +82,12 @@
  * in this file, and no layout read inside a frame.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * CSS CONTRACT — the class vocabulary this module emits, all of it styled in `styles/app.css`:
+ * CSS CONTRACT — the class vocabulary this module emits. Everything in the FIRST list is styled by
+ * `styles/app.css`, which this module does not own and does not touch:
  *   .shell (.is-manual .is-narrow) .skip-link .sr-only
  *   .titlebar .titlebar__brand .titlebar__name .titlebar__spacer .titlebar__meta .titlebar__sep
- *   .titlebar__state .titlebar__runstate (.is-running .is-held .is-alarm .is-fault)
- *   .titlebar__quality (.is-suspect .is-invalid) .titlebar__actions
+ *   .titlebar__runstate (.is-running .is-held .is-alarm .is-fault)
+ *   .titlebar__quality (.is-suspect .is-invalid)
  *   .toolbar .toolbar__group (.toolbar__group--estop) .toolbar__sep .toolbar__spacer
  *   .iconbtn (.is-active .iconbtn--sm .btn--estop) .holdring .holdring__track .holdring__fill
  *   .segmented .speedchip (.is-active)
@@ -80,6 +100,17 @@
  *   .banner__count
  *   .workspace .view .view--main|method|results|config
  *   .perf .perf__row .perf__key .perf__value
+ *
+ * The SECOND list is the geometry the first-out banner and the demoted groups need and that
+ * `styles/app.css` has no rule for. It ships with this module, in {@link SHELL_CSS}, injected once
+ * as the LAST child of `<head>` — the same discipline `ui/hmi.js` uses for the widget kit. Every
+ * value in it resolves through a `var(--token)` out of `styles/tokens.css`; there is not one colour
+ * literal in this file:
+ *   .alarmbar.fob .fob__body .fob__row .fob__gap .fob__rank (.is-first)
+ *   .fob__meta .fob__ack (.is-acked .is-unacked)
+ *   .toolbar__group--status .toolbar__group--sim .almsum
+ *   .spdpanel .spdpanel__row .runacts .runacts__row .runacts__lbl
+ *   .almlist .almlist__row .almlist__txt .almlist__nm .almlist__sub
  * Buttons and glyphs come from `ui/hmi.js` (`iconButton`, `icon`); the label boxes, lamps and bands
  * are built here against the classes above. Every icon name used is one of `hmi.ICON_NAMES`.
  * ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -207,8 +238,14 @@ const RING_R = 10;
 /** Severity ladder used to rank the alarm banner. */
 const SEVERITY_RANK = { INFO: 0, WARN: 1, ALARM: 2, CRITICAL: 3, FAULT: 4 };
 
-/** Four-character severity codes — the banner has 24 px, not a sentence. */
-const SEVERITY_CODE = { INFO: 'INFO', WARN: 'WARN', ALARM: 'ALRM', CRITICAL: 'CRIT', FAULT: 'FLT' };
+/**
+ * The PRIORITY word the first-out banner shows. The band is a band now, not a 24 px rail, so the
+ * priority is spelled out: an operator ranking a row at a glance should not have to expand `CRIT`,
+ * and a screen reader should not have to pronounce it.
+ */
+const SEVERITY_WORD = {
+  INFO: 'INFO', WARN: 'WARNING', ALARM: 'ALARM', CRITICAL: 'CRITICAL', FAULT: 'FAULT',
+};
 
 /** Lamp colour per severity. */
 const SEVERITY_LAMP = { INFO: 'run', WARN: 'warn', ALARM: 'alarm', CRITICAL: 'alarm', FAULT: 'alarm' };
@@ -224,6 +261,90 @@ const SEVERITY_BAND = {
 
 /** Every tint the alarm band can wear, so exactly one `.banner--*` can be left standing. */
 const BAND_TONES = ['info', 'warn', 'alarm', 'critical', 'fault'];
+
+/**
+ * Comparison operators as words. `P1 > 1.60` is what the row is; "pre-column pressure above
+ * 1.60 bar" is what happened, and only the second is readable at 03:00 by someone who did not
+ * write the alarm table.
+ */
+const OP_WORD = {
+  '>': 'above', '>=': 'at or above', '<': 'below', '<=': 'at or below',
+  '==': 'at', '!=': 'away from',
+};
+
+/**
+ * The `sensorSignal` names an alarm row may watch, as a plain noun plus the formatter that renders
+ * its threshold in the operator's own display units. An unlisted signal falls back to its own name,
+ * so a preset that adds a row still reads sensibly rather than throwing.
+ * @type {{[signal:string]: {noun:string, fmt:function(number, object):string}}}
+ */
+const SIGNAL_TEXT = {
+  P1: { noun: 'pre-column pressure', fmt: (v) => fmt.fmtPressure(v) },
+  P2: { noun: 'post-column pressure', fmt: (v) => fmt.fmtPressure(v) },
+  DP: { noun: 'column differential pressure', fmt: (v) => fmt.fmtPressure(v) },
+  AIR: { noun: 'the air fraction after the column', fmt: (v) => fmt.fmtPct(v * 100) },
+  TEMP_FLUID: { noun: 'fluid temperature', fmt: (v) => `${v} °C` },
+  TEMP_CELL: { noun: 'conductivity-cell temperature', fmt: (v) => `${v} °C` },
+  UV_280: { noun: 'UV absorbance at 280 nm', fmt: (v) => fmt.fmtAbs(v) },
+  UV_260: { noun: 'UV absorbance at 260 nm', fmt: (v) => fmt.fmtAbs(v) },
+  UV_300: { noun: 'UV absorbance at 300 nm', fmt: (v) => fmt.fmtAbs(v) },
+  COND: { noun: 'conductivity', fmt: (v) => fmt.fmtCond(v) },
+  COND_RAW: { noun: 'uncompensated conductivity', fmt: (v) => fmt.fmtCond(v) },
+  PH: { noun: 'pH', fmt: (v) => fmt.fmtPH(v) },
+  FLOW: { noun: 'flow', fmt: (v, cfg) => fmt.fmtFlow(v, cfg) },
+  PCTB: { noun: 'the buffer-B fraction at the column inlet', fmt: (v) => fmt.fmtPct(v) },
+  VOLUME_BLOCK: { noun: 'block volume', fmt: (v, cfg) => fmt.fmtVolume(v, cfg) },
+  VOLUME_RUN: { noun: 'run volume', fmt: (v, cfg) => fmt.fmtVolume(v, cfg) },
+  TIME_BLOCK: { noun: 'time in this block', fmt: (v) => fmt.fmtTime(v) },
+  TIME_RUN: { noun: 'run time', fmt: (v) => fmt.fmtTime(v) },
+};
+
+/**
+ * The custom alarm predicates of `skid/alarms.js`, each as the sentence the operator needs. A row
+ * with `op: 'custom'` has no comparison to render, so without this table the banner can only repeat
+ * the row's own name — which is exactly the "not a plain-language condition" the design is fixing.
+ * @type {{[evalKey:string]: string}}
+ */
+const EVAL_PHRASE = {
+  airInlet: 'Air is reaching the pump inlet',
+  trapFill: 'The air trap is filling with gas',
+  cavitation: 'The pump is cavitating',
+  dryRun: 'The inlet is empty and the pump is running dry',
+  flowDeviation: 'Measured flow has drifted off its setpoint',
+  uvOverrange: 'The UV detector is over range',
+  uvLampFault: 'The UV lamp has failed',
+  azUnstable: 'Autozero was taken on a baseline that had not settled',
+  tankLow: 'A buffer tank is running low',
+  tankEmpty: 'A buffer tank is empty',
+  wasteFull: 'The waste tank is full',
+  wasteHigh: 'The waste tank is nearly full',
+  tempRange: 'Fluid temperature is outside the 2 to 30 °C working band',
+  colNotInLine: 'The column is not in line',
+  cvMoveUnderFlow: 'A column valve moved while the skid was still flowing',
+  cvMismatch: 'A column valve is not in the position it was commanded to',
+  phRange: 'pH has drifted away from the buffer it should be following',
+  phDegraded: 'The pH electrode has degraded',
+  condRange: 'Conductivity has drifted away from the buffer it should be following',
+  portsExhausted: 'The fraction collector has no ports left',
+  methodTimeout: 'A method watch timed out',
+  methodLoops: 'The method has looped back more times than it is allowed to',
+  nanTripwire: 'The simulation watchdog found a non-finite number in the state',
+};
+
+/**
+ * What the skid DOES about an alarm, per `AlarmDef.action`. This is the consequence half of the
+ * banner: an operator has to know whether the skid has already acted before they decide what to do
+ * next. The wording tracks `skid/engine.js::applyAlarmDemand`, which is the code that acts.
+ * @type {{[action:string]: string}}
+ */
+const ACTION_CONSEQUENCE = {
+  NONE: 'Logged only — the skid takes no action of its own.',
+  WARN: 'Logged only — the method keeps running and nothing is stopped.',
+  REDUCE_FLOW: 'The skid is cutting flow back on its own to stay under the limit.',
+  HOLD: 'The skid is HELD: the block clock and block volume freeze, flow stays at setpoint.',
+  PAUSE: 'The skid is PAUSED: flow ramps to zero and the clock freezes.',
+  STOP: 'The skid is PAUSED: flow ramps to zero and the clock freezes.',
+};
 
 /** Event types that change list content and therefore demand a `structural` frame. */
 const STRUCTURAL_EVENT_TYPES = {
@@ -263,6 +384,119 @@ const BARE_BUTTON = { appearance: 'none', background: 'none', border: '0', paddi
 const CHIP_BUTTON = { appearance: 'none', cursor: 'pointer' };
 
 /**
+ * The geometry `styles/app.css` has no rule for: the first-out banner's band, the two toolbar
+ * groups that changed job, and the three low-frequency surfaces the demoted controls moved into.
+ *
+ * It ships here rather than in the stylesheet for the same reason `ui/hmi.js` ships its own kit CSS
+ * — the markup and the rules that make it legible are one unit and must not be able to drift apart
+ * — and it is injected as the LAST child of `<head>`, after `styles/app.css` is linked, so a
+ * two-class selector like `.alarmbar.fob` can restate the band's height without `!important`.
+ *
+ * EVERY colour in here is a `var(--token)` out of `styles/tokens.css`. There is not one literal,
+ * so both themes fall out of the same rules exactly as the rest of the chrome does.
+ */
+const SHELL_CSS = `
+/* -- band 3: the first-out alarm banner ------------------------------------------------------
+   .alarmbar fixes a 24px rail; a band carrying priority, tag, condition, consequence, time,
+   acknowledgement and a count is not a rail. The two-class selector restates the height and lets
+   every .banner--* tint, the severity rail and the action row keep working unchanged. */
+.alarmbar.fob{
+  --h-fob:46px;
+  height:auto;min-height:var(--h-fob);flex-basis:auto;
+  align-items:stretch;gap:var(--sp-5);padding:var(--sp-4) var(--sp-6);
+}
+.fob__body{
+  display:flex;flex-direction:column;justify-content:center;gap:var(--sp-3);
+  flex:1 1 auto;min-width:0;
+}
+.fob__row{display:flex;align-items:center;gap:var(--sp-5);min-width:0;}
+.fob__gap{flex:1 1 auto;min-width:var(--sp-4);}
+.fob .banner__sev{
+  font:600 var(--fs-12)/1 var(--font-ui);letter-spacing:var(--ls-caps);color:var(--ink);
+}
+.fob__rank,.fob__meta,.fob__ack{
+  display:inline-flex;align-items:center;flex:0 0 auto;height:var(--ctl-sm);
+  padding:0 var(--sp-4);background:var(--panel-lo);border:var(--border-soft);
+  border-radius:var(--r-2);color:var(--ink-2);
+  font:600 var(--fs-10)/1 var(--font-ui);letter-spacing:var(--ls-caps);white-space:nowrap;
+}
+.fob__meta{
+  font-family:var(--font-num);font-variant-numeric:tabular-nums lining-nums;
+  letter-spacing:var(--ls-num);
+}
+.fob__rank.is-first{color:var(--ink);border-color:var(--edge);}
+.fob__ack.is-unacked{color:var(--fld-sp);border-color:var(--fld-sp);}
+.fob__ack.is-acked{color:var(--ok-ink);}
+.fob .banner__detail{
+  font:400 var(--fs-11)/1.25 var(--font-ui);
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.fob .banner__actions{align-self:center;}
+
+/* -- band 2: what the demoted controls handed over ------------------------------------------- */
+.toolbar__group--status{
+  gap:var(--sp-5);padding:0 var(--sp-5);height:var(--ctl-estop);
+  background:var(--panel-lo);border:var(--border-soft);border-radius:var(--r-2);
+  box-shadow:var(--elev-sunken);
+}
+.toolbar__group--status .titlebar__runstate,
+.toolbar__group--status .titlebar__quality{
+  height:var(--ctl-md);padding:0 var(--sp-5);background:var(--fld-bg);
+  border-color:var(--fld-edge);font-size:var(--fs-11);
+}
+.toolbar__group--status .tagblk{flex-direction:row;align-items:center;gap:var(--sp-4);}
+.almsum{display:inline-flex;align-items:center;gap:var(--sp-4);}
+/* .toolbar scrolls horizontally on a narrow screen, and this group sits at its far end — which
+   would put the LIMITED lamp and the achieved-speed box off the edge exactly when a slow machine
+   makes them matter. Sticky to the right pins them in view; the background is the toolbar's own, so
+   what scrolls under them simply disappears. */
+.toolbar__group--sim{
+  gap:var(--sp-4);position:sticky;right:0;
+  padding-left:var(--sp-5);background:var(--panel);
+}
+
+/* -- the low-frequency surfaces the demoted controls moved into ------------------------------ */
+.spdpanel,.runacts{display:flex;flex-direction:column;gap:var(--sp-5);min-width:0;}
+.spdpanel__row,.runacts__row{display:flex;align-items:center;gap:var(--sp-5);flex-wrap:wrap;}
+.runacts__lbl{
+  font:600 var(--fs-10)/1.2 var(--font-ui);text-transform:uppercase;
+  letter-spacing:var(--ls-caps);color:var(--ink-2);
+}
+
+/* -- the alarm list ------------------------------------------------------------------------- */
+.almlist{display:flex;flex-direction:column;gap:var(--sp-4);min-width:0;}
+.almlist__row{
+  display:flex;align-items:center;gap:var(--sp-5);padding:var(--sp-4) var(--sp-5);
+  background:var(--panel-lo);border:var(--border-soft);border-radius:var(--r-2);
+}
+.almlist__txt{display:flex;flex-direction:column;gap:var(--sp-2);min-width:0;flex:1 1 auto;}
+.almlist__nm{font:600 var(--fs-11)/1.25 var(--font-ui);color:var(--ink);}
+.almlist__sub{font:400 var(--fs-10)/1.35 var(--font-ui);color:var(--ink-2);}
+`;
+
+/** True once {@link SHELL_CSS} is in the document, so a second `boot()` cannot inject it twice. */
+let shellStylesInstalled = false;
+
+/**
+ * Inject {@link SHELL_CSS} once, as the LAST child of `<head>`.
+ *
+ * Last, not first: `styles/app.css` is linked from `index.html` and must keep winning every tie it
+ * already wins, so this sheet only ever adds rules for classes that stylesheet has none for, plus
+ * the one two-class selector (`.alarmbar.fob`) that deliberately outranks a single-class rule.
+ *
+ * @returns {void}
+ */
+function ensureShellStyles() {
+  if (shellStylesInstalled || typeof document === 'undefined' || !document.head) return;
+  shellStylesInstalled = true;
+  if (document.getElementById('app-shell-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'app-shell-styles';
+  style.textContent = SHELL_CSS;
+  document.head.appendChild(style);
+}
+
+/**
  * The global keyboard registry.
  *
  * Keys are normalised combos (`normaliseCombo`): modifiers in the fixed order `Ctrl+Alt+Shift+`,
@@ -282,7 +516,13 @@ export const KEYMAP = {
   'C': { action: 'continue', label: 'Continue', group: 'Run control' },
   'N': { action: 'skip-block', label: 'Skip the current block (confirm)', group: 'Run control' },
   'E': { action: 'end-run', label: 'End the run (confirm)', group: 'Run control' },
+  // Skip and reset moved off the first toolbar row and behind [more]. They keep a shortcut each, so
+  // demoting them cost an operator a click and never a keyboard path.
+  'Shift+R': { action: 'reset', label: 'Reset — return to IDLE and rebuild the fluid path', group: 'Run control' },
   'Shift+Escape': { action: 'estop', label: 'Emergency stop — press twice within 1 s', group: 'Run control' },
+  'Shift+A': { action: 'alarm-list', label: 'The alarm list, first out at the top', group: 'Alarms' },
+  'Shift+K': { action: 'ack-banner', label: 'Acknowledge the alarm the banner is showing', group: 'Alarms' },
+  'Shift+ArrowDown': { action: 'alarm-next', label: 'Step the banner to the next alarm', group: 'Alarms' },
   '1': { action: 'speed:0', label: 'Sim speed preset 1', group: 'Simulation speed' },
   '2': { action: 'speed:1', label: 'Sim speed preset 2', group: 'Simulation speed' },
   '3': { action: 'speed:2', label: 'Sim speed preset 3', group: 'Simulation speed' },
@@ -623,14 +863,23 @@ export function boot(rootEl) {
     // "some alarms" -> "no alarms" compare equal and leave the banner on screen forever.
     alarmSig: null,
     alarm: {
-      active: [], signals: new Set(), evals: new Set(),
+      active: [], order: [], all: [],
+      signals: new Set(), evals: new Set(), raised: new Set(), acked: new Set(),
       count: 0, crit: 0, alarms: 0, warns: 0, worst: '', ackable: null,
     },
-    // The id of the alarm the BANNER is showing — written by refreshAlarmBar, read by the two
-    // controls on the band. It is NOT `a.alarm.ackable`: that one ranks over silenced rows too,
+    // THE FLURRY. `at` maps an alarm id to the order and the run-clock time it arrived; `seq` is
+    // the counter behind that order. Both are emptied the moment the last raised row clears, which
+    // is what makes the next arrival a NEW first-out rather than the tail of the old story.
+    firstOut: { seq: 0, at: new Map() },
+    // The id of the alarm the BANNER is showing — written by refreshAlarmBar, read by every
+    // control on the band. It is NOT `a.alarm.ackable`: that one ranks over silenced rows too,
     // and acting on it from a band labelled for a different row acknowledges an alarm the
     // operator cannot see.
     bannerAlarmId: null,
+    // Set only while the operator has STEPPED off the first-out row; null means "show first out".
+    // Storing the id rather than an index means a row clearing under the operator's feet drops the
+    // banner back to the first-out instead of silently sliding a different alarm under the ACK.
+    bannerPinId: null,
     silenced: new Set(),          // alarm ids the operator muted for this session
     liveAlarmId: null,
     faceplateFail: '',            // last faceplate failure reported, so a repeat is not re-reported
@@ -648,6 +897,7 @@ export function boot(rootEl) {
   try {
     // ---- 1. theme tokens + shell chrome ------------------------------------------------------
     warmThemeTokens();
+    ensureShellStyles();
     buildShell(app);
     applyTheme(app, app.theme, false);
 
@@ -827,14 +1077,14 @@ function buildShell(a) {
 }
 
 /**
- * Band 1 — the 26 px title strip, and the screen's ONLY status line: unit name (the honesty note is
- * behind it), the block counter, the sim clock with the method-progress bar, then the run-state chip
- * and the data-quality lamp, then the alarm-summary lamps with the active-alarm count.
+ * Band 1 — the 26 px title strip: unit name (the honesty note is behind it), the block counter, and
+ * the sim clock with the method-progress bar. Identity and time, and nothing else.
  *
- * State and quality read left of the alarm summary, so the band runs state → quality → alarms and
- * the alarm tally stays anchored at the far right where an operator's eye already goes. They were
- * the two indications on the deleted bottom strip that an operator must never lose; the eight
- * process values that sat beside them were duplicates of the P&ID and the pen rail and are gone.
+ * The run-state chip, the data-quality chip and the alarm summary used to be crammed in here beside
+ * them, with the alarm tally pushed into the far-right corner where it read as a decoration rather
+ * than an indication. All three are now in band 2, at the centre of the widest strip on the screen
+ * and at 40 px instead of 18; they are BUILT here, next to the code that refreshes them, and
+ * {@link buildToolbar} appends them where they belong.
  *
  * @param {object} a the application instance
  * @returns {Element} the title strip
@@ -878,18 +1128,27 @@ function buildTitleBar(a) {
   meta.appendChild(track);
   bar.appendChild(meta);
 
-  bar.appendChild(h('span', { class: 'titlebar__spacer' }));
+  buildStatusIndication(a);
+  return bar;
+}
 
-  // Both indications are a lamp plus one word: the word is the information, the lamp is the
-  // pre-attentive cue. The words live in text NODES so writing them cannot remove the lamp.
-  const status = h('div', { class: 'titlebar__state', 'data-tour': 'status' });
-
+/**
+ * Build the three PROCESS STATUS indications the toolbar's prime slot carries. They are built here,
+ * beside the title strip they used to live in and beside {@link refreshStatusIndication}, and hung
+ * on `a.el` for {@link buildToolbar} to place.
+ *
+ * Each of the first two is a lamp plus one WORD: the word is the information, the lamp is the
+ * pre-attentive cue, and the words live in text NODES so writing them cannot remove the lamp.
+ *
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function buildStatusIndication(a) {
   a.el.stateLamp = lamp('Run state: IDLE');
   a.el.stateWord = document.createTextNode('IDLE');
   a.el.stateChip = h('span', {
     class: 'titlebar__runstate', title: `Run state: IDLE — ${stateExplanation('IDLE')}`,
   }, a.el.stateLamp, a.el.stateWord);
-  status.appendChild(a.el.stateChip);
 
   // The quality chip is a real button, so the per-sensor verdicts the QUAL box used to open stay
   // one press away. Everything visual comes from `.titlebar__quality`, so the inline reset is only
@@ -902,31 +1161,32 @@ function buildTitleBar(a) {
   });
   a.el.qualBtn.appendChild(a.el.qualLamp);
   a.el.qualBtn.appendChild(a.el.qualWord);
-  status.appendChild(a.el.qualBtn);
-  bar.appendChild(status);
 
-  bar.appendChild(h('span', {
-    class: 'titlebar__sep', role: 'separator', 'aria-orientation': 'vertical',
-  }));
-
-  const actions = h('div', { class: 'titlebar__actions' });
+  // The summary: three lamps and a count, no longer a number in a corner. The count is a button
+  // that opens the alarm list, because a tally an operator cannot press is a decoration.
   a.el.lampCrit = lamp('Critical alarms: none');
   a.el.lampAlarm = lamp('Alarms: none');
   a.el.lampWarn = lamp('Warnings: none');
-  actions.appendChild(a.el.lampCrit);
-  actions.appendChild(a.el.lampAlarm);
-  actions.appendChild(a.el.lampWarn);
-  a.el.almBox = labelBox({ tag: 'ALM', gloss: 'alarm-state', title: 'Active alarms', narrow: true });
-  actions.appendChild(a.el.almBox.el);
-  bar.appendChild(actions);
-
-  return bar;
+  a.el.almBox = labelBox({
+    tag: 'ALM', title: 'Active alarms — press for the alarm list', narrow: true,
+    onClick: () => showAlarmList(a),
+  });
+  fmt.setAttr(a.el.almBox.el, 'aria-haspopup', 'dialog');
+  a.el.almSum = h('div', { class: 'almsum' },
+    a.el.lampCrit, a.el.lampAlarm, a.el.lampWarn, a.el.almBox.el);
 }
 
 /**
- * Band 2 — the 40 px icon toolbar. Five groups split by grooves: transport, emergency stop,
- * simulation speed, screen navigation, system. Every control is icon-only, and the active
- * navigation button wears `.is-active`, which `styles/app.css` paints with `--accent`.
+ * Band 2 — the 40 px icon toolbar. Six groups split by grooves: transport, emergency stop, PROCESS
+ * STATUS, screen navigation, system, and — last, at the quiet end of the row — simulation speed.
+ * Every control is icon-only, and the active navigation button wears `.is-active`, which
+ * `styles/app.css` paints with `--accent`.
+ *
+ * The ORDER is the point. Reading left to right an operator meets what they touch every minute
+ * (transport), what they must never hunt for (E-STOP), and then what the screen is actually telling
+ * them (status) — before anything low-frequency. Skip and reset are behind [more]; the seven
+ * simulation multipliers are behind [speed], at the far right, past the theme button.
+ *
  * @param {object} a the application instance
  * @returns {Element} the toolbar
  */
@@ -935,25 +1195,40 @@ function buildToolbar(a) {
     class: 'toolbar', id: 'toolbar', role: 'toolbar', 'aria-label': 'Run controls', tabindex: '-1',
   });
 
-  /* -- 1. transport ------------------------------------------------------------------------- */
+  /* -- 1. transport --------------------------------------------------------------------------
+     Pause is a PROCESS act — it ramps flow to zero — not a simulation-speed act, so it belongs
+     here with the rest of the transport and not in the group that carries the multipliers. */
   const g1 = h('div', { class: 'toolbar__group', 'data-tour': 'run-controls' });
   a.el.runBtn = iconButton({ icon: 'run', label: 'Start the run', onClick: () => doStartOrContinue(a) });
   a.el.holdBtn = iconButton({ icon: 'hold', label: 'Hold', onClick: () => act(a, () => sim.hold(a.ctx)) });
   a.el.contBtn = iconButton({
     icon: 'continue', label: 'Continue', onClick: () => act(a, () => sim.resume(a.ctx)),
   });
-  a.el.skipBtn = buildSkipButton(a);
+  a.el.pauseBtn = iconButton({
+    icon: 'pause', label: 'Pause the simulation', pressed: false, onClick: () => togglePause(a),
+  });
   a.el.stopBtn = iconButton({
     icon: 'stop', label: 'End the run',
     onClick: (e) => openEndPopover(a, /** @type {Element} */ (e.currentTarget)),
   });
   fmt.setAttr(a.el.stopBtn, 'aria-haspopup', 'dialog');
-  a.el.resetBtn = iconButton({
-    icon: 'reset', label: 'Reset', onClick: () => act(a, () => sim.reset(a.ctx)),
+  a.el.moreBtn = iconButton({
+    icon: 'dots', label: 'Skip block and reset',
+    title: 'Skip block and reset — the two run actions you touch least (N, Shift+R)',
+    onClick: (e) => openRunActions(a, /** @type {Element} */ (e.currentTarget)),
   });
-  for (const b of [a.el.runBtn, a.el.holdBtn, a.el.contBtn, a.el.skipBtn, a.el.stopBtn, a.el.resetBtn]) {
+  fmt.setAttr(a.el.moreBtn, 'aria-haspopup', 'dialog');
+  for (const b of [a.el.runBtn, a.el.holdBtn, a.el.contBtn, a.el.pauseBtn, a.el.stopBtn, a.el.moreBtn]) {
     g1.appendChild(b);
   }
+  // Skip and reset are BUILT here, beside the transport they belong to, and MOUNTED in the [more]
+  // popover by openRunActions. They are the same real, focusable buttons they always were, and
+  // refreshToolbar keeps enabling and disabling them whether or not the popover is open.
+  a.el.skipBtn = buildSkipButton(a);
+  a.el.resetBtn = iconButton({
+    icon: 'reset', label: 'Reset', title: 'Return to IDLE and rebuild the fluid path (Shift+R)',
+    onClick: () => act(a, () => sim.reset(a.ctx)),
+  });
   bar.appendChild(g1);
   bar.appendChild(toolbarSep());
 
@@ -968,21 +1243,14 @@ function buildToolbar(a) {
   bar.appendChild(g2);
   bar.appendChild(toolbarSep());
 
-  /* -- 3. simulation speed -------------------------------------------------------------------- */
-  const g3 = h('div', { class: 'toolbar__group', 'data-tour': 'speed' });
-  const seg = h('div', { class: 'segmented', role: 'radiogroup', 'aria-label': 'Simulation speed' });
-  a.el.speedSeg = seg;
-  a.el.speedChips = [];
-  buildSpeedChips(a);
-  g3.appendChild(seg);
-  a.el.pauseBtn = iconButton({
-    icon: 'pause', label: 'Pause the simulation', pressed: false, onClick: () => togglePause(a),
+  /* -- 3. PROCESS STATUS — the prime slot the multipliers used to hold ------------------------ */
+  const g3 = h('div', {
+    class: 'toolbar__group toolbar__group--status', 'data-tour': 'status',
+    role: 'group', 'aria-label': 'Process status',
   });
-  g3.appendChild(a.el.pauseBtn);
-  a.el.speedLamp = lamp('Speed limited: no');
-  g3.appendChild(a.el.speedLamp);
-  a.el.spdBox = labelBox({ tag: 'SPD', eu: '×', title: 'Achieved simulation speed', narrow: true });
-  g3.appendChild(a.el.spdBox.el);
+  g3.appendChild(a.el.stateChip);
+  g3.appendChild(a.el.qualBtn);
+  g3.appendChild(a.el.almSum);
   bar.appendChild(g3);
   bar.appendChild(toolbarSep());
 
@@ -1026,8 +1294,79 @@ function buildToolbar(a) {
   });
   for (const b of [a.el.ackBtn, a.el.manualBtn, scenBtn, helpBtn, a.el.themeBtn]) g5.appendChild(b);
   bar.appendChild(g5);
+  bar.appendChild(toolbarSep());
+
+  /* -- 6. simulation speed, demoted to the quiet end -------------------------------------------
+     The chips themselves are behind the button. The LIMITED lamp and the SPD box are NOT: the
+     achieved multiplier is an honesty obligation, and an honesty obligation that only shows up
+     when you open a popover is not one. */
+  const g6 = h('div', {
+    class: 'toolbar__group toolbar__group--sim', 'data-tour': 'speed',
+    role: 'group', 'aria-label': 'Simulation speed',
+  });
+  a.el.speedSeg = h('div', {
+    class: 'segmented', role: 'radiogroup', 'aria-label': 'Simulation speed multiplier',
+  });
+  a.el.speedChips = [];
+  buildSpeedChips(a);
+  a.el.speedPanel = h('div', { class: 'spdpanel' },
+    h('span', { class: 'runacts__lbl' }, 'SIMULATION SPEED'),
+    h('div', { class: 'spdpanel__row' }, a.el.speedSeg));
+  a.el.speedBtn = iconButton({
+    icon: 'speed', label: 'Simulation speed', pressed: false,
+    title: 'Simulation speed — the multipliers (1 … 7, [ and ])',
+    onClick: (e) => openSpeedPanel(a, /** @type {Element} */ (e.currentTarget)),
+  });
+  fmt.setAttr(a.el.speedBtn, 'aria-haspopup', 'dialog');
+  a.el.speedLamp = lamp('Speed limited: no');
+  a.el.spdBox = labelBox({ tag: 'SPD', eu: '×', title: 'Achieved simulation speed', narrow: true });
+  g6.appendChild(a.el.speedBtn);
+  g6.appendChild(a.el.speedLamp);
+  g6.appendChild(a.el.spdBox.el);
+  bar.appendChild(g6);
 
   return bar;
+}
+
+/**
+ * The [more] popover: the two run actions that do not deserve a permanent slot on the first row.
+ *
+ * Skip keeps its 400 ms press-and-hold ring, so demoting it did not also make it easier to fire by
+ * accident, and the hold is cancelled if the popover closes underneath a finger that is still down.
+ *
+ * @param {object} a the application instance
+ * @param {Element} anchorEl the [more] button
+ * @returns {void}
+ */
+function openRunActions(a, anchorEl) {
+  if (!a.el.runActions) {
+    a.el.runActions = h('div', { class: 'runacts' },
+      h('span', { class: 'runacts__lbl' }, 'RUN ACTIONS'),
+      h('div', { class: 'runacts__row' }, a.el.skipBtn,
+        h('span', { class: 'runacts__lbl' }, 'Skip block (N)')),
+      h('div', { class: 'runacts__row' }, a.el.resetBtn,
+        h('span', { class: 'runacts__lbl' }, 'Reset (Shift+R)')));
+  }
+  overlay.showPopover(a.overlayHost, {
+    anchorEl,
+    content: a.el.runActions,
+    placement: 'bottom',
+    maxWidth: 240,
+    onDismiss: () => { if (a.el.skipCancel) a.el.skipCancel(); },
+  });
+}
+
+/**
+ * The [speed] popover: the seven simulation multipliers. The keyboard reaches them without ever
+ * opening this — `1`…`7`, `[` and `]` are global — so the popover is the pointer path only.
+ * @param {object} a the application instance
+ * @param {Element} anchorEl the [speed] button
+ * @returns {void}
+ */
+function openSpeedPanel(a, anchorEl) {
+  overlay.showPopover(a.overlayHost, {
+    anchorEl, content: a.el.speedPanel, placement: 'bottom', maxWidth: 320,
+  });
 }
 
 /**
@@ -1095,6 +1434,10 @@ function buildSkipButton(a) {
     a.skipHold.active = false;
     fmt.setAttr(a.el.skipArc, 'stroke-dashoffset', String(a.el.skipArcLength));
   };
+  // The button lives in a popover now, and a popover can be dismissed out from under a finger that
+  // is still down — an outside click, Esc, a focus move. Without this hook the hold would keep
+  // filling against an invisible ring and fire a block skip nobody could see coming.
+  a.el.skipCancel = cancel;
   btn.addEventListener('pointerdown', start);
   btn.addEventListener('pointerup', cancel);
   btn.addEventListener('pointercancel', cancel);
@@ -1108,19 +1451,28 @@ function buildSkipButton(a) {
 }
 
 /**
- * Band 3 — the 24 px alarm banner and the two screen-reader live regions.
+ * Band 3 — the FIRST-OUT ALARM BANNER, and the two screen-reader live regions.
  *
- * One row serves two jobs. An active alarm owns it; when there is none, a caught shell error takes
+ * A band, not a rail. It carries, in one glance and in this order: the severity rail, the blinking
+ * lamp, the PRIORITY word, whether this row is the first out (and if not, where it sits in the
+ * flurry), the ISA tag, the row's identifier and name, the run-clock time it came in, its
+ * ACKNOWLEDGEMENT state, and how many alarms stand behind it — with the condition AND the
+ * consequence spelled out in plain language on the second line.
+ *
+ * One band serves two jobs. An active alarm owns it; when there is none, a caught shell error takes
  * the same slots, so a failure is always visible without a fifth band ever existing.
  *
  * The band is tinted by what it is carrying — `setBandTone` writes one `.banner--*` modifier —
- * because a flat grey rail makes an operator read before they can rank.
+ * because a flat grey rail makes an operator read before they can rank. It is `hidden` when there
+ * is nothing to say, and `[hidden]{display:none}` means that costs the workspace nothing at all.
  *
  * @param {object} a the application instance
  * @returns {Element} the alarm band
  */
 function buildAlarmBar(a) {
-  const bar = h('div', { class: 'alarmbar', role: 'region', 'aria-label': 'Alarms' });
+  const bar = h('div', {
+    class: 'alarmbar fob', role: 'region', 'aria-label': 'First-out alarm',
+  });
   bar.hidden = true;
 
   a.el.alarmAssertive = h('div', {
@@ -1136,26 +1488,36 @@ function buildAlarmBar(a) {
 
   a.el.alarmLamp = lamp('Alarm');
   a.el.alarmSev = h('span', { class: 'banner__sev' }, '');
+  a.el.alarmRank = h('span', { class: 'fob__rank' }, '');
   a.el.alarmTag = h('span', { class: 'alarmbar__tag banner__id' }, '');
   a.el.alarmCode = h('span', { class: 'alarmbar__code' }, '');
+  a.el.alarmTime = h('span', { class: 'fob__meta' }, '');
+  a.el.alarmAckState = h('span', { class: 'fob__ack' }, '');
+  a.el.alarmCount = h('span', { class: 'banner__count' }, '');
   a.el.alarmCond = h('span', { class: 'banner__detail' }, '');
-  bar.appendChild(a.el.alarmLamp);
-  bar.appendChild(a.el.alarmSev);
-  bar.appendChild(a.el.alarmTag);
-  bar.appendChild(a.el.alarmCode);
-  bar.appendChild(a.el.alarmCond);
+  for (const el of [a.el.alarmRank, a.el.alarmTime, a.el.alarmAckState, a.el.alarmCount]) {
+    el.hidden = true;
+  }
+
+  const top = h('div', { class: 'fob__row' },
+    a.el.alarmLamp, a.el.alarmSev, a.el.alarmRank, a.el.alarmTag, a.el.alarmCode,
+    h('span', { class: 'fob__gap' }),
+    a.el.alarmTime, a.el.alarmAckState, a.el.alarmCount);
+  bar.appendChild(h('div', { class: 'fob__body' }, top, a.el.alarmCond));
 
   const actions = h('div', { class: 'banner__actions' });
-  a.el.alarmCount = h('span', { class: 'banner__count' }, '');
-  a.el.alarmCount.hidden = true;
-  actions.appendChild(a.el.alarmCount);
 
-  // Both banner controls act on the row the banner is DISPLAYING, which is not always the row
-  // `ackTopAlarm` would pick: silencing the highest-ranked alarm advances the banner to the next
-  // one while `a.alarm.ackable` still points at the silenced row. The toolbar's ACK button is the
-  // global control and keeps `ackTopAlarm`; these two are bound to what the operator can see.
+  // EVERY control here acts on the row the banner is DISPLAYING, which is not always the row
+  // `ackTopAlarm` would pick: the banner holds the FIRST-OUT row, `a.alarm.ackable` the
+  // highest-ranked one, and the operator may have stepped to a third. The toolbar's ACK button is
+  // the global control and keeps `ackTopAlarm`; these are bound to what the operator can see.
   a.el.alarmAckBtn = iconButton({
     icon: 'ack', label: 'Acknowledge this alarm', sm: true, onClick: () => ackBannerAlarm(a),
+  });
+  a.el.alarmStepBtn = iconButton({
+    icon: 'chevronRight', label: 'Step to the next alarm', sm: true,
+    title: 'Step to the next alarm in this flurry, in arrival order (Shift+Down)',
+    onClick: () => stepBanner(a),
   });
   a.el.alarmSilenceBtn = iconButton({
     icon: 'cross', label: 'Silence this banner', sm: true,
@@ -1163,17 +1525,18 @@ function buildAlarmBar(a) {
     onClick: () => silenceBannerAlarm(a),
   });
   a.el.alarmMoreBtn = iconButton({
-    icon: 'warn', label: 'Open the alarm table', sm: true,
-    title: 'Open the configuration screen and its alarm table',
-    onClick: () => selectNav(a, 'config'),
+    icon: 'bell', label: 'Open the alarm list', sm: true,
+    title: 'Every alarm standing right now, first out at the top (Shift+A)',
+    onClick: () => showAlarmList(a),
   });
+  fmt.setAttr(a.el.alarmMoreBtn, 'aria-haspopup', 'dialog');
   a.el.errCopyBtn = iconButton({
     icon: 'copy', label: 'Copy the error detail', sm: true, onClick: () => copyShellError(a),
   });
   a.el.errClearBtn = iconButton({
     icon: 'cross', label: 'Dismiss this error', sm: true, onClick: () => clearShellError(a),
   });
-  for (const b of [a.el.alarmAckBtn, a.el.alarmSilenceBtn, a.el.alarmMoreBtn,
+  for (const b of [a.el.alarmAckBtn, a.el.alarmStepBtn, a.el.alarmSilenceBtn, a.el.alarmMoreBtn,
     a.el.errCopyBtn, a.el.errClearBtn]) {
     b.hidden = true;
     actions.appendChild(b);
@@ -1433,8 +1796,154 @@ function silenceBannerAlarm(a) {
   const def = bannerAlarm(a);
   if (!def) return;
   a.silenced.add(def.id);
+  if (a.bannerPinId === def.id) a.bannerPinId = null;
   a.alarmSig = null;
   toast(a, `${def.id} hidden from the banner. It is still active and still in the event log.`, 'info');
+}
+
+/**
+ * Put a silenced row back on the banner.
+ * @param {object} a the application instance
+ * @param {string} id the alarm id
+ * @returns {void}
+ */
+function unsilenceAlarm(a, id) {
+  if (!a.silenced.delete(id)) return;
+  a.alarmSig = null;
+  a.structural = true;
+}
+
+/**
+ * Where the banner is sitting in the flurry: the index into `a.alarm.order` of the row it should
+ * show. Zero — the FIRST OUT — unless the operator stepped off it and the row they stepped to is
+ * still standing.
+ *
+ * Resolving the pin by ID rather than by index every frame is what stops a row clearing underneath
+ * the operator from sliding a different alarm under a band they have already read.
+ *
+ * @param {object} a the application instance
+ * @param {Array<object>} rows `a.alarm.order`, arrival-ordered
+ * @returns {number} the index to display, always valid for a non-empty `rows`
+ */
+function bannerIndex(a, rows) {
+  if (rows.length === 0) { a.bannerPinId = null; return 0; }
+  if (a.bannerPinId) {
+    for (let i = 0; i < rows.length; i++) if (rows[i].id === a.bannerPinId) return i;
+    a.bannerPinId = null;                     // the pinned row cleared: fall back to the first out
+  }
+  return 0;
+}
+
+/**
+ * Step the banner to the next alarm of the flurry, in ARRIVAL order, wrapping back to the first-out
+ * row. Arrival order, not severity order, because the sequence is the story: this is what came
+ * next after the thing that started it.
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function stepBanner(a) {
+  const rows = a.alarm.order;
+  if (rows.length < 2) return;
+  const next = (bannerIndex(a, rows) + 1) % rows.length;
+  a.bannerPinId = next === 0 ? null : rows[next].id;
+  a.alarmSig = null;
+}
+
+/**
+ * The ALARM LIST: every row standing right now, first out at the top, each with its priority, its
+ * tag, the condition and the consequence in plain language, the run-clock time it arrived and its
+ * acknowledgement state — and an ACK on each row.
+ *
+ * Silenced rows are listed too, greyed by their SILENCED marker and with the control that puts them
+ * back on the band. A list that hid them would let an operator lose an alarm by pressing a button
+ * labelled "silence the banner", which is the one thing silencing must never be able to do.
+ *
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function showAlarmList(a) {
+  const list = h('div', { class: 'almlist' });
+  const config = a.ctx.config;
+
+  const render = () => {
+    while (list.firstChild) list.removeChild(list.firstChild);
+    const rows = a.alarm.all;
+    if (rows.length === 0) {
+      list.appendChild(h('p', {}, 'No alarm is active or latched. The banner is empty because '
+        + 'there is nothing to put on it.'));
+      return;
+    }
+    for (let i = 0; i < rows.length; i++) {
+      const def = rows[i];
+      const acked = a.alarm.acked.has(def.id);
+      const silenced = a.silenced.has(def.id);
+      const arrival = a.firstOut.at.get(def.id);
+      const marks = [
+        i === 0 ? 'FIRST OUT' : `#${i + 1}`,
+        arrival ? `raised ${fmt.fmtClock(arrival.t_s)}` : 'raised time unknown',
+        acked ? 'acknowledged' : 'NOT acknowledged',
+      ];
+      if (silenced) marks.push('silenced on the banner');
+
+      const row = h('div', { class: 'almlist__row' });
+      const lmp = lamp(`${def.severity}: ${def.name}`);
+      setLamp(lmp, SEVERITY_LAMP[def.severity] || 'warn', `${def.severity}: ${def.name}`, false);
+      row.appendChild(lmp);
+      row.appendChild(h('div', { class: 'almlist__txt' },
+        h('span', { class: 'almlist__nm' },
+          `${SEVERITY_WORD[def.severity] || def.severity} · ${alarmTag(def)} · ${def.id} — ${def.name}`),
+        h('span', { class: 'almlist__sub' },
+          `${alarmSentence(def, config)}. ${alarmConsequence(def)}`),
+        h('span', { class: 'almlist__sub' }, marks.join(' · '))));
+      row.appendChild(button('btn btn--ghost btn--sm', acked ? 'Acknowledged' : 'Acknowledge',
+        () => { ackAlarm(a, def); refreshShellSafely(a); render(); },
+        {
+          disabled: acked ? 'disabled' : null,
+          title: acked
+            ? 'Already acknowledged — it no longer demands its state change.'
+            : `Acknowledge ${def.id} — ${def.name}`,
+        }));
+      if (silenced) {
+        row.appendChild(button('btn btn--ghost btn--sm', 'Show on the banner',
+          () => { unsilenceAlarm(a, def.id); refreshShellSafely(a); render(); },
+          { title: `Put ${def.id} back on the first-out banner` }));
+      }
+      list.appendChild(row);
+    }
+  };
+  render();
+
+  const entry = glossaryFor('alarm-state');
+  const body = h('div', {}, list);
+  if (entry) body.appendChild(h('p', { class: 'glossary__typical' }, entry.why));
+
+  overlay.showModal(a.overlayHost, {
+    title: 'Alarm list',
+    content: body,
+    dismissible: true,
+    actions: [
+      {
+        label: 'Alarm table and limits',
+        variant: 'ghost',
+        onClick: (hd) => { overlay.dismiss(hd); selectNav(a, 'config'); },
+      },
+      { label: 'Close', variant: 'primary', onClick: (hd) => overlay.dismiss(hd) },
+    ],
+  });
+}
+
+/**
+ * Re-derive the alarm picture immediately, outside the frame loop, so a dialog that acted on an
+ * alarm can re-render from fresh state instead of showing what was true one frame ago.
+ * @param {object} a the application instance
+ * @returns {void}
+ */
+function refreshShellSafely(a) {
+  try {
+    refreshShell(a, true);
+  } catch (err) {
+    reportError(a, 'shell', err);
+  }
 }
 
 /**
@@ -1821,6 +2330,11 @@ function wireBus(a) {
     a.alarmSig = null;
     a.liveAlarmId = null;
     a.silenced.clear();
+    // A new run is a new flurry: the first alarm of it must be the first-out, never a survivor of
+    // the ordering the previous run left behind.
+    a.firstOut.at.clear();
+    a.firstOut.seq = 0;
+    a.bannerPinId = null;
     a.lastEventCount = a.ctx.run.events ? a.ctx.run.events.length : 0;
     a.simFailed = false;
     a.structural = true;
@@ -1891,9 +2405,16 @@ function handleKeyAction(a, action, e, combo) {
     case 'start-run': doStartOrContinue(a); return true;
     case 'hold': act(a, () => sim.hold(a.ctx)); return true;
     case 'continue': act(a, () => sim.resume(a.ctx)); return true;
+    // Skip and reset sit behind [more] on the toolbar. Both keep a shortcut that reaches the action
+    // itself, not the menu, so demoting them cost a pointer user one click and a keyboard user
+    // nothing at all.
     case 'skip-block': confirmSkip(a); return true;
+    case 'reset': act(a, () => sim.reset(a.ctx)); return true;
     case 'end-run': openEndPopover(a, a.el.stopBtn); return true;
     case 'pause-toggle': togglePause(a); return true;
+    case 'alarm-list': showAlarmList(a); return true;
+    case 'ack-banner': ackBannerAlarm(a); return true;
+    case 'alarm-next': stepBanner(a); return true;
     case 'estop': {
       const now = performance.now();
       if (a.estopArm_ms > 0 && now - a.estopArm_ms < ESTOP_DOUBLE_MS) {
@@ -2059,8 +2580,15 @@ export function frame(now_ms) {
 }
 
 /**
- * Consume every event appended to `run.events` since the last frame: feed the coach-hint scheduler
- * and raise the `structural` flag when list content changed.
+ * Consume every event appended to `run.events` since the last frame: stamp the arrival of any alarm
+ * that was raised, feed the coach-hint scheduler, and raise the `structural` flag when list content
+ * changed.
+ *
+ * The alarm stamp is taken HERE and not in `collectAlarms` because this drain runs on every frame
+ * while the render does not: a tab in the background still advances the simulation, and an alarm
+ * that arrived there must carry the run-clock time it actually arrived, not the time of the first
+ * frame that happened to look.
+ *
  * @param {object} a the application instance
  * @returns {void}
  */
@@ -2072,6 +2600,7 @@ function drainEvents(a) {
   for (let i = a.lastEventCount; i < n; i++) {
     const ev = events[i];
     if (STRUCTURAL_EVENT_TYPES[ev.type]) a.structural = true;
+    if (ev.type === 'ALARM_RAISED') noteAlarmArrival(a, alarmIdOfEvent(ev), ev.t_s);
     if (a.onboarding) {
       try {
         onboarding.noteEvent(a.onboarding, ev);
@@ -2104,15 +2633,59 @@ function refreshShell(a, structural) {
 }
 
 /**
+ * Record the moment an alarm joined the current flurry. Idempotent: the FIRST stamp wins, which is
+ * the whole point — a row that keeps re-evaluating must not keep resetting its own arrival.
+ * @param {object} a the application instance
+ * @param {string} id the alarm id
+ * @param {number} t_s the run clock at arrival, seconds
+ * @returns {void}
+ */
+function noteAlarmArrival(a, id, t_s) {
+  if (!id || a.firstOut.at.has(id)) return;
+  a.firstOut.seq += 1;
+  a.firstOut.at.set(id, { seq: a.firstOut.seq, t_s, wall_ms: Date.now() });
+}
+
+/**
+ * The arrival order of a row, or a value that sorts last for a row with no stamp.
+ * @param {object} a the application instance
+ * @param {string} id the alarm id
+ * @returns {number} the arrival sequence number
+ */
+function arrivalSeq(a, id) {
+  const rec = a.firstOut.at.get(id);
+  return rec ? rec.seq : Number.MAX_SAFE_INTEGER;
+}
+
+/**
+ * The alarm id an `ALARM_RAISED` event names. `skid/alarms.js` logs `` `${def.id} ${def.name}` ``
+ * and no id contains a space, so the first token is the id.
+ * @param {{message?:string}} ev the event record
+ * @returns {string} the id, or `''`
+ */
+function alarmIdOfEvent(ev) {
+  const m = String((ev && ev.message) || '');
+  const sp = m.indexOf(' ');
+  return sp > 0 ? m.slice(0, sp) : m;
+}
+
+/**
  * Fill `a.alarm` with this frame's alarm picture: the count and the per-severity tallies over EVERY
- * raised row, the signal names in alarm (which redden the status boxes), the first row waiting to
- * be acknowledged, and the ranked list of rows the banner may show.
+ * raised row, the signal names in alarm (which redden the status boxes), which rows are already
+ * acknowledged, the first row waiting to be acknowledged, and TWO lists — `active`, ranked by
+ * severity, and `order`, the same rows in the order they ARRIVED, which is what the first-out
+ * banner walks.
  *
- * Silencing is a SCREEN act, never a process act: a silenced row is kept out of `active` — the
- * banner — but still counts, still lights its summary lamp and can still be acknowledged, so
- * nothing an operator does to the banner can hide the fact that the alarm is standing.
+ * It also maintains the flurry itself. A raised row with no arrival stamp gets one here — that
+ * covers a row raised while the tab was backgrounded and a run rehydrated from a snapshot — and a
+ * row that has stopped being raised loses its stamp. When the last stamp goes, the sequence resets:
+ * the next alarm to arrive starts a NEW first-out story instead of inheriting the last one's.
  *
- * Buffers are reused, so a frame allocates nothing here.
+ * Silencing is a SCREEN act, never a process act: a silenced row is kept out of `active`/`order` —
+ * the banner — but stays in `all`, still counts, still lights its summary lamp and can still be
+ * acknowledged, so nothing an operator does to the banner can hide the fact that it is standing.
+ *
+ * Buffers are reused, so a frame allocates nothing here beyond a stamp for a genuinely new row.
  *
  * @param {object} a the application instance
  * @param {object} config the frozen config
@@ -2123,8 +2696,12 @@ function collectAlarms(a, config, run) {
   const defs = config.alarms || [];
   const out = a.alarm;
   out.active.length = 0;
+  out.order.length = 0;
+  out.all.length = 0;
   out.signals.clear();
   out.evals.clear();
+  out.raised.clear();
+  out.acked.clear();
   out.count = 0;
   out.crit = 0;
   out.alarms = 0;
@@ -2139,6 +2716,8 @@ function collectAlarms(a, config, run) {
     if (!raised) continue;
     const rank = SEVERITY_RANK[def.severity] || 0;
     out.count++;
+    out.raised.add(def.id);
+    if (run.alarmAcked[i] === 1) out.acked.add(def.id);
     if (rank >= SEVERITY_RANK.CRITICAL) out.crit++;
     else if (rank === SEVERITY_RANK.ALARM) out.alarms++;
     else out.warns++;
@@ -2147,14 +2726,25 @@ function collectAlarms(a, config, run) {
     if (!out.worst || rank > (SEVERITY_RANK[out.worst] || 0)) out.worst = def.severity;
     if ((def.ackRequired || def.latching)
       && (!out.ackable || rank > (SEVERITY_RANK[out.ackable.severity] || 0))) out.ackable = def;
-    if (!a.silenced.has(def.id)) out.active.push(def);
+    noteAlarmArrival(a, def.id, run.t_s);
+    out.all.push(def);
+    if (!a.silenced.has(def.id)) { out.active.push(def); out.order.push(def); }
   }
+
+  // The flurry is only the rows standing NOW. Deleting during iteration is defined for a Map.
+  const at = a.firstOut.at;
+  for (const id of at.keys()) if (!out.raised.has(id)) at.delete(id);
+  if (at.size === 0) a.firstOut.seq = 0;
+
   out.active.sort((x, y) => (SEVERITY_RANK[y.severity] || 0) - (SEVERITY_RANK[x.severity] || 0));
+  out.order.sort((x, y) => arrivalSeq(a, x.id) - arrivalSeq(a, y.id));
+  out.all.sort((x, y) => arrivalSeq(a, x.id) - arrivalSeq(a, y.id));
 }
 
 /**
- * Repaint the title strip: unit, block counter, clock, progress, the run-state chip, the quality
- * lamp and the alarm-summary lamps.
+ * Repaint the title strip — unit, block counter, clock, progress — and the three PROCESS STATUS
+ * indications the toolbar now carries. One function, because the strip and the status group are one
+ * derivation of one `run` and splitting them would let them disagree by a frame.
  * @param {object} a the application instance
  * @param {object} config the frozen config
  * @param {object} run the run state
@@ -2202,6 +2792,15 @@ function refreshTitleBar(a, config, run) {
     warns > 0 ? `Warnings: ${warns}` : 'Warnings: none', false);
   setBox(el.almBox, String(a.alarm.count), '');
   setBoxState(el.almBox, a.alarm.count > 0, false);
+  // Named explicitly, for the same reason the quality chip is: name-from-content over a box whose
+  // only text is `ALM` and a numeral announces "ALM 3", which is not what an operator needs to hear.
+  // ONE string, so the hover text and the screen-reader text cannot disagree.
+  const almText = `${a.alarm.count === 0
+    ? 'No alarm is active'
+    : `${a.alarm.count} alarm${a.alarm.count === 1 ? '' : 's'} active, worst ${a.alarm.worst}`
+  }. Press for the alarm list (Shift+A).`;
+  fmt.setAttr(el.almBox.el, 'title', almText);
+  fmt.setAttr(el.almBox.el, 'aria-label', almText);
 }
 
 /**
@@ -2226,7 +2825,8 @@ function refreshToolbar(a, config, run) {
   setEnabled(el.contBtn, held,
     `Continue is only available from HELD or PAUSED (state is ${st}).`,
     'Return to RUNNING (C)');
-  setEnabled(el.skipBtn, st === 'RUNNING' || st === 'HELD',
+  const skippable = st === 'RUNNING' || st === 'HELD';
+  setEnabled(el.skipBtn, skippable,
     `A block can only be skipped while RUNNING or HELD (state is ${st}).`,
     'Skip the current block — press and hold for 400 ms (N)');
   setEnabled(el.stopBtn, st === 'RUNNING' || st === 'HELD' || st === 'PAUSED' || st === 'ALARM',
@@ -2236,7 +2836,7 @@ function refreshToolbar(a, config, run) {
   const resettable = st === 'ENDED' || st === 'FAULT' || st === 'READY';
   setEnabled(el.resetBtn, resettable,
     `Reset is available from READY, ENDED and FAULT (state is ${st}).`,
-    'Return to IDLE and rebuild the fluid path');
+    'Return to IDLE and rebuild the fluid path (Shift+R)');
 
   for (const chip of el.speedChips) {
     const on = Number(chip.dataset.speed) === run.speed;
@@ -2252,7 +2852,16 @@ function refreshToolbar(a, config, run) {
     `Nothing is running to pause (state is ${st}).`,
     paused ? 'Return to RUNNING (P)' : 'Ramp flow to zero and freeze the clock (P)');
 
-  // The honesty readout — never claim a speed the machine is not delivering.
+  // The [more] button is enabled whenever either action behind it is: a menu that opens onto two
+  // dead controls is worse than a disabled menu, and one that refuses while an action is legal is
+  // worse still.
+  setEnabled(el.moreBtn, resettable || skippable,
+    `Neither skip nor reset is available from ${st}.`,
+    'Skip block and reset (N, Shift+R)');
+
+  // The honesty readout — never claim a speed the machine is not delivering. It stays on the
+  // toolbar even though the multipliers moved into the popover, because a deficit an operator has
+  // to open a popover to discover is a deficit they will not discover.
   const limited = run.speedDeficit > 1.01 && st === 'RUNNING';
   const achieved = limited ? run.speed / run.speedDeficit : run.speed;
   setBox(el.spdBox, formatSpeed(achieved), '×');
@@ -2265,6 +2874,18 @@ function refreshToolbar(a, config, run) {
     ? 'This machine cannot keep up with the requested speed. Effective speed is '
       + 'run.speed / run.speedDeficit; a coarser column grid buys it back.'
     : 'Simulated seconds per real second');
+
+  // The [speed] button carries the requested multiplier in its accessible name and wears
+  // `.is-active` whenever the simulation is NOT at real time, so a screen running at 1000× says so
+  // without the chips being on the row.
+  const offRealTime = run.speed !== 1;
+  fmt.cls(el.speedBtn, 'is-active', offRealTime);
+  fmt.setAttr(el.speedBtn, 'aria-pressed', offRealTime ? 'true' : 'false');
+  fmt.setAttr(el.speedBtn, 'aria-label', `Simulation speed, ${run.speed} times real time`);
+  fmt.setAttr(el.speedBtn, 'title', limited
+    ? `Simulation speed: ${run.speed}× requested, ${formatSpeed(achieved)}× achieved. `
+      + 'Press for the multipliers (1 … 7, [ and ]).'
+    : `Simulation speed: ${run.speed}× real time. Press for the multipliers (1 … 7, [ and ]).`);
 
   const manual = !!run.manualOverride;
   fmt.cls(el.manualBtn, 'is-active', manual);
@@ -2374,88 +2995,204 @@ function refreshStatusIndication(a, run) {
 }
 
 /**
- * Repaint the alarm banner when the active set changes, and keep the two live regions honest.
+ * The signature of everything the banner shows, so the band is rewritten when — and only when —
+ * something on it changed. It covers the displayed index, the total, and every visible row's id and
+ * acknowledgement mark, so acknowledging a row or stepping to the next one repaints, and a frame in
+ * which nothing changed costs one string compare.
+ * @param {object} a the application instance
+ * @param {Array<object>} rows `a.alarm.order`
+ * @param {number} idx the index being displayed
+ * @returns {string} the signature
+ */
+function bannerSignature(a, rows, idx) {
+  let s = `A${idx}/${rows.length}#${a.alarm.count}:`;
+  for (let i = 0; i < rows.length; i++) {
+    s += rows[i].id + (a.alarm.acked.has(rows[i].id) ? '+' : '-');
+  }
+  return s;
+}
+
+/**
+ * Repaint the FIRST-OUT alarm banner when anything on it changes, and keep the two live regions
+ * honest.
  *
- * The band shows the highest-ranked alarm the operator has not silenced; when there is none it
- * shows the last caught shell error; when there is neither it disappears. It is tinted by that
- * row's severity. Only the newest alarm's text is placed in a live region, rebuilt rather than
- * appended, so a screen reader announces once.
+ * WHAT THE BAND SHOWS. The FIRST alarm of the current flurry that the operator has not silenced —
+ * `a.alarm.order[0]`, arrival-ordered — or, when they have stepped, the row they stepped to. Not
+ * the highest-ranked row: in a cascade the highest-ranked row is usually a consequence, and the
+ * operator needs the cause. The rank chip says which of the two they are looking at, and the count
+ * chip says how many stand behind it.
  *
- * The displayed row is recorded in `a.bannerAlarmId` on every call, and the band's ACK and SILENCE
- * controls resolve that id when they are pressed. The row the band is labelled for is therefore the
- * row it acts on: an operator can never acknowledge an alarm the band is not showing.
+ * When there is no alarm the band shows the last caught shell error; when there is neither it is
+ * `hidden` and takes no height at all. It is tinted by the displayed row's severity.
+ *
+ * WHAT THE CONTROLS ACT ON. The displayed row is recorded in `a.bannerAlarmId` on every call, and
+ * every control on the band resolves that id when it is pressed. The row the band is labelled for
+ * is therefore the row it acts on: an operator can never acknowledge an alarm the band is not
+ * showing, whether it is hidden behind a silence, behind a step, or behind the severity ranking.
+ *
+ * WHAT THE LIVE REGIONS ANNOUNCE. The NEWEST arrival, not the displayed row — every alarm
+ * annunciates once when it arrives, which is what ISA-18.2 means by annunciation, and stepping the
+ * banner around afterwards is an operator action and must stay silent. The announcement carries the
+ * priority, the row, the plain-language condition and consequence, and names the first-out row when
+ * it is not the one that just arrived.
  *
  * @param {object} a the application instance
  * @returns {void}
  */
 function refreshAlarmBar(a) {
   const el = a.el;
-  const shown = a.alarm.active[0] || null;
+  const config = a.ctx.config;
+  const rows = a.alarm.order;
+  const idx = bannerIndex(a, rows);
+  const shown = rows[idx] || null;
   const err = a.shellError;
   a.bannerAlarmId = shown ? shown.id : null;
-  const sig = shown
-    ? `A:${a.alarm.active.map((d) => d.id).join('|')}#${a.alarm.count}`
-    : (err ? `E:${err.source}:${err.message}` : '');
+  const sig = shown ? bannerSignature(a, rows, idx) : (err ? `E:${err.source}:${err.message}` : '');
+  if (sig === a.alarmSig) return;
+  a.alarmSig = sig;
 
-  if (sig !== a.alarmSig) {
-    a.alarmSig = sig;
+  if (shown) {
+    const sev = shown.severity || 'WARN';
+    const named = `${shown.id} — ${shown.name}`;
+    // Ranked against EVERY raised row, not just the visible ones. A silenced first-out is still the
+    // first-out, so the row behind it must not be allowed to wear the chip and claim to be the
+    // cause. `all` is arrival-ordered, so its index IS the arrival rank.
+    const all = a.alarm.all;
+    const allIdx = all.indexOf(shown);
+    const first = allIdx === 0;
+    const acked = a.alarm.acked.has(shown.id);
+    const needsAck = !!(shown.ackRequired || shown.latching);
+    const behind = a.alarm.count - 1;
+    const arrival = a.firstOut.at.get(shown.id) || null;
+    const stamp = arrival ? fmt.fmtClock(arrival.t_s) : fmt.NO_VALUE;
+    const sentence = `${alarmSentence(shown, config)}. ${alarmConsequence(shown)}`;
 
-    if (shown) {
-      const sev = shown.severity || 'WARN';
-      const named = `${shown.id} — ${shown.name}`;
-      setBandTone(el.alarmBar, SEVERITY_BAND[sev] || 'warn');
-      setLamp(el.alarmLamp, SEVERITY_LAMP[sev] || 'warn', `${sev}: ${shown.name}`,
-        (SEVERITY_RANK[sev] || 0) >= SEVERITY_RANK.ALARM);
-      fmt.setText(el.alarmSev, SEVERITY_CODE[sev] || sev);
-      fmt.setText(el.alarmTag, alarmTag(shown));
-      fmt.setText(el.alarmCode, `${shown.id} · ${shown.name}`);
-      fmt.setText(el.alarmCond, alarmCondition(shown));
-      fmt.setAttr(el.alarmBar, 'title', `${named}. Action ${shown.action}.`);
-      fmt.setText(el.alarmCount, String(a.alarm.count));
-      el.alarmCount.hidden = a.alarm.count < 2;
-      // Name the row in BOTH the accessible name and the tooltip: the press acts on this row, so
-      // the hover text and the screen-reader text must say which row that is.
-      el.alarmAckBtn.hidden = !(shown.ackRequired || shown.latching);
-      fmt.setAttr(el.alarmAckBtn, 'aria-label', `Acknowledge ${named}`);
-      fmt.setAttr(el.alarmAckBtn, 'title', `Acknowledge ${named}`);
-      el.alarmSilenceBtn.hidden = false;
-      fmt.setAttr(el.alarmSilenceBtn, 'aria-label', `Silence the banner for ${named}`);
-      fmt.setAttr(el.alarmSilenceBtn, 'title', `Hide ${named} from the banner for the session. `
-        + 'It stays active and stays logged.');
-      el.alarmMoreBtn.hidden = a.alarm.count < 2;
-      el.errCopyBtn.hidden = true;
-      el.errClearBtn.hidden = true;
-    } else if (err) {
-      // A caught shell error borrows the ALARM tint: it is a failure, and there is no sixth
-      // severity to invent for it.
-      setBandTone(el.alarmBar, 'alarm');
-      setLamp(el.alarmLamp, 'alarm', `Shell error in ${err.source}`, false);
-      fmt.setText(el.alarmSev, 'ERR');
-      fmt.setText(el.alarmTag, err.source.toUpperCase());
-      fmt.setText(el.alarmCode, err.message);
-      fmt.setText(el.alarmCond, '');
-      fmt.setAttr(el.alarmBar, 'title', `${err.source}: ${err.message}`);
-      el.alarmCount.hidden = true;
-      el.alarmAckBtn.hidden = true;
-      el.alarmSilenceBtn.hidden = true;
-      el.alarmMoreBtn.hidden = true;
-      el.errCopyBtn.hidden = false;
-      el.errClearBtn.hidden = false;
-    } else {
-      // Nothing to show. Drop the tint too, so the band cannot reappear wearing the colour of the
-      // alarm that cleared before its text has been rewritten.
-      setBandTone(el.alarmBar, '');
+    setBandTone(el.alarmBar, SEVERITY_BAND[sev] || 'warn');
+    // Blink is ISA-18.2's "acknowledgement outstanding", not "this is red": an acknowledged row
+    // stops flashing even while it is still standing.
+    setLamp(el.alarmLamp, SEVERITY_LAMP[sev] || 'warn', `${sev}: ${shown.name}`,
+      !acked && (SEVERITY_RANK[sev] || 0) >= SEVERITY_RANK.ALARM);
+    fmt.setText(el.alarmSev, SEVERITY_WORD[sev] || sev);
+
+    const firstOut = all[0] || shown;
+    el.alarmRank.hidden = false;
+    fmt.setText(el.alarmRank, first ? 'FIRST OUT' : `#${allIdx + 1} OF ${all.length}`);
+    fmt.cls(el.alarmRank, 'is-first', first);
+    fmt.setAttr(el.alarmRank, 'title', first
+      ? 'FIRST OUT — the earliest alarm still standing in this flurry, and so the one that most '
+        + 'likely caused the rest.'
+      : `Alarm ${allIdx + 1} of ${all.length} in this flurry, in the order they arrived. First out `
+        + `was ${firstOut.id} — ${firstOut.name}`
+        + `${a.silenced.has(firstOut.id) ? ', which you silenced on the banner.' : '.'}`);
+
+    fmt.setText(el.alarmTag, alarmTag(shown));
+    fmt.setText(el.alarmCode, named);
+    fmt.setText(el.alarmCond, sentence);
+    fmt.setAttr(el.alarmCond, 'title', `${sentence} Trip condition: ${alarmCondition(shown)}.`);
+
+    el.alarmTime.hidden = false;
+    fmt.setText(el.alarmTime, stamp);
+    fmt.setAttr(el.alarmTime, 'title', arrival
+      ? `Raised at ${stamp} on the run clock (${new Date(arrival.wall_ms).toLocaleTimeString()} `
+        + 'by the wall clock).'
+      : 'This row was already standing when the screen picked it up, so its arrival time is not '
+        + 'known. The event log has the raise.');
+
+    el.alarmAckState.hidden = false;
+    fmt.setText(el.alarmAckState, acked ? 'ACK' : 'UNACK');
+    fmt.cls(el.alarmAckState, 'is-acked', acked);
+    fmt.cls(el.alarmAckState, 'is-unacked', !acked);
+    fmt.setAttr(el.alarmAckState, 'title', acked
+      ? 'Acknowledged. The alarm is still standing, but it no longer demands its state change.'
+      : (needsAck
+        ? 'NOT acknowledged. This row latches and demands acknowledgement before the run can leave '
+          + 'the state it forced.'
+        : 'NOT acknowledged. This row does not require it; acknowledging it stops it demanding '
+          + 'its action.'));
+
+    fmt.setText(el.alarmCount, `+${behind}`);
+    el.alarmCount.hidden = behind < 1;
+    fmt.setAttr(el.alarmCount, 'title', behind < 1 ? ''
+      : `${behind} more alarm${behind === 1 ? '' : 's'} standing behind this one. `
+        + `Worst of the set is ${a.alarm.worst}.`);
+
+    fmt.setAttr(el.alarmBar, 'title', `${SEVERITY_WORD[sev] || sev} · ${named}. ${sentence}`);
+
+    // Name the row in BOTH the accessible name and the tooltip: the press acts on this row, so the
+    // hover text and the screen-reader text must say which row that is.
+    el.alarmAckBtn.hidden = false;
+    setEnabled(el.alarmAckBtn, !acked,
+      `${named} is already acknowledged.`, `Acknowledge ${named} (Shift+K)`);
+    fmt.setAttr(el.alarmAckBtn, 'aria-label', `Acknowledge ${named}`);
+
+    el.alarmStepBtn.hidden = rows.length < 2;
+    fmt.setAttr(el.alarmStepBtn, 'aria-label',
+      `Step to alarm ${(idx + 2 > rows.length ? 1 : idx + 2)} of ${rows.length}`);
+    fmt.setAttr(el.alarmStepBtn, 'title', rows.length < 2 ? 'No other alarm to step to'
+      : `Showing ${idx + 1} of ${rows.length}. Step to the next in arrival order; it wraps back to `
+        + 'the first out (Shift+Down).');
+
+    el.alarmSilenceBtn.hidden = false;
+    fmt.setAttr(el.alarmSilenceBtn, 'aria-label', `Silence the banner for ${named}`);
+    fmt.setAttr(el.alarmSilenceBtn, 'title', `Hide ${named} from the banner for the session. `
+      + 'It stays active, stays counted and stays logged.');
+
+    el.alarmMoreBtn.hidden = false;
+    fmt.setAttr(el.alarmMoreBtn, 'title',
+      `All ${a.alarm.count} standing alarm${a.alarm.count === 1 ? '' : 's'}, first out at the top `
+      + '(Shift+A)');
+
+    el.errCopyBtn.hidden = true;
+    el.errClearBtn.hidden = true;
+  } else if (err) {
+    // A caught shell error borrows the ALARM tint: it is a failure, and there is no sixth
+    // severity to invent for it.
+    setBandTone(el.alarmBar, 'alarm');
+    setLamp(el.alarmLamp, 'alarm', `Shell error in ${err.source}`, false);
+    fmt.setText(el.alarmSev, 'ERROR');
+    fmt.setText(el.alarmTag, err.source.toUpperCase());
+    fmt.setText(el.alarmCode, err.message);
+    fmt.setText(el.alarmCond, 'The screen caught this and kept running. Copy it, then dismiss it.');
+    fmt.setAttr(el.alarmCond, 'title', err.detail);
+    fmt.setAttr(el.alarmBar, 'title', `${err.source}: ${err.message}`);
+    el.alarmRank.hidden = true;
+    el.alarmTime.hidden = true;
+    el.alarmAckState.hidden = true;
+    el.alarmCount.hidden = true;
+    el.alarmAckBtn.hidden = true;
+    el.alarmStepBtn.hidden = true;
+    el.alarmSilenceBtn.hidden = true;
+    el.alarmMoreBtn.hidden = true;
+    el.errCopyBtn.hidden = false;
+    el.errClearBtn.hidden = false;
+  } else {
+    // Nothing to show. Drop the tint too, so the band cannot reappear wearing the colour of the
+    // alarm that cleared before its text has been rewritten.
+    setBandTone(el.alarmBar, '');
+  }
+  el.alarmBar.hidden = !(shown || err);
+
+  // The NEWEST row, which `order` puts last because it is sorted by arrival.
+  const newest = rows.length > 0 ? rows[rows.length - 1] : null;
+  const newestId = newest ? newest.id : '';
+  if (newestId !== a.liveAlarmId) {
+    a.liveAlarmId = newestId;
+    let text = '';
+    if (newest) {
+      text = `${SEVERITY_WORD[newest.severity] || newest.severity} alarm. ${newest.id}, `
+        + `${newest.name}. ${alarmSentence(newest, config)}. ${alarmConsequence(newest)}`;
+      const head = a.alarm.all[0];
+      if (a.alarm.count > 1 && head && head.id !== newest.id) {
+        text += ` ${a.alarm.count} alarms standing; first out is ${head.id}, ${head.name}.`;
+      }
     }
-    el.alarmBar.hidden = !(shown || err);
-
-    const shownId = shown ? shown.id : '';
-    if (shownId !== a.liveAlarmId) {
-      a.liveAlarmId = shownId;
-      const text = shown ? `${shown.severity}: ${shown.name}` : '';
-      const rank = shown ? (SEVERITY_RANK[shown.severity] || 0) : 0;
-      fmt.setText(el.alarmAssertive, rank >= SEVERITY_RANK.CRITICAL ? text : '');
-      fmt.setText(el.alarmPolite, rank > 0 && rank < SEVERITY_RANK.CRITICAL ? text : '');
-    }
+    const rank = newest ? (SEVERITY_RANK[newest.severity] || 0) : 0;
+    const worst = SEVERITY_RANK[a.alarm.worst] || 0;
+    // Assertive when anything standing is CRITICAL or worse — a critical row already on the band
+    // must not be demoted to a polite announcement by a warning arriving after it.
+    const urgent = Math.max(rank, worst) >= SEVERITY_RANK.CRITICAL;
+    fmt.setText(el.alarmAssertive, urgent ? text : '');
+    fmt.setText(el.alarmPolite, !urgent && rank > 0 ? text : '');
   }
 }
 
@@ -2475,8 +3212,8 @@ function alarmTag(def) {
 }
 
 /**
- * The trip condition in as few characters as a 24 px band allows: `P1 > 1.60`, or the custom
- * evaluator's key when there is no simple comparison.
+ * The trip condition as the alarm table states it — `P1 > 1.60` — for the tooltip and the engineer
+ * who wants the row, not the sentence.
  * @param {object} def the `AlarmDef` row
  * @returns {string} the condition
  */
@@ -2486,6 +3223,54 @@ function alarmCondition(def) {
   }
   if (def.evalKey) return def.evalKey;
   return def.action || '';
+}
+
+/**
+ * The trip condition in PLAIN LANGUAGE, in the operator's own display units — "Pre-column pressure
+ * above 2.20 bar", not "P1 > 1.60". This is the sentence the operator actually reads at 03:00, and
+ * it is the half of the banner that says WHAT HAPPENED.
+ *
+ * A comparison row renders from {@link SIGNAL_TEXT} and {@link OP_WORD}; a custom predicate from
+ * {@link EVAL_PHRASE}; anything the tables do not know falls back to the row's own name, which is
+ * already written in English, so a preset that adds an alarm still reads.
+ *
+ * @param {object} def the `AlarmDef` row
+ * @param {object} config the frozen config, for the unit-aware formatters
+ * @returns {string} the condition, capitalised, with no trailing stop
+ */
+function alarmSentence(def, config) {
+  if (def.signal && def.op && OP_WORD[def.op] && typeof def.threshold === 'number') {
+    const s = SIGNAL_TEXT[def.signal];
+    const noun = s ? s.noun : def.signal;
+    let value = String(def.threshold);
+    if (s) {
+      try {
+        value = s.fmt(def.threshold, config);
+      } catch (_err) {
+        value = String(def.threshold);          // a formatter must never take the banner down
+      }
+    }
+    return `${noun.charAt(0).toUpperCase()}${noun.slice(1)} ${OP_WORD[def.op]} ${value}`;
+  }
+  if (def.evalKey && EVAL_PHRASE[def.evalKey]) return EVAL_PHRASE[def.evalKey];
+  return def.name || def.id;
+}
+
+/**
+ * What the SKID does about this row, in plain language — the half of the banner that says what has
+ * already happened to the process while the operator was reading the first half. The wording tracks
+ * `skid/engine.js::applyAlarmDemand`, which is the code that acts.
+ * @param {object} def the `AlarmDef` row
+ * @returns {string} one sentence, ending in a stop
+ */
+function alarmConsequence(def) {
+  if (def.action === 'TRIP') {
+    return def.severity === 'FAULT'
+      ? 'The skid TRIPS to FAULT: flow stops without a ramp and only Reset recovers.'
+      : 'The skid TRIPS to ALARM: the outlet is diverted to waste until this is acknowledged.';
+  }
+  return ACTION_CONSEQUENCE[def.action]
+    || 'Logged for the operator; the skid takes no action of its own.';
 }
 
 /**
