@@ -1,24 +1,26 @@
 /**
- * @file src/ui/onboarding.js — the first-run window, the six-step tour, the coach-hint scheduler,
- *                             and the one-click scenario launcher, in the FT-CLASSIC idiom.
+ * @file src/ui/onboarding.js — the six-step tour, the coach-hint scheduler, and the one-click
+ *                             scenario launcher, in the FT-CLASSIC idiom.
  *
  * **The scenario picker is the ONLY UI surface that reaches `sim.loadScenario` and
  * `presets.listScenarios`.** Without this module the eight mandatory teaching scenarios ship
  * unreachable.
  *
- * TEXT POLICY. The old prose-heavy intro is gone. The first-run window is now a compact beveled
- * panel: **one short line, then a grid of eight scenario buttons**, each an icon plus a one-to-three
- * word caption. The sentences that used to sit on the screen now live in the buttons' `title`
- * tooltips, where the scenario's own `expectedOutcome` from `src/data/presets.js` is the text —
- * this file authors captions, not explanations. All eight scenarios are one click away from both
- * the first-run window and the launcher.
+ * NOTHING OPENS AT BOOT. There was a "Select a start" window here; it is gone. It stood between
+ * the operator and the process on every load to offer two things that are already on the toolbar —
+ * the scenarios (the flask button) and the tour (in Help). A plant HMI opens on the plant.
+ *
+ * TEXT POLICY. The launcher is a grid of eight scenario buttons, each an icon plus a one-to-three
+ * word caption. The explanations live in the buttons' `title` tooltips, where the scenario's own
+ * `expectedOutcome` from `src/data/presets.js` is the text — this file authors captions, not
+ * explanations. All eight scenarios stay one click away.
  *
  * The tour's coach marks keep their prose deliberately: a teaching card IS the explanation surface,
  * and its text comes from `src/data/glossary.js` plus one connective sentence per step. Nothing else
  * in this module puts a sentence on screen.
  *
- * STATE IS IN MEMORY FOR THE SESSION. There is no `localStorage`, so the first-run window reappears
- * on reload.
+ * STATE IS IN MEMORY FOR THE SESSION. There is no `localStorage`, so the hint scheduler starts
+ * fresh on reload.
  *
  * This module mutates nothing on `run` or `config`: it calls `core/sim.js` actions and surfaces
  * their `{ ok, reason }` verbatim.
@@ -28,7 +30,6 @@
  * `styles/app.css` is unlayered and therefore overrides every rule here without a specificity fight.
  *   .onboarding (display:contents; the Panel `el`, contributing no layout)
  *   .ob-lede .ob-grid .ob-sc .ob-sc__i .ob-sc__c .ob-sc__x
- *   .modal--firstrun on the first-run window
  *
  * TOUR ANCHOR CONTRACT — every step resolves the first selector that hits, and the primary selector
  * is always a `[data-tour="…"]` attribute. Panels that want a precise spotlight should stamp:
@@ -347,8 +348,7 @@ export function createOnboarding(rootEl, ctx, overlayHost) {
     host: overlayHost,
     hintsEnabled: !!(ctx.config.ui && ctx.config.ui.hintsEnabled),
 
-    // first-run + tour
-    firstRunShown: false,
+    // launcher + tour
     modalHandle: null,
     tourHandle: null,
     tourIndex: -1,
@@ -384,14 +384,20 @@ export function createOnboarding(rootEl, ctx, overlayHost) {
 }
 
 /**
- * Show the first-run window, once per session.
+ * Called once at boot. Deliberately opens nothing.
+ *
+ * There used to be a "Select a start" window here. It put a dialog between the operator and the
+ * process on every single load, to offer two things that are both already on the toolbar: the
+ * scenarios (the flask button) and the tour (in Help). A plant HMI opens on the plant.
+ *
+ * The instance still exists for the hint/coach-mark machinery and for `startTour` and
+ * `showScenarioPicker`, which the shell calls on demand.
+ *
  * @param {object} o the onboarding instance
  * @returns {void}
  */
 function mount(o) {
-  if (o.firstRunShown) return;
-  o.firstRunShown = true;
-  showFirstRunModal(o);
+  void o;
 }
 
 /**
@@ -418,7 +424,7 @@ function dismissAll(o) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
- * THE SCENARIO GRID — shared by the first-run window and the launcher
+ * THE SCENARIO GRID — the launcher’s body
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
@@ -478,44 +484,6 @@ function buildScenarioGrid(o) {
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
  * FIRST-RUN WINDOW
  * ════════════════════════════════════════════════════════════════════════════════════════════ */
-
-/**
- * The first-run window: one short line, then every scenario as a button. The tour and the plain
- * start are the two dialog actions.
- * @param {object} o the onboarding instance
- * @returns {void}
- */
-function showFirstRunModal(o) {
-  const body = h('div', { class: 'ob' },
-    h('p', { class: 'ob-lede' },
-      'Simulated skid — solved from physics, nothing connected, nothing saved.'),
-    buildScenarioGrid(o));
-
-  // `showModal` closes nothing by itself: every action handler is handed the handle and dismisses.
-  o.modalHandle = overlay.showModal(o.host, {
-    title: 'Select a start',
-    content: body,
-    className: 'modal--firstrun',
-    dismissible: true,
-    onDismiss: () => { o.modalHandle = null; },
-    actions: [
-      {
-        label: 'Tour',
-        icon: 'play',
-        title: 'Take the 60-second guided tour of the screen',
-        variant: 'ghost',
-        onClick: (hd) => { overlay.dismiss(hd); startTour(o); },
-      },
-      {
-        label: 'Idle',
-        icon: 'blank',
-        title: 'Start idle on the shipped method, with no scenario applied',
-        variant: 'primary',
-        onClick: (hd) => overlay.dismiss(hd),
-      },
-    ],
-  });
-}
 
 /**
  * Close whatever window onboarding currently owns.
