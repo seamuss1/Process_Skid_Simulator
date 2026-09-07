@@ -2,9 +2,9 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "skid",
+      "name": "trainer",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["tools/serve.js", "--port", "8080", "--no-open"],
+      "runtimeArgs": ["tools/serve.js"],
       "port": 8080
     }
   ]

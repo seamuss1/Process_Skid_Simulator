@@ -1,7 +1,7 @@
 {
-  "name": "process-skid-simulator",
+  "name": "dual-pump-pid-trainer",
   "version": "1.0.0",
-  "description": "Web-based dynamic simulator for a preparative chromatography column skid: column physics, skid hydraulics, sensors, method/phase engine and an industrial HMI.",
+  "description": "Browser simulator of two parallel VFD centrifugal pumps on a common header under PID control: pump and system curves, NPSH and cavitation, lead/lag staging with duty rotation, relay autotune and a tuning scorecard.",
   "type": "module",
   "private": true,
   "scripts": {
@@ -13,12 +13,16 @@
     "node": ">=20"
   },
   "keywords": [
-    "chromatography",
-    "bioprocess",
-    "downstream-processing",
+    "pid",
+    "process-control",
+    "centrifugal-pump",
+    "vfd",
     "simulation",
-    "skid",
-    "hmi"
+    "hmi",
+    "pump-staging",
+    "autotune",
+    "npsh",
+    "control-loop-tuning"
   ],
   "license": "MIT"
 }

@@ -1,8 +1,9 @@
-# Process Skid Simulator
+# Dual Pump PID Trainer
 
-A web-based dynamic simulator for a preparative **chromatography column skid**. Everything you see
-is solved from physics on your machine: the packed bed, the buffers, the sensors, the alarms and the
-fraction collector. Nothing is scripted or pre-recorded, and nothing is connected to hardware.
+Two parallel VFD centrifugal pumps on a common header, under PID control, simulated from physics
+in your browser. Everything you see — the pump curves, the check valves, the surge vessel, the
+suction margin, the staging sequence, the transmitters and their noise — is solved on your machine
+every 20 ms. Nothing is scripted, nothing is pre-recorded, nothing is connected to hardware.
 
 Zero dependencies, zero build step, zero network requests.
 
@@ -17,111 +18,161 @@ modules are CORS-blocked on the `file://` scheme.)
 npm test
 ```
 
-runs 246 physics and engineering assertions in about a minute.
+runs 106 physics and control assertions in about a second.
+
+---
+
+## The rig
+
+```
+   TK-101 ──┬──[ STR-101 ]──[ P-101 / VFD-101 ]──[ NRV-101 ]──┐
+            │                                                 ├── HEADER ──[ FCV-101 ]──▶ process
+            ├──[ STR-102 ]──[ P-102 / VFD-102 ]──[ NRV-102 ]──┤     │
+            │                                                 │   PT-101
+            └◀────────────── [ RO-101 min-flow ] ◀────────────┘   FT-101
+```
+
+Two identical 15 kW machines: 95 m shutoff, 45 m³/h and 72 m at best efficiency. Each has its own
+strainer, its own non-return valve and its own drive. They feed a header with a 120 litre bladder
+vessel on it, a demand valve to process, and a minimum-flow recirculation back to the suction tank.
+
+**PIC-101** controls header pressure. **FIC-101** controls flow to process. One button switches
+between them, and they are very different loops: the pressure loop's dominant lag is the surge
+vessel, the flow loop's is the drive ramp.
 
 ---
 
 ## What it models
 
-**The column** — a transport-dispersive model with linear-driving-force mass transfer, discretised
-over 400 axial cells. Three isotherms are supported:
+**The pumps.** A quadratic head-capacity curve referred to part speed by the affinity laws, in
+homologous form — `H(Q, s) = s²·H₀ − s·a₁·Q − a₂·Q²`. That substitution is why a variable-speed
+pump is a genuinely nonlinear final element: halving the speed does not halve the flow into a
+system with static head, it stops the pump delivering at all once `s²·H₀` falls below the head the
+discharge already sits at. Efficiency follows the affinity laws too, so a pump run slower stays on
+its efficiency island. Power, motor current and the overload relay follow from there.
 
-| Isotherm | Used for |
+**The check valves.** A pump whose shutoff head is below the header pressure delivers *exactly
+zero*, and that discontinuity is reproduced rather than smoothed. It is the single most important
+nonlinearity in a parallel-pump system: when the lag machine starts, the drive ramps for a second
+or two with nothing happening at all, and then a second pump arrives on a header that was already
+satisfied.
+
+**The header.** Not an algebraic junction — a capacitance. The whole plant reduces to one
+differential equation in one state:
+
+```
+C(H) · dH/dt = Σ Qpump(H) − Qdemand(H) − Qbypass(H)
+```
+
+with `C = ρgV_gas/p_abs` from Boyle's law on the bladder gas. Every term is closed-form: each
+pump's flow is the positive root of a quadratic, each outlet a square-root orifice. Because `g(H)`
+is strictly decreasing there is exactly one equilibrium and it is stable — a property of the
+topology, not of the numbers, which is why this simulator never needs a solver that can fail.
+Integration is one linearly-implicit Euler step with an analytic Jacobian, so it is unconditionally
+stable however hard you slam the demand valve.
+
+**The suction.** NPSH available from barometric pressure, vapour pressure, static head and strainer
+loss; NPSH required rising with the square of flow and scaling with speed squared. Below the curve
+the pump loses head, on a lag, and the alarm says so. Cavitation is reachable three ways — hot
+liquid above about 93 °C, a strainer blinded past 80%, or a low tank — and, as in a real plant,
+most easily by a combination.
+
+**The instruments.** Dead time, then pink noise, then a filter pole — the order a signal actually
+meets them between the tapping point and the faceplate. The trend can show both the transmitter's
+reading and the truth behind it.
+
+**The controller.** ISA standard form, with everything a real one has: setpoint weighting on the
+proportional and derivative terms, a filtered derivative, anti-windup by back-calculation, bumpless
+auto/manual transfer, output rate limiting, an error deadband and a setpoint ramp. The scan period
+is on the panel, because it is a real tuning parameter that most simulators hide.
+
+**The sequence.** Lead/lag staging with asymmetric thresholds and delays, a staging bias applied
+through the controller's integral, minimum run and stop timers, duty rotation by runtime with a
+make-before-break changeover, and promotion of the standby when the lead trips. This is the part
+that makes a dual-pump set hard: a continuous loop wrapped in a discrete one, where the discrete
+one can destabilise a loop that was perfectly tuned on its own.
+
+---
+
+## What you can do with it
+
+**Tune it.** The rig ships deliberately detuned. There is a lot of room to improve on it, and a
+scorecard that says whether you did.
+
+**Autotune it.** A relay-feedback experiment (Åström–Hägglund) drives a bounded limit cycle at the
+frequency where the process phase lag reaches 180°, and reads the ultimate gain and period straight
+off it. Six published rule sets are then offered side by side — Ziegler–Nichols, Tyreus–Luyben,
+Pessen, no-overshoot — each with a note on what it is *for*, so the difference between them can be
+seen rather than asserted.
+
+**Score it.** Five scripted tests apply the same disturbances from the same starting point, so two
+tunings can actually be compared. IAE, ITAE, overshoot, settling time, output travel and pump
+starts, with the reference values published and hard penalties for running the machinery outside
+its envelope. Output travel is the column most tuning exercises are missing: a loop that holds
+setpoint by hunting the drive all shift has a wonderful IAE and destroys the machine.
+
+**Break it.** Sliders for demand, discharge back pressure, liquid temperature, strainer blinding,
+recirculation and tank level; buttons to trip a machine, lock one out, or drive one by hand.
+
+Some things worth trying:
+
+| Try this | And watch |
 | --- | --- |
-| Steric Mass Action (SMA) | ion exchange; binding is salt-dependent, so a gradient really is what elutes the protein |
-| Competitive Langmuir | multi-component binding where species compete for the same sites |
-| Linear | dilute/analytical conditions and size exclusion |
+| Push the demand valve past 70% | One pump saturates, the output pins at 100%, the sequence stages the second in — and the check valve dead time shows up as a flat spot before the surge |
+| Set the staging bias to 1.0 and repeat | The surge the bias exists to prevent |
+| Narrow the stage-down threshold to 60% | Short-cycling, and the alarm that catches it |
+| Set derivative weight `c` to 1, then step the setpoint | The classic derivative kick, once, so you never do it again |
+| Run the autotune, apply Ziegler–Nichols, then Tyreus–Luyben | Quarter-amplitude damping against something you would leave on a plant overnight |
+| Raise the gain and add a PV filter | Output travel falling while IAE barely moves |
+| Take the make-up controller to manual and let the tank drain | NPSH margin closing, then cavitation |
+| Switch to FIC flow control | A much faster loop, where the drive ramp is what limits you |
 
-The SMA equilibrium is solved per cell per step by a log-space scalar root-find with a provable
-bracket, so it cannot overflow when the steric factor is large. Mass balance closes **exactly** —
-the clamp ledger reports zero events on the shipped method.
+---
 
-**The skid** — A/B gradient proportioning with a mixer, a sample pump with direct or loop injection,
-inlet select valves, an inline filter, an air trap, a column valve (bypass / down-flow / up-flow),
-and a fraction collector with twelve ports plus waste. Every segment carries a realistic hold-up
-volume, which is why UV, conductivity and pH each lag the column outlet by a *different* amount —
-the detail that makes a simulated trace look like a real one.
+## Architecture
 
-**The sensors** — Beer-Lambert UV at 280/260/300 nm with stray-light saturation, drift, pink noise
-and a refractive-index artefact; conductivity with temperature compensation (1 M NaCl reads
-85.04 mS/cm at 25 °C); a pH electrode with a response time constant and sodium error; and pre-column,
-post-column and differential pressure transducers.
-
-**The method engine** — ordered phase blocks (equilibration, load, wash, isocratic / linear-gradient
-/ step elution, strip, CIP, re-equilibration, hold) with durations in CV, mL or minutes; watch
-conditions that branch on UV level, UV slope or conductivity stability; and fractionation by fixed
-volume or by peak, with detector-to-valve delay compensation.
-
-**Alarms** — a 31-row declarative table with suppression rules and custom evaluators, driving a
-run state machine (Idle / Ready / Running / Held / Paused / Alarm / Ended / Fault).
-
-## What you see
-
-A four-tab HMI in a dark industrial theme (with a light theme):
-
-- **Run** — an animated P&ID with live tank levels, valve positions and flow-path highlighting,
-  including an axial view of the packed bed where you can watch protein bands separate and migrate;
-  a multi-axis canvas chromatogram (UV ×3, conductivity, pH, %B, pressure, flow) plotted against
-  volume, time or CV; the phase rail; the fraction strip; and live tag values.
-- **Method** — add, reorder, edit and disable blocks, with a live gradient preview and inline
-  validation.
-- **Results** — peak table, drag-to-pool selection, yield, purity, HETP, asymmetry, mass balance,
-  and CSV / JSON export.
-- **System** — column, resin, scale and chemistry configuration, the alarm limit table, and the
-  event log.
-
-Simulation speed runs from 1× to 1000×. When the physics cannot keep up, the app says so —
-`1000× (limited to N×)` — rather than quietly lying about the speed.
-
-## Presets and scenarios
-
-Four presets ship: a CEX IgG1 capture at pilot scale (10 × 20 cm) and at lab scale (1.6 × 20 cm),
-a HIC aggregate polish on a descending salt gradient, and an SEC polish.
-
-Eight one-click teaching scenarios each load a complete method and a specific failure mode:
-textbook-clean separation, overloaded column, gradient too steep, fouled column with high ΔP, air in
-the line, wrong buffer pH, cold room, and uncompensated fractionation.
-
-The default run separates four species — a weakly bound impurity, the mAb product, an aggregate and
-a strongly bound impurity — at roughly 12.9 / 18.2 / 20.7 / 26.2 column volumes.
-
-## Layout
+Plain ES modules, strictly layered, no framework. Nothing in `src/ui/` writes simulation state:
+every control calls an action in `src/core/sim.js`, which validates, can refuse, and returns the
+reason — which is what the operator is then shown.
 
 ```
-index.html          the document shell
-styles/             design tokens + layout (all colour lives in tokens.css)
-src/core/           units, seeded RNG, ring buffers, event log, state, the simulation loop
-src/physics/        isotherms, mass transfer, the column, the bed batcher, hydraulics
-src/chem/           conductivity, ionic strength, Davies activity, pH
-src/skid/           topology and hold-up, fluidics, sensors, method, engine, fractionator, alarms
-src/analytics/      peak detection, moments, pooling, yield and purity
-src/data/           resins, species, scales, presets, scenarios, glossary
-src/io/             CSV and JSON export
-src/ui/             chart, P&ID, the four views, overlays, formatting, the app shell
-tests/              246 assertions, Node's built-in runner, no DOM
-tools/serve.js      the zero-dependency static server
+src/
+  core/      util.js    units, maths, seeded RNG, the trend ring, the event bus
+             sim.js     the wall-clock accumulator, the tick order, the action surface
+  process/   fluid.js   water density and vapour pressure
+             pump.js    the curve, affinity, efficiency, power, NPSH, the branch solve
+             valve.js   trim characteristics and the head-basis Kv relation
+             motor.js   the VFD state machine, ramp, current and overload
+             plant.js   the network ODE, the vessels, the instruments
+             alarms.js  the alarm list
+  control/   pid.js     the controller
+             staging.js lead/lag, rotation, anti-short-cycling
+             autotune.js relay identification, tuning rules, FOPDT fit
+             scenario.js scripted tests and the scorecard
+  data/      config.js  the rig as built — every datasheet number, in one file
+  ui/        dom.js mimic.js curves.js trend.js panels.js app.js
 ```
 
-`src/core`, `src/physics`, `src/chem`, `src/skid`, `src/analytics`, `src/data` and `src/io` never
-touch the DOM, so the whole simulation core is testable under `node --test`.
+The tick order is fixed: the plant integrates on the **last** scan's outputs, then — on a scan
+boundary — instruments, controller, sequence, alarms, scorecard. The controller therefore never
+sees a measurement its own current output helped produce. Getting that backwards makes every tuning
+look better than it is.
 
-About 52,000 lines in total.
+A run is reproducible from its seed, noise included. That is what makes two scores comparable.
 
-## Accuracy, and where it stops
+---
 
-The model is built for interactive speed — roughly 2.6 ms per simulated second — so it makes
-deliberate trades. It is a transport-dispersive model, not a general rate model: intraparticle
-concentration profiles are lumped into a single linear-driving-force coefficient. Axial dispersion
-is carried by the cell discretisation rather than an explicit dispersion term (an explicit term is
-available but off by default). pH is solved from a charge balance with a Davies activity correction
-rather than full speciation. Radial effects, temperature gradients along the bed, and resin ageing
-across cycles are not modelled.
+## Keyboard
 
-Ten places where the original specification was wrong are documented with derivations in the test
-suite — including a mass-balance residual whose printed sign made its own tolerance unreachable, and
-a gradient pH drift asserted to be monotone when equal endpoints make monotonicity impossible by
-construction.
+| Key | |
+| --- | --- |
+| `Space` | run / freeze |
+| `1` `2` `3` | 1× / 5× / 20× time compression |
+| `A` | acknowledge alarms |
+| `P` | swap the schematic for the head-capacity chart |
+
+---
 
 ## Licence
 
-MIT
+MIT.

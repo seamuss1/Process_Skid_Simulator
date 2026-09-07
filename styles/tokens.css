@@ -1,5 +1,5 @@
 /* ============================================================================
-   Process Skid Simulator — DESIGN TOKENS  ·  "HMI-2012"
+   Dual Pump PID Trainer — DESIGN TOKENS  ·  "HMI-2012"
    ----------------------------------------------------------------------------
    The target is an early-2010s industrial HMI: Wonderware InTouch 2012/2014,
    FactoryTalk View SE 7, Ignition 7.x, WinCC V7 — and the High-Performance HMI
@@ -17,22 +17,17 @@
 
    THIS FILE IS THE ONLY PLACE A COLOUR LITERAL MAY APPEAR.
    styles/app.css and every src/ui/* module must reference var(--token).
-   JS reads these once per theme (format.readThemeTokens) — never per frame.
 
-   CASCADE ORDER — do not reorder these three blocks:
-     1  :root, [data-theme="dark"]   -> GRAPHITE, the default
-     2  :root                        -> derived + theme-independent tokens
-     3  [data-theme="light"]         -> STEEL, the operator's light choice
+   GRAPHITE ONLY. This rig ships one palette. A control room does not change
+   its face because the workstation was set to light mode, index.html stamps
+   data-theme="dark" before first paint, and a light variant nobody could reach
+   from the UI would only be a second set of numbers to keep in step with this
+   one. The two selectors below are kept distinct so a future theme has a seam
+   to cut along, but there is only one theme in the build.
 
-   All three selectors weigh (0,1,0), so nothing but SOURCE ORDER separates
-   them, and that is why STEEL comes last: block 2 hard-codes the lamp, pen and
-   graticule values that suit graphite, and block 3 has to be able to take them
-   back. Anything block 2 derives through var() follows the theme on its own and
-   needs no override at all.
-
-   Plain attribute selectors (not `:root[data-theme=…]`) are used on purpose:
-   ui/format.js primes both palettes by mounting two off-screen probe <div>s,
-   and a root-scoped selector can never match one.
+   CASCADE ORDER — do not reorder these two blocks:
+     1  :root, [data-theme="dark"]   -> the palette
+     2  :root                        -> derived and theme-independent tokens
    ========================================================================== */
 
 /* ---------------------------------------------------------------------------
@@ -103,12 +98,6 @@
   --pipe-idle: #4A535D;
 
   /* Service tints, desaturated from the 1996 set. */
-  --svc-a: #4A7FB5;       /* buffer A */
-  --svc-b: #8267AD;       /* buffer B */
-  --svc-sample: #B58141;
-  --svc-cip: #3F9E8C;
-  --svc-product: #4CAF50;
-  --svc-waste: #6B7078;
 
   /* -- depth atoms — the three literals every recipe is built from --------- */
   --spec: rgba(255, 255, 255, 0.06);       /* inner top highlight, raised */
@@ -123,7 +112,6 @@
   --press-tint: rgba(0, 0, 0, 0.14);
   --dim: rgba(0, 0, 0, 0.58);              /* modal scrim */
   --disabled-veil: rgba(33, 38, 44, 0.42);
-  --col-glass: rgba(255, 255, 255, 0.10);  /* column tube highlight */
 }
 
 /* ===========================================================================
@@ -194,23 +182,29 @@
   --plot-axis: #9AA5B1;      /* tick labels and axis rules */
   --plot-frame: var(--fld-edge);
 
-  /* Pens. PV solid 1.5px; the SP/limit trace is the SAME HUE dashed at 1px,
-     so reading PV against SP at a glance stays the point of the screen. */
-  --pen-flow: #4FC3F7;
-  --pen-pctb: #CE93D8;
-  --pen-press: #FFB74D;
-  --pen-uv: #66BB6A;         /* UV 280 — the reference pen */
-  --pen-uv2: #9CCC65;        /* UV 260 */
-  --pen-uv3: #26A69A;        /* UV 300 */
-  --pen-cond: #FF8A65;
-  --pen-ph: #B39DDB;
-  --pen-temp: #E8ECF0;
-  --pen-dp: #F06292;
+  /* Pens. The measurement is white and solid; its setpoint is the same weight
+     dashed in amber, so reading PV against SP is a glance and not a hunt. The
+     two machines keep ONE colour each across every lane — green is P-101
+     whether the lane is showing its speed or its flow — which is what lets the
+     eye connect a check valve opening in the flow lane to the speed that
+     caused it. */
+  --pen-pv: #FFFFFF;
+  --pen-sp: #FFC24B;
+  --pen-true: #7D8894;       /* the unfiltered truth behind the transmitter */
+  --pen-co: #4FC3F7;
+  --pen-p1: #66BB6A;         /* P-101, in every lane */
+  --pen-p2: #B39DDB;         /* P-102, in every lane */
+  --pen-q: #4A9BE0;
   --pen-cursor: #FFFFFF;
-  --pen-w-pv: 1.5;
-  --pen-w-sp: 1;
-  --pen-dash-sp: 5 4;
-  --pen-dash-limit: 2 3;
+  --plot-lane: rgba(255, 255, 255, 0.018);
+  --plot-cursor: rgba(255, 255, 255, 0.55);
+
+  /* -- HEAD-CAPACITY CHART ------------------------------------------------- */
+  --curve-pump: #66BB6A;     /* what the running machines can make */
+  --curve-ref: #566171;      /* the same machines at full speed, for reference */
+  --curve-sys: #FFB74D;      /* what the system will swallow */
+  --curve-bep: #4FC3F7;
+  --curve-band: rgba(79, 195, 247, 0.07);
 
   /* -- PROCESS / PIPES ----------------------------------------------------- */
   --flow-dash: rgba(255, 255, 255, 0.80);  /* marching dashes while flowing */
@@ -219,23 +213,6 @@
   --valve-open: var(--ok);
   --valve-closed: var(--pipe-idle);
   --gradient-front: var(--fld-sp);
-
-  /* -- PACKED-BED SPECIES BANDS -------------------------------------------- */
-  --band-1: #4FC3F7;
-  --band-2: #B39DDB;
-  --band-3: #FF8A65;
-  --band-4: #66BB6A;
-  --bed-bead: #6E7883;
-  --bed-bg: #1A1E23;
-
-  /* -- PHASE / BLOCK BANDS drawn over the plot ----------------------------- */
-  --phase-band-a: rgba(255, 255, 255, 0.030);
-  --phase-band-b: rgba(255, 255, 255, 0.060);
-  --phase-equil: rgba(154, 165, 177, 0.08);
-  --phase-load: rgba(181, 129, 65, 0.14);
-  --phase-wash: rgba(74, 127, 181, 0.14);
-  --phase-elute: rgba(130, 103, 173, 0.16);
-  --phase-strip: rgba(63, 158, 140, 0.14);
 
   /* -- FOCUS AND SELECTION ------------------------------------------------- */
   --focus: var(--accent);                 /* 2px ring, offset -2px */
@@ -420,16 +397,6 @@
 
   --grid: var(--plot-grid);
   --grid-strong: var(--plot-grid-strong);
-
-  --fluid-a: var(--svc-a);
-  --fluid-b: var(--svc-b);
-  --fluid-sample: var(--svc-sample);
-  --fluid-cip: var(--svc-cip);
-  --fluid-waste: var(--svc-waste);
-
-  --ch-uv280: var(--pen-uv);
-  --ch-uv260: var(--pen-uv2);
-  --ch-uv300: var(--pen-uv3);
   --ch-cond: var(--pen-cond);
   --ch-ph: var(--pen-ph);
   --ch-pctb: var(--pen-pctb);
@@ -440,126 +407,6 @@
   --shadow-2: var(--elev-float);
 }
 
-/* ---------------------------------------------------------------------------
-   3. STEEL — the light variant. Chrome inverts and the value fields go
-   dark-on-white, so a readout still reads as a readout. The trend well is
-   recessed workspace rather than a field, so it inverts too — which is why
-   this block also carries a darkened graticule and a darkened pen set.
-   ------------------------------------------------------------------------ */
-[data-theme="light"] {
-  color-scheme: light;
-
-  --screen: #C9CFD6;
-  --panel: #E4E8EC;
-  --panel-hi: #EFF2F5;
-  --panel-lo: #D6DCE2;
-  --edge: #A9B3BD;
-  --edge-soft: #C2CAD2;
-
-  --ink: #1B2027;
-  --ink-2: #4A5560;
-  --ink-3: #7C8894;
-
-  --accent: #1E7FD0;
-  --accent-soft: rgba(30, 127, 208, 0.14);
-  --accent-hover: #2A8FE0;
-  --accent-press: #16639F;
-
-  --fld-bg: #FFFFFF;
-  --fld-edge: #A9B3BD;
-  --fld-pv: #10161D;
-  --fld-sp: #9A6A00;
-  --fld-out: #0B6E9E;
-  --fld-alarm: #C62828;
-  --fld-stale: #6A7480;   /* still recedes, still legible on a white field */
-  --fld-eu: #5C6670;
-  --fld-rule: #D6DCE2;
-
-  --ok: #2E7031;
-  --warn: #8A5E00;
-  --alarm: #B3211D;
-  --info: #0A6280;
-  --ok-soft: rgba(46, 112, 49, 0.14);
-  --warn-soft: rgba(138, 94, 0, 0.16);
-  --alarm-soft: rgba(179, 33, 29, 0.14);
-  --info-soft: rgba(10, 98, 128, 0.14);
-  --neutral-soft: rgba(27, 32, 39, 0.06);
-  --on-alarm: #FFFFFF;
-  --on-warn: #FFFFFF;
-  --on-ok: #FFFFFF;
-
-  /* On light chrome the fill and the ink want the same value. */
-  --ok-ink: #2E7031;
-  --warn-ink: #8A5E00;
-  --alarm-ink: #B3211D;
-  --info-ink: #0A6280;
-  --accent-ink: #1668B3;
-
-  --equip-top: #F2F5F8;
-  --equip-bot: #DDE3E9;
-  --equip-edge: #8A95A1;
-  --pipe-idle: #9AA5B1;
-
-  --svc-a: #35699C;
-  --svc-b: #6D5194;
-  --svc-sample: #96662A;
-  --svc-cip: #2F8271;
-  --svc-product: #3C8C40;
-  --svc-waste: #737880;
-
-  /* -- trend on a pale well ------------------------------------------------
-     The graticule, the axis ink and every pen darken so they still carry on
-     --panel-lo at #D6DCE2. Same hue family as graphite, one or two steps down;
-     the phase bands invert from white-alpha to ink-alpha for the same reason. */
-  --plot-grid: #B4BDC6;
-  --plot-grid-strong: #97A2AD;
-  --plot-axis: #4A5560;
-
-  --pen-flow: #0277BD;
-  --pen-pctb: #7B1FA2;
-  --pen-press: #B25000;
-  --pen-uv: #2E7D32;
-  --pen-uv2: #4F7A16;
-  --pen-uv3: #00695C;
-  --pen-cond: #C0490F;
-  --pen-ph: #4527A0;
-  --pen-temp: #37474F;
-  --pen-dp: #AD1457;
-  --pen-cursor: #1B2027;
-
-  --phase-band-a: rgba(27, 32, 39, 0.035);
-  --phase-band-b: rgba(27, 32, 39, 0.070);
-  --phase-equil: rgba(74, 85, 96, 0.09);
-  --phase-load: rgba(150, 102, 42, 0.16);
-  --phase-wash: rgba(53, 105, 156, 0.16);
-  --phase-elute: rgba(109, 81, 148, 0.18);
-  --phase-strip: rgba(47, 130, 113, 0.16);
-
-  --band-1: #0277BD;
-  --band-2: #4527A0;
-  --band-3: #C0490F;
-  --band-4: #2E7D32;
-  --bed-bead: #A7B0BA;
-  --bed-bg: #EDF0F3;
-
-  --lamp-off: #B4BDC6;
-  --lamp-ring: rgba(27, 32, 39, 0.35);
-  --lamp-gloss: rgba(255, 255, 255, 0.75);
-  --flow-dash: rgba(255, 255, 255, 0.92);
-
-  --spec: rgba(255, 255, 255, 0.70);
-  --spec-edge: rgba(255, 255, 255, 0.85);
-  --shade: rgba(27, 32, 39, 0.16);
-  --shade-deep: rgba(27, 32, 39, 0.20);
-  --shade-press: rgba(27, 32, 39, 0.14);
-  --shade-float: rgba(27, 32, 39, 0.28);
-
-  --hover-tint: rgba(27, 32, 39, 0.05);
-  --press-tint: rgba(27, 32, 39, 0.10);
-  --dim: rgba(27, 32, 39, 0.42);
-  --disabled-veil: rgba(201, 207, 214, 0.48);
-  --col-glass: rgba(255, 255, 255, 0.55);
-}
 
 /* ---------------------------------------------------------------------------
    4. prefers-contrast: more
@@ -568,8 +415,7 @@
    ------------------------------------------------------------------------ */
 @media (prefers-contrast: more) {
   :root,
-  [data-theme="dark"],
-  [data-theme="light"] {
+  [data-theme="dark"] {
     --ink-3: var(--ink-2);
     --edge-soft: var(--edge);
     --plot-grid: #3A434E;
@@ -584,8 +430,7 @@
    ------------------------------------------------------------------------ */
 @media (forced-colors: active) {
   :root,
-  [data-theme="dark"],
-  [data-theme="light"] {
+  [data-theme="dark"] {
     --surface-raised: none;
     --surface-pressed: none;
     --elev-raised: none;
@@ -604,8 +449,7 @@
    ------------------------------------------------------------------------ */
 @media (prefers-reduced-motion: reduce) {
   :root,
-  [data-theme="dark"],
-  [data-theme="light"] {
+  [data-theme="dark"] {
     --dur-1: 0ms;
     --dur-2: 0ms;
     --dur-3: 0ms;
