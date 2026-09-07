@@ -181,6 +181,12 @@ export function createSim(patch) {
     // on it if it is. `src/ui/app.js` is what puts anything there. A headless test gets a plain
     // simulator with both slots null and no behaviour change whatsoever.
     // ------------------------------------------------------------------------------------------
+    /**
+     * The optional realism layer — wear, calibration, stores, operators — or null.
+     * Scanned FIRST, because it changes both the machine and the measurement, and everything
+     * downstream this scan has to read the changed versions.
+     */
+    realism: null,
     /** The ladder processor, or null. Scanned at the TOP of each controller scan. */
     plc: null,
     /** The game session, or null. Scanned at the BOTTOM, after the loop has acted. */
@@ -390,6 +396,16 @@ function controllerScan(ctx, scan_s) {
     config, plant, pid, pidCfg, strat, stratCfg, staging, stagingCfg, autotune, stepTest, sweep, run,
   } = ctx;
   run.diag.scans += 1;
+
+  // --- optional realism ------------------------------------------------------------------------
+  // Ahead of everything. Machinery condition alters the pump curve, the vibration and the leakage;
+  // instrument condition alters what the transmitter indicates. Both must land before the processor
+  // reads a tag or the controller reads a measurement, or the loop spends every scan acting on a
+  // plant state that has already moved underneath it.
+  //
+  // When the layer is absent — which is the default, and is what every existing test runs — this is
+  // one null check per scan and the simulator is bit-for-bit what it was.
+  if (ctx.realism) ctx.realism.onScan(ctx, scan_s);
 
   // --- the supervisory processor ---------------------------------------------------------------
   // Ahead of the loop controller, because that is where it sits on a real skid: the PLC reads the
