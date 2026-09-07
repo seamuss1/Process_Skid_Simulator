@@ -374,7 +374,7 @@ export function createMimic(ctx, actions) {
     setAttr(refs.tankLo, 'y2', markY(cfg.alarms.ltLO).toFixed(1));
     setAttr(refs.tankLoLo, 'y1', markY(cfg.alarms.ltLL).toFixed(1));
     setAttr(refs.tankLoLo, 'y2', markY(cfg.alarms.ltLL).toFixed(1));
-    setText(refs.txtLevel, `${num(p.level_m, 2)} m   ${num(p.T_C, 0)} °C`);
+    setText(refs.txtLevel, `${num(p.level_m, 2)} m   ${num(p.T_tank_C, 0)} °C`);
 
     // --- pumps and their check valves ------------------------------------------------------
     for (let i = 0; i < 2; i += 1) {
@@ -402,7 +402,8 @@ export function createMimic(ctx, actions) {
     // --- readouts ----------------------------------------------------------------------------
     setText(refs.txtPT, `${num(p.pt_bar, 2)} bar`);
     setText(refs.txtFT, `${num(p.ft_m3h, 1)} m³/h`);
-    setText(refs.txtFCV, `FCV ${num(p.fcv * 100, 0)}%`);
+    setText(refs.txtFCV, `FCV ${num(p.fcv.x * 100, 0)}%`
+      + (p.finalElement === 'THROTTLE' ? `  PCV ${num(p.pcv.x * 100, 0)}%` : ''));
     setText(refs.txtByp, `${num(p.Qbypass_m3h, 1)} m³/h`);
     setText(refs.txtHdr, `${num(p.H_m, 1)} m head`);
     setText(refs.foulBadge, p.foul > 0.02 ? `${num(p.foul * 100, 0)}% blinded` : '');

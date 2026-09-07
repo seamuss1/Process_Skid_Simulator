@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createPump, headAt, shutoffHead, efficiencyAt, shaftPower_kW, npshRequired_m,
-  npshAvailable_m, cavitationFactor, solveBranchFlow,
+  npshAvailable_m, cavitationFactor, solveBranchFlow, deratedPump,
 } from '../src/process/pump.js';
 import { kvToK } from '../src/process/valve.js';
 import { PUMP, near, nearRel } from './helpers.js';
@@ -54,22 +54,31 @@ test('runout is where the full-speed curve reaches zero head', () => {
 });
 
 test('efficiency peaks at the best-efficiency flow, and follows the affinity laws', () => {
-  near(efficiencyAt(PUMP, 45, 1), PUMP.etaBep, 1e-9, 'efficiency at the BEP');
-  assert.ok(efficiencyAt(PUMP, 30, 1) < PUMP.etaBep, 'left of the BEP should be less efficient');
-  assert.ok(efficiencyAt(PUMP, 60, 1) < PUMP.etaBep, 'right of the BEP should be less efficient');
+  const rho = 998.2;
+  // Efficiency is DERIVED here: the power curve is what is stated, and eta is hydraulic power
+  // over shaft power. That it comes back to exactly the datasheet figure at the datasheet duty
+  // is the check that the two halves agree.
+  near(efficiencyAt(PUMP, 45, headAt(PUMP, 45, 1), 1, rho), PUMP.etaBep, 1e-9,
+    'efficiency at the BEP');
+  assert.ok(efficiencyAt(PUMP, 30, headAt(PUMP, 30, 1), 1, rho) < PUMP.etaBep,
+    'left of the BEP should be less efficient');
+  assert.ok(efficiencyAt(PUMP, 60, headAt(PUMP, 60, 1), 1, rho) < PUMP.etaBep,
+    'right of the BEP should be less efficient');
   // A pump run slower stays on the same efficiency island: this is what makes speed control
   // cheaper than throttling, and is the reason efficiency is a function of Q/s.
-  near(efficiencyAt(PUMP, 45 * 0.6, 0.6), PUMP.etaBep, 1e-9, 'efficiency at the BEP at 60% speed');
+  near(efficiencyAt(PUMP, 45 * 0.6, headAt(PUMP, 45 * 0.6, 0.6), 0.6, rho), PUMP.etaBep, 1e-9,
+    'efficiency at the BEP at 60% speed');
 });
 
-test('shaft power follows the cube law along the system curve, and a deadheaded pump still draws', () => {
+test('shaft power follows the cube law, and a deadheaded pump still draws', () => {
   const rho = 998.2;
-  const idle = shaftPower_kW(PUMP, 0, 0, 1, rho);
+  const idle = shaftPower_kW(PUMP, 0, 1, rho);
   assert.ok(idle > 0, 'a pump spinning against a shut check valve is not free');
-  near(shaftPower_kW(PUMP, 0, 0, 0.5, rho), idle * 0.125, 1e-9, 'windage at half speed');
-  const full = shaftPower_kW(PUMP, 45, 72, 1, rho);
-  nearRel(full, 15 * 0.06 + (rho * 9.80665 * (45 / 3600) * 72) / 1000 / 0.78, 1e-9,
-    'shaft power at the BEP');
+  // Shutoff power is a fixed fraction of the BEP power, and both scale with the cube of speed.
+  nearRel(idle, 0.45 * PUMP.Pbep_kW, 1e-9, 'shutoff power');
+  near(shaftPower_kW(PUMP, 0, 0.5, rho), idle * 0.125, 1e-9, 'windage at half speed');
+  const full = shaftPower_kW(PUMP, 45, 1, rho);
+  nearRel(full, (rho * 9.80665 * (45 / 3600) * 72) / 1000 / 0.78, 1e-9, 'shaft power at the BEP');
   assert.ok(full < PUMP.motor_kW, 'the duty point must sit inside the motor rating');
 });
 
@@ -119,7 +128,7 @@ const residual = (Q, s, H, z, fc) => z + fc * headAt(PUMP, Q, s) - K * Q * Q - H
 test('the branch solve returns the flow that balances the branch', () => {
   for (const s of [0.5, 0.7, 0.85, 1.0]) {
     for (const H of [5, 15, 25, 35, 45]) {
-      const r = solveBranchFlow(PUMP, s, H, 0.8, K, 1);
+      const r = solveBranchFlow(PUMP, s, H, 0.8, K);
       if (r.checkShut) continue;
       near(residual(r.Q_m3h, s, H, 0.8, 1), 0, 1e-9,
         `branch balance at s=${s}, header=${H} m`);
@@ -144,7 +153,7 @@ test('the reported sensitivity dQ/dH matches a numerical derivative', () => {
   const eps = 1e-4;
   for (const s of [0.6, 0.8, 1.0]) {
     for (const H of [10, 25, 40]) {
-      const r = solveBranchFlow(PUMP, s, H, 0.8, K, 1);
+      const r = solveBranchFlow(PUMP, s, H, 0.8, K);
       if (r.checkShut) continue;
       const up = solveBranchFlow(PUMP, s, H + eps, 0.8, K, 1).Q_m3h;
       const dn = solveBranchFlow(PUMP, s, H - eps, 0.8, K, 1).Q_m3h;
@@ -155,11 +164,17 @@ test('the reported sensitivity dQ/dH matches a numerical derivative', () => {
 });
 
 test('cavitation reduces the flow a branch passes at a given header head', () => {
-  const healthy = solveBranchFlow(PUMP, 1, 30, 0.8, K, 1);
-  const sick = solveBranchFlow(PUMP, 1, 30, 0.8, K, 0.5);
+  // Cavitation is no longer a multiplier passed into the solve: it is folded into the machine by
+  // `deratedPump`, so the branch solver sees a pump whose curve is genuinely lower. That is the
+  // more honest arrangement — a cavitating pump IS a different pump — and it is what makes the
+  // same code path handle impeller trim, wear and viscosity without four extra arguments.
+  const healthy = solveBranchFlow(PUMP, 1, 30, 0.8, K);
+  const derated = deratedPump(PUMP, { cav: 0.5 });
+  const sick = solveBranchFlow(derated, 1, 30, 0.8, K);
   assert.ok(sick.Q_m3h < healthy.Q_m3h * 0.8,
     'losing half the head must cost a large part of the flow');
-  near(residual(sick.Q_m3h, 1, 30, 0.8, 0.5), 0, 1e-9, 'and the branch still balances');
+  near(0.8 + headAt(derated, sick.Q_m3h, 1) - K * sick.Q_m3h * sick.Q_m3h - 30, 0, 1e-9,
+    'and the branch still balances');
 });
 
 test('two identical machines in parallel each take exactly half the flow', () => {

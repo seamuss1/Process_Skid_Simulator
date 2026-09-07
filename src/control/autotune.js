@@ -397,3 +397,326 @@ export function lambdaTuning(model, lambda_s) {
   const Kc = model.tau / (model.K * (lam + model.theta));
   return { Kc: clamp(Kc, -1e4, 1e4), Ti: model.tau, Td: 0 };
 }
+
+/**
+ * SIMC (Skogestad) tuning from a FOPDT model.
+ *
+ * Skogestad's refinement of IMC, and the rule most worth knowing after Ziegler-Nichols: it is
+ * derived rather than fitted, the single tuning constant is the closed-loop time constant, and
+ * the recommended `tc = theta` gives about 30 degrees of phase margin on essentially anything.
+ * The integral time is capped at four times (tc + theta), which is the part that matters — an
+ * uncapped IMC rule sets Ti = tau, and on a lag-dominant process that is a reset so slow the loop
+ * never rejects a load at all.
+ *
+ * @param {{K:number, tau:number, theta:number}} model from {@link fitFOPDT}
+ * @param {number} [tc_s] desired closed-loop time constant, s; defaults to the dead time
+ * @returns {{Kc:number, Ti:number, Td:number}} PI tuning in the ISA standard form
+ */
+export function simcTuning(model, tc_s) {
+  const tc = Math.max(tc_s === undefined ? model.theta : tc_s, 1e-3);
+  const Kc = model.tau / (model.K * (tc + model.theta));
+  const Ti = Math.min(model.tau, 4 * (tc + model.theta));
+  return { Kc: clamp(Kc, -1e4, 1e4), Ti, Td: 0 };
+}
+
+/* ============================================================================================
+ * THE OPEN-LOOP STEP TEST
+ *
+ * The relay experiment identifies the process where it matters most for stability — at the
+ * frequency where the phase reaches 180 degrees — and it does it in closed loop, so the plant
+ * never runs away. What it does NOT give you is a model. Ku and Tu feed the classical rule table
+ * and nothing else; you cannot draw a Bode plot from them, you cannot predict a step response,
+ * and you cannot use lambda or SIMC tuning, which are the two rules an engineer would actually
+ * reach for on a process with real dead time.
+ *
+ * The step test gives the model. Put the controller in manual, wait until everything has stopped
+ * moving, bump the output once, and watch. The shape of what comes back is the process: how far
+ * it moved per percent of output is the gain, how long it took to start moving is the dead time,
+ * and how long it took to get 63% of the way there is the time constant.
+ *
+ * The reason it is not always the right test is written into the state machine below. It needs
+ * OPEN LOOP — the controller is not correcting anything for the duration — and it needs the
+ * process to be genuinely at rest first, because a drifting starting point turns into a gain
+ * error you cannot see afterwards. On a live plant that is a real cost, and it is why the relay
+ * test exists. Both are here, and the difference between what they can tell you is the lesson.
+ * ============================================================================================ */
+
+/** Phases of the open-loop step test. */
+export const STEP = Object.freeze({
+  /** Not running. */
+  IDLE: 'IDLE',
+  /** Output held; waiting for the measurement to stop drifting. */
+  SETTLING: 'SETTLING',
+  /** Step applied; recording the response. */
+  RECORDING: 'RECORDING',
+  /** Converged; `model` is valid. */
+  DONE: 'DONE',
+  /** Gave up. `message` says why. */
+  FAILED: 'FAILED',
+});
+
+/** How many samples the step test will keep. */
+const STEP_CAPACITY = 4000;
+
+/**
+ * Allocate the step-test state.
+ * @returns {object} step-test state
+ */
+export function createStepTestState() {
+  return {
+    phase: STEP.IDLE,
+    /** Output before the step, percent. */
+    co0: 50,
+    /** Output during the step, percent. */
+    co: 50,
+    /** Size of the step, output percent, signed. */
+    du: 10,
+    /** Simulated time the phase began, s. */
+    tPhase_s: 0,
+    /** Sample times, s, relative to the step. */
+    t: new Float64Array(STEP_CAPACITY),
+    /** The measurement at each sample. */
+    y: new Float64Array(STEP_CAPACITY),
+    /** Valid sample count. */
+    n: 0,
+    /** Measurement when the step was applied. */
+    y0: 0,
+    /** Rolling window used by the settle and steady tests. */
+    recent: [],
+    /** Seconds the measurement has been steady since it last moved. */
+    steady_s: 0,
+    /** The fitted model, valid in DONE. */
+    model: null,
+    /** Human-readable status. */
+    message: 'idle',
+  };
+}
+
+/** How long the measurement must be quiet before the step is applied, s. */
+const STEP_SETTLE_S = 20;
+/** How long the measurement must be quiet afterwards before the fit is taken, s. */
+const STEP_STEADY_S = 25;
+/** Give up if the process has not settled before the step within this long, s. */
+const STEP_SETTLE_TIMEOUT_S = 240;
+/** Give up if the response has not steadied within this long after the step, s. */
+const STEP_RECORD_TIMEOUT_S = 900;
+
+/**
+ * Begin an open-loop step test from the current operating point.
+ *
+ * @param {object} sp step-test state (mutated)
+ * @param {object} opts test settings
+ * @param {number} opts.co the output to hold and then step from, percent
+ * @param {number} opts.du the step size, output percent (signed)
+ * @param {number} opts.t_s simulated time now, s
+ * @param {number} opts.outLo output low limit, percent
+ * @param {number} opts.outHi output high limit, percent
+ * @returns {{ok:boolean, reason?:string}} whether the test could start
+ */
+export function startStepTest(sp, { co, du, t_s, outLo, outHi }) {
+  if (!Number.isFinite(du) || du === 0) return { ok: false, reason: 'step size must be non-zero' };
+  const target = co + du;
+  if (target < outLo - 1e-9 || target > outHi + 1e-9) {
+    return {
+      ok: false,
+      reason: `stepping ${du > 0 ? 'to' : 'down to'} ${target.toFixed(0)}% would leave the `
+        + `${outLo}..${outHi}% output range. Move the operating point or reverse the step.`,
+    };
+  }
+  sp.phase = STEP.SETTLING;
+  sp.co0 = co;
+  sp.co = co;
+  sp.du = du;
+  sp.tPhase_s = t_s;
+  sp.n = 0;
+  sp.y0 = 0;
+  sp.recent = [];
+  sp.steady_s = 0;
+  sp.model = null;
+  sp.message = `holding ${co.toFixed(1)}% — waiting for the process to stop moving`;
+  return { ok: true };
+}
+
+/**
+ * Advance the step test one scan.
+ *
+ * @param {object} sp step-test state (mutated)
+ * @param {number} pv the measurement, engineering units
+ * @param {number} t_s simulated time, s
+ * @param {number} dt_s scan period, s
+ * @param {number} noiseBand the measurement's own noise amplitude, engineering units — the test
+ *   calls the process "steady" when it moves less than this over the settle window
+ * @returns {number} the output the test wants, percent
+ */
+export function stepStepTest(sp, pv, t_s, dt_s, noiseBand) {
+  if (sp.phase !== STEP.SETTLING && sp.phase !== STEP.RECORDING) return sp.co;
+
+  // Keep a short trailing window and call the process steady when its spread is inside the noise.
+  sp.recent.push(pv);
+  const windowN = Math.max(4, Math.round(8 / Math.max(dt_s, 1e-3)));
+  if (sp.recent.length > windowN) sp.recent.shift();
+  const lo = Math.min(...sp.recent);
+  const hi = Math.max(...sp.recent);
+  const quiet = sp.recent.length >= windowN && hi - lo <= Math.max(noiseBand * 2.5, 1e-9);
+  sp.steady_s = quiet ? sp.steady_s + dt_s : 0;
+
+  if (sp.phase === STEP.SETTLING) {
+    if (sp.steady_s >= STEP_SETTLE_S) {
+      sp.phase = STEP.RECORDING;
+      sp.tPhase_s = t_s;
+      sp.y0 = pv;
+      sp.co = sp.co0 + sp.du;
+      sp.n = 0;
+      sp.steady_s = 0;
+      sp.recent = [];
+      sp.t[sp.n] = 0;
+      sp.y[sp.n] = pv;
+      sp.n += 1;
+      sp.message = `stepped ${sp.du > 0 ? '+' : ''}${sp.du.toFixed(1)}% — recording`;
+    } else if (t_s - sp.tPhase_s > STEP_SETTLE_TIMEOUT_S) {
+      sp.phase = STEP.FAILED;
+      sp.message = `the process never settled — it is still moving by more than the noise band `
+        + 'after four minutes. Something else is disturbing it; find that first.';
+    } else {
+      sp.message = `holding ${sp.co0.toFixed(1)}% — steady for ${sp.steady_s.toFixed(0)} of `
+        + `${STEP_SETTLE_S} s`;
+    }
+    return sp.co;
+  }
+
+  // RECORDING
+  if (sp.n < STEP_CAPACITY) {
+    sp.t[sp.n] = t_s - sp.tPhase_s;
+    sp.y[sp.n] = pv;
+    sp.n += 1;
+  }
+  const moved = Math.abs(pv - sp.y0);
+  if (sp.steady_s >= STEP_STEADY_S && moved > Math.max(noiseBand * 4, 1e-9)) {
+    finishStepTest(sp);
+  } else if (t_s - sp.tPhase_s > STEP_RECORD_TIMEOUT_S || sp.n >= STEP_CAPACITY) {
+    if (moved > Math.max(noiseBand * 4, 1e-9)) finishStepTest(sp);
+    else {
+      sp.phase = STEP.FAILED;
+      sp.message = 'the measurement barely moved — the step was too small to see through the '
+        + 'noise, or the final element is not passing it.';
+    }
+  } else {
+    sp.message = `recording — ${(t_s - sp.tPhase_s).toFixed(0)} s, moved `
+      + `${(pv - sp.y0).toPrecision(3)} EU`;
+  }
+  return sp.co;
+}
+
+/**
+ * Fit the recorded response and finish.
+ * @param {object} sp step-test state (mutated)
+ * @returns {void}
+ */
+function finishStepTest(sp) {
+  const fit = fitFOPDT(sp.t, sp.y, sp.du, sp.n);
+  if (!fit.ok) {
+    sp.phase = STEP.FAILED;
+    sp.message = fit.reason;
+    return;
+  }
+  sp.model = { K: fit.K, tau: fit.tau, theta: fit.theta };
+  sp.phase = STEP.DONE;
+  const ratio = fit.theta / Math.max(fit.tau, 1e-9);
+  const difficulty = ratio < 0.15 ? 'easy — lag-dominant, this loop will take a lot of gain'
+    : ratio < 0.6 ? 'ordinary — a normal balance of dead time to lag'
+      : ratio < 1.2 ? 'difficult — dead time is a large share of the response'
+        : 'dead-time dominant — no amount of gain will help; consider a Smith predictor';
+  sp.message = `K ${fit.K.toPrecision(3)} EU/%, tau ${fit.tau.toFixed(1)} s, theta `
+    + `${fit.theta.toFixed(1)} s. theta/tau ${ratio.toFixed(2)} — ${difficulty}.`;
+}
+
+/**
+ * Abandon a running step test.
+ * @param {object} sp step-test state (mutated)
+ * @returns {void}
+ */
+export function abortStepTest(sp) {
+  if (sp.phase === STEP.SETTLING || sp.phase === STEP.RECORDING) {
+    sp.phase = STEP.IDLE;
+    sp.co = sp.co0;
+    sp.message = 'aborted by the operator';
+  }
+}
+
+/**
+ * Model-based candidates, for when a FOPDT fit is available.
+ *
+ * @param {{K:number, tau:number, theta:number}} model the process model
+ * @returns {Array<{id:string,name:string,Kc:number,Ti:number,Td:number,note:string}>} candidates
+ */
+export function modelRules(model) {
+  if (!model || !(Math.abs(model.K) > 0)) return [];
+  const out = [];
+  const simc = simcTuning(model, model.theta);
+  out.push({
+    id: 'SIMC',
+    name: 'SIMC (tc = theta)',
+    ...simc,
+    note: 'Skogestad\'s recommended setting. Derived rather than fitted, and it lands near 30 '
+      + 'degrees of phase margin on almost any process. The sane modern default.',
+  });
+  const simcSlow = simcTuning(model, 3 * model.theta);
+  out.push({
+    id: 'SIMC_SLOW',
+    name: 'SIMC (tc = 3 theta)',
+    ...simcSlow,
+    note: 'The same rule asked for a slower closed loop. Use when the final element is expensive '
+      + 'to move or the measurement is noisy.',
+  });
+  for (const mult of [1, 3]) {
+    const lam = mult * Math.max(model.tau, model.theta);
+    const t = lambdaTuning(model, lam);
+    out.push({
+      id: `LAMBDA_${mult}`,
+      name: `Lambda (${lam.toFixed(0)} s closed loop)`,
+      ...t,
+      note: `Asks the loop to settle in about ${lam.toFixed(0)} s. The only rule whose knob means `
+        + 'something an operator recognises.',
+    });
+  }
+  return out;
+}
+
+/**
+ * Rank a set of candidate tunings by simulating each one on the model.
+ *
+ * This is what turns a table of rules into advice. Every rule in the literature was derived for
+ * some particular idea of "good", and those ideas disagree; running them all against the same
+ * model and showing what each actually does — how far it overshoots, how long it settles, how
+ * much margin it leaves, how hard it works the valve — replaces an argument about pedigree with
+ * a comparison.
+ *
+ * @param {Array<object>} rules candidates from {@link tuningRules} or {@link modelRules}
+ * @param {{K:number, tau:number, theta:number}} model the process model
+ * @param {object} deps the analysis functions, injected so this module stays free of imports it
+ *   would otherwise only need here
+ * @param {Function} deps.loopResponse from `control/analysis.js`
+ * @param {Function} deps.margins from `control/analysis.js`
+ * @param {Function} deps.predictStep from `control/analysis.js`
+ * @param {Float64Array} deps.grid the frequency grid
+ * @param {object} base a template tuning record the candidates are merged into
+ * @param {number} [scan_s=0] the controller scan period, s
+ * @returns {Array<object>} the candidates, each with `margins` and `predicted`, best first
+ */
+export function rankTunings(rules, model, deps, base, scan_s = 0) {
+  const scored = rules.map((r) => {
+    const cfg = { ...base, Kc: r.Kc, Ti: r.Ti, Td: r.Td };
+    const resp = deps.loopResponse(cfg, model, deps.grid, scan_s);
+    const m = deps.margins(resp);
+    const pred = deps.predictStep(cfg, model, { spStep: 1, horizon: Math.max(120, 40 * model.tau), scan_s });
+    return { ...r, margins: m, predicted: pred };
+  });
+
+  // Rank on how close Ms lands to 1.6 — the middle of the range plant loops actually live in —
+  // with anything unstable pushed to the bottom regardless.
+  scored.sort((a, b) => {
+    if (a.margins.stable !== b.margins.stable) return a.margins.stable ? -1 : 1;
+    return Math.abs(a.margins.ms - 1.6) - Math.abs(b.margins.ms - 1.6);
+  });
+  return scored;
+}

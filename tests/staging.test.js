@@ -26,7 +26,6 @@ const SCAN = 0.2;
  */
 function bench(over) {
   const cfg = createStagingConfig(over);
-  cfg._drives = [DRIVE_SPEC, DRIVE_SPEC];
   const sq = createStagingState(2);
   const pidCfg = createPidConfig({ outLo: 0, outHi: 100 });
   const pid = createPidState(0, 50);
@@ -47,9 +46,19 @@ function bench(over) {
     hold(co, seconds) {
       for (let k = 0; k * SCAN < seconds; k += 1) {
         pid.co = co;
-        const a = stepStaging(cfg, sq, pidCfg, pid, drv, t, SCAN);
+        const a = stepStaging(cfg, sq, {
+          drives: [DRIVE_SPEC, DRIVE_SPEC],
+          drv,
+          pidCfg,
+          pid,
+          co,
+          t_s: t,
+          flow_m3h: 40,
+          pv: 3.2,
+          sp: 3.2,
+        }, SCAN);
         if (a) actions.push({ t, a });
-        for (let i = 0; i < 2; i += 1) stepDrive(DRIVE_SPEC, drv[i], 1, 15, SCAN);
+        for (let i = 0; i < 2; i += 1) stepDrive(DRIVE_SPEC, drv[i], 15, SCAN);
         t += SCAN;
       }
     },

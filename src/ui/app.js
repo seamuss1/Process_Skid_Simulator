@@ -12,11 +12,15 @@
 
 import * as sim from '../core/sim.js';
 import { LOOP } from '../data/config.js';
+import { deleteRun } from '../io/export.js';
 import { h, setText, cls, clock, num } from './dom.js';
 import { createMimic } from './mimic.js';
 import { createCurves } from './curves.js';
 import { createTrend } from './trend.js';
 import { createRail } from './panels.js';
+import { createAnalysis } from './analysis.js';
+import { createHealth } from './health.js';
+import { createLesson } from './lesson.js';
 
 /** Time-compression choices offered on the toolbar. */
 const SPEEDS = [1, 5, 20];
@@ -32,9 +36,13 @@ function bindActions(ctx, toast) {
   const A = {};
   const NAMES = [
     'togglePause', 'setSpeed', 'setLoopMode', 'setSetpoint', 'setControllerMode', 'setManualOutput',
-    'setTuning', 'setScan', 'startPump', 'stopPump', 'autoPump', 'resetPump', 'forceTrip',
-    'setStaging', 'setDisturbance', 'beginAutotune', 'cancelAutotune', 'applyTuningRule',
+    'setTuning', 'setTuningForm', 'setAlgorithm', 'setScan', 'setStrategy', 'setModel',
+    'startPump', 'stopPump', 'autoPump', 'resetPump', 'forceTrip',
+    'setStaging', 'setDisturbance',
+    'beginAutotune', 'cancelAutotune', 'beginStepTest', 'cancelStepTest', 'beginSweep',
+    'cancelSweep', 'applyTuningRule',
     'beginScenario', 'cancelScenario', 'gradeNow', 'clearScore', 'ackAlarms', 'clearTrend',
+    'resetEnergy', 'beginLesson', 'endLesson',
   ];
   for (const name of NAMES) {
     A[name] = (...args) => {
@@ -43,6 +51,14 @@ function bindActions(ctx, toast) {
       return res;
     };
   }
+  // Queries. These never refuse, so they are not wrapped.
+  A.summary = () => sim.summary(ctx);
+  A.tuningCandidates = () => sim.tuningCandidates(ctx);
+  A.deleteRun = (id) => deleteRun(ctx.runs, id);
+  A.toast = toast;
+  // The unwrapped module, for `io/export.js::applySession` — it collects its own problems and
+  // reports them once, rather than raising a toast for every field in the file.
+  A.raw = sim;
   return A;
 }
 
@@ -103,10 +119,17 @@ export function boot(host) {
     h('button', { class: 'chip', type: 'button', text: 'FIC flow', title: 'Control flow to process. Fast: the drive ramp dominates.', onClick: () => A.setLoopMode(LOOP.FLOW) }),
   ];
   let view = 'pid';
-  const viewBtns = [
-    h('button', { class: 'chip', type: 'button', text: 'P&ID', title: 'The process schematic', onClick: () => setView('pid') }),
-    h('button', { class: 'chip', type: 'button', text: 'CURVES', title: 'Head-capacity chart: where the operating point actually sits', onClick: () => setView('curves') }),
+  const VIEWS = [
+    { id: 'pid', label: 'P&ID', hint: 'The process schematic' },
+    { id: 'curves', label: 'CURVES', hint: 'Head-capacity chart: where the operating point actually sits' },
+    { id: 'bode', label: 'BODE', hint: 'Open-loop, sensitivity and noise responses, with the margins marked where they are read' },
+    { id: 'nyquist', label: 'NYQUIST', hint: 'The same response as one curve, and how close it comes to the point of instability' },
+    { id: 'health', label: 'REPORTS', hint: 'Loop health, the event log and the run comparison' },
+    { id: 'lessons', label: 'LESSONS', hint: 'Fourteen guided exercises' },
   ];
+  const viewBtns = VIEWS.map((v) => h('button', {
+    class: 'chip', type: 'button', text: v.label, title: v.hint, onClick: () => setView(v.id),
+  }));
   const toolbar = h('div', { class: 'toolbar' },
     btnRun,
     h('span', { class: 'tb__grp' }, speedBtns),
@@ -123,6 +146,9 @@ export function boot(host) {
   // ---- workspace ------------------------------------------------------------------------------
   const mimic = createMimic(ctx, A);
   const curves = createCurves(ctx);
+  const analysis = createAnalysis(ctx);
+  const health = createHealth(ctx, A);
+  const lessons = createLesson(ctx, A);
   const trend = createTrend(ctx);
   const rail = createRail(ctx, A);
 
@@ -131,8 +157,8 @@ export function boot(host) {
       h('span', { class: 'panel__title', text: 'PROCESS' }),
       h('span', { class: 'panel__tools' },
         h('span', { class: 'panel__note', id: 'stageNote' }))),
-    h('div', { class: 'panel__body panel__body--stage' }, mimic.el, curves.el));
-  curves.el.hidden = true;
+    h('div', { class: 'panel__body panel__body--stage' },
+      mimic.el, curves.el, analysis.el, health.el, lessons.el));
 
   const trendPanel = h('section', { class: 'panel panel--trend' },
     h('header', { class: 'panel__head' },
@@ -159,8 +185,13 @@ export function boot(host) {
     view = v;
     mimic.el.hidden = v !== 'pid';
     curves.el.hidden = v !== 'curves';
-    cls(viewBtns[0], 'is-on', v === 'pid');
-    cls(viewBtns[1], 'is-on', v === 'curves');
+    analysis.el.hidden = v !== 'bode' && v !== 'nyquist';
+    health.el.hidden = v !== 'health';
+    lessons.el.hidden = v !== 'lessons';
+    if (v === 'bode' || v === 'nyquist') analysis.el.setMode(v === 'bode' ? 'BODE' : 'NYQUIST');
+    // The schematic sizes itself; the other panes have to be told how much room they may have.
+    cls(stage, 'is-tall', v !== 'pid' && v !== 'curves');
+    for (let i = 0; i < VIEWS.length; i += 1) cls(viewBtns[i], 'is-on', VIEWS[i].id === v);
   }
   setView('pid');
 
@@ -168,6 +199,8 @@ export function boot(host) {
   ctx.bus.on('sequence', (msg) => trend.mark('stage', msg));
   ctx.bus.on('alarm', (a) => { if (a.sev === 'ALARM') trend.mark('alarm', a.message); });
   ctx.bus.on('scenario', (msg) => trend.mark('test', msg));
+  ctx.bus.on('lesson', (msg) => { trend.mark('test', msg); toast(msg); });
+  ctx.bus.on('scored', (r) => toast(`${r.scenario}: ${Math.round(r.score)} / 100`));
   ctx.bus.on('trip', (ev) => toast(`${ev.tag}: ${ev.message}`, 'alarm'));
 
   // ---- keyboard ---------------------------------------------------------------------------------
@@ -177,7 +210,10 @@ export function boot(host) {
     if (ev.key === ' ') { ev.preventDefault(); A.togglePause(); }
     else if (ev.key === 'a' || ev.key === 'A') A.ackAlarms();
     else if (ev.key >= '1' && ev.key <= '3') A.setSpeed(SPEEDS[Number(ev.key) - 1]);
-    else if (ev.key === 'p' || ev.key === 'P') setView(view === 'pid' ? 'curves' : 'pid');
+    else if (ev.key === 'p' || ev.key === 'P') {
+      const i = VIEWS.findIndex((v) => v.id === view);
+      setView(VIEWS[(i + 1) % VIEWS.length].id);
+    }
   });
 
   // ---- the frame loop ----------------------------------------------------------------------------
@@ -240,12 +276,21 @@ export function boot(host) {
     cls(loopBtns[1], 'is-on', ctx.run.mode === LOOP.FLOW);
 
     // --- the panes ---------------------------------------------------------------------------
-    if (view === 'pid') mimic.update(); else curves.update();
+    // Only the visible one is repainted. Each pane is a few thousand canvas or DOM operations,
+    // and five of them a frame is the difference between sixty frames a second and a slideshow.
+    if (view === 'pid') mimic.update();
+    else if (view === 'curves') curves.update();
+    else if (view === 'bode' || view === 'nyquist') analysis.update();
+    else if (view === 'health') health.update();
+    else if (view === 'lessons') lessons.update();
     trend.update();
     rail.update();
 
-    setText(stageNote, `${num(ctx.plant.Qtotal_m3h, 1)} m³/h total · `
-      + `${num(ctx.plant.H_m, 1)} m header · ${num(ctx.plant.P_kW[0] + ctx.plant.P_kW[1], 2)} kW`);
+    const sm = sim.summary(ctx);
+    setText(stageNote, `${num(ctx.plant.Qdemand_m3h, 1)} m³/h to process · `
+      + `${num(ctx.plant.p_bar, 2)} bar · ${num(sm.electrical_kW, 2)} kW · `
+      + `${num(sm.specific_kWh_m3, 3)} kWh/m³`
+      + (sm.owner ? ` · ${sm.owner} owns the output` : ''));
     setText(status.firstChild, ctx.run.lastNote);
     if (fpsAcc > 0.5) {
       setText(status.lastChild, `${Math.round(fpsN / fpsAcc)} fps · `

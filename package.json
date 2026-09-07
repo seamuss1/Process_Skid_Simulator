@@ -1,7 +1,7 @@
 {
   "name": "dual-pump-pid-trainer",
   "version": "1.0.0",
-  "description": "Browser simulator of two parallel VFD centrifugal pumps on a common header under PID control: pump and system curves, NPSH and cavitation, lead/lag staging with duty rotation, relay autotune and a tuning scorecard.",
+  "description": "Browser simulator of two parallel VFD centrifugal pumps on a common header under PID control: pump and system curves, NPSH and cavitation, motor and drive dynamics, lead/lag staging with duty rotation and sleep, cascade, feedforward and override strategies, relay/step/sweep identification with ranked tuning rules, Bode and Nyquist analysis, loop-health diagnostics including a Harris index and stiction detection, a fourteen-lesson curriculum and a graded scorecard.",
   "type": "module",
   "private": true,
   "scripts": {
@@ -22,7 +22,15 @@
     "pump-staging",
     "autotune",
     "npsh",
-    "control-loop-tuning"
+    "control-loop-tuning",
+    "bode",
+    "nyquist",
+    "harris-index",
+    "stiction",
+    "cascade-control",
+    "feedforward",
+    "loop-performance-monitoring",
+    "energy-efficiency"
   ],
   "license": "MIT"
 }

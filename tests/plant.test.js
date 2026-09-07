@@ -11,19 +11,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildConfig } from '../src/data/config.js';
 import {
-  createPlantState, stepPlant, settlePlant, solveHeaderSteady, characteristicCurves, runningCount,
+  createPlantState, stepPlant, settlePlant, solveSteady, characteristicCurves, runningCount,
+  predictOperatingPoint, throttleRange, FINAL,
 } from '../src/process/plant.js';
-import { DRIVE } from '../src/process/motor.js';
-
-/**
- * Invert the VFD reference scaling: the controller output that would hold a given shaft speed.
- * @param {object} drive frozen drive spec
- * @param {number} n_pct shaft speed, percent of rated
- * @returns {number} controller output, percent
- */
-function speedToReference(drive, n_pct) {
-  return ((n_pct - drive.minSpeed_pct) / (drive.maxSpeed_pct - drive.minSpeed_pct)) * 100;
-}
+import { DRIVE, speedToReference } from '../src/process/motor.js';
 import { headToBar, barToHead } from '../src/core/util.js';
 import { near, nearRel } from './helpers.js';
 
@@ -59,7 +50,7 @@ test('at steady state, what the pumps deliver equals what the outlets swallow', 
 
 test('the integrator converges to the same header the bisection solve finds', () => {
   const { cfg, p } = rig({ demandTarget: 0.55 });
-  const analytic = solveHeaderSteady(cfg, p);
+  const analytic = solveSteady(cfg, p).H_m;
   // Kick it well away, then let the ODE find its own way back.
   p.H_m = analytic + 12;
   for (let i = 0; i < 60 / cfg.dt_s; i += 1) stepPlant(cfg, p, cfg.dt_s);
@@ -83,9 +74,11 @@ test('a valve slam cannot destabilise the integrator', () => {
   // Instant full-open and full-close, repeatedly, bypassing the stroke limit entirely: far more
   // violent than anything the UI can ask for.
   for (let cycle = 0; cycle < 8; cycle += 1) {
-    p.fcv = cycle % 2 === 0 ? 1 : 0;
+    const x = cycle % 2 === 0 ? 1 : 0;
+    p.fcv.x = x;
+    p.fcv.cmd = x;
     for (let i = 0; i < 4 / cfg.dt_s; i += 1) {
-      p.demandTarget = p.fcv;
+      p.demandTarget = x;
       stepPlant(cfg, p, cfg.dt_s);
       assert.ok(Number.isFinite(p.H_m), 'the header head went non-finite');
       assert.ok(p.H_m > -50 && p.H_m < 400, `the header head ran away to ${p.H_m}`);
@@ -98,7 +91,7 @@ test('the integrator is stable at any step size, because the step is implicit', 
   // toward the steady-state answer instead.
   for (const dt of [0.02, 0.2, 1, 2]) {
     const { cfg, p } = rig({ demandTarget: 0.7 });
-    const analytic = solveHeaderSteady(cfg, p);
+    const analytic = solveSteady(cfg, p).H_m;
     p.H_m = analytic - 15;
     for (let i = 0; i < Math.round(200 / dt); i += 1) stepPlant(cfg, p, dt);
     assert.ok(Number.isFinite(p.H_m), `dt = ${dt} s produced a non-finite header`);
@@ -158,8 +151,8 @@ test('the make-up controller holds level against a steady draw', () => {
 });
 
 test('head and pressure convert through the CURRENT density, not a constant', () => {
-  const cold = rig({ T_C: 20 }).p;
-  const hot = rig({ T_C: 90 }).p;
+  const cold = rig({ T_tank_C: 20, Tsupply_C: 20 }).p;
+  const hot = rig({ T_tank_C: 90, Tsupply_C: 90 }).p;
   near(cold.p_bar, headToBar(cold.H_m, cold.fluid.rho_kgm3), 1e-12, 'cold conversion');
   near(barToHead(cold.p_bar, cold.fluid.rho_kgm3), cold.H_m, 1e-9, 'and it round-trips');
   assert.ok(hot.fluid.rho_kgm3 < cold.fluid.rho_kgm3 - 20, 'hot water is lighter');
@@ -169,7 +162,7 @@ test('hot liquid and a blinded strainer both eat the suction margin', () => {
   const base = rig({ demandTarget: 0.6 }).p;
   const marginOf = (p) => p.npsha_m[0] - p.npshr_m[0];
   assert.ok(marginOf(base) > 5, 'the default rig has plenty of margin, by design');
-  assert.ok(marginOf(rig({ demandTarget: 0.6, T_C: 90 }).p) < marginOf(base) - 4,
+  assert.ok(marginOf(rig({ demandTarget: 0.6, T_tank_C: 90, Tsupply_C: 90 }).p) < marginOf(base) - 4,
     '90 C must cost several metres');
   assert.ok(marginOf(rig({ demandTarget: 0.6, foul: 0.85 }).p) < marginOf(base) - 2,
     'a blinded strainer must cost several metres');
@@ -178,7 +171,7 @@ test('hot liquid and a blinded strainer both eat the suction margin', () => {
 });
 
 test('cavitation is reachable, and it costs head', () => {
-  const { cfg, p } = rig({ demandTarget: 0.7, T_C: 96, foul: 0.6 }, [100, 100]);
+  const { cfg, p } = rig({ demandTarget: 0.7, T_tank_C: 96, Tsupply_C: 96, foul: 0.6 }, [100, 100]);
   for (let i = 0; i < 30 / cfg.dt_s; i += 1) stepPlant(cfg, p, cfg.dt_s);
   assert.ok(p.npsha_m[0] < p.npshr_m[0], 'this combination must break the suction margin');
   assert.ok(p.cav[0] < 0.95, 'and the pump must lose head for it');
@@ -196,7 +189,8 @@ test('cavitation does not limit-cycle at the tick rate when a pump sits on its N
   p.demandTarget = 0.6;
   settlePlant(cfg, p);
   for (let T = 88; T <= 97; T += 0.5) {
-    p.T_C = T;
+    p.T_tank_C = T;
+    p.Tsupply_C = T;
     for (let i = 0; i < 20 / cfg.dt_s; i += 1) stepPlant(cfg, p, cfg.dt_s);
     let lo = Infinity;
     let hi = -Infinity;

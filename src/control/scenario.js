@@ -35,6 +35,7 @@
  */
 
 import { clamp } from '../core/util.js';
+import { trip as tripDrive, reset as resetDrive } from '../process/motor.js';
 
 /**
  * The scripted tests. Times are seconds from the start of the run; `value` is interpreted by the
@@ -101,6 +102,123 @@ export const SCENARIOS = Object.freeze([
       { t: 60, action: 'foul', value: 0.55, label: 'strainer 55% blinded' },
       { t: 150, action: 'foul', value: 0.80, label: 'strainer 80% blinded' },
       { t: 250, action: 'foul', value: 0.0, label: 'strainer cleaned' },
+    ],
+  },
+  {
+    id: 'MIN_FLOW',
+    name: 'Deadhead',
+    blurb: 'Demand closes almost completely. Everything the pump does with the energy it can no '
+      + 'longer put into flow goes into the liquid in the casing, and the temperature rise is '
+      + 'what minimum continuous flow actually means. Watch the recirculation valve earn its keep.',
+    duration_s: 420,
+    steps: [
+      { t: 20, action: 'demand', value: 0.50, label: 'demand 50%' },
+      { t: 60, action: 'demand', value: 0.06, label: 'demand valve slams to 6%' },
+      { t: 260, action: 'demand', value: 0.50, label: 'demand back to 50%' },
+    ],
+  },
+  {
+    id: 'SURGE',
+    name: 'Valve slam',
+    blurb: 'The demand valve shuts in a second and opens again just as fast. Watch the header: '
+      + 'the transient is large but it is not a water hammer, because the bladder vessel takes '
+      + 'the flow the valve stopped passing. That is what the vessel is for, and the trace is the '
+      + 'argument for having one.',
+    duration_s: 260,
+    steps: [
+      { t: 20, action: 'demand', value: 0.72, label: 'demand 72%' },
+      { t: 70, action: 'slam', value: 0.05, label: 'valve slams shut' },
+      { t: 110, action: 'slam', value: 0.72, label: 'valve slams open' },
+      { t: 170, action: 'demand', value: 0.45, label: 'demand back to 45%' },
+    ],
+  },
+  {
+    id: 'VISCOSITY',
+    name: 'Wrong liquid',
+    blurb: 'The rig is filled with ISO VG 150 gear oil instead of water. Nothing in the control '
+      + 'system changes and everything in the process does: head, flow and efficiency all derate '
+      + 'together, and the tuning that was right for water is now wrong.',
+    duration_s: 480,
+    steps: [
+      { t: 20, action: 'demand', value: 0.55, label: 'demand 55% on water' },
+      { t: 90, action: 'fluid', value: 'VG150', label: 'filled with VG 150 oil' },
+      { t: 260, action: 'demand', value: 0.68, label: 'demand 68% on oil' },
+      { t: 380, action: 'fluid', value: 'WATER', label: 'flushed back to water' },
+    ],
+  },
+  {
+    id: 'CAVITATION',
+    name: 'Losing suction',
+    blurb: 'The tank runs down and the contents warm up at the same time. Two effects that are '
+      + 'survivable apart are not survivable together — this is the classic hot-well failure, '
+      + 'and the NPSH margin trace tells the story before the flow does.',
+    duration_s: 520,
+    steps: [
+      { t: 20, action: 'demand', value: 0.62, label: 'demand 62%' },
+      { t: 60, action: 'makeup', value: 0, label: 'make-up isolated — tank starts running down' },
+      { t: 120, action: 'supplyTemp', value: 92, label: 'supply water at 92 C' },
+      { t: 380, action: 'makeup', value: 1, label: 'make-up restored' },
+    ],
+  },
+  {
+    id: 'TRIP',
+    name: 'Motor trip',
+    blurb: 'The lead machine trips on overload with the header loaded. The sequence has to notice, '
+      + 'promote the standby, and the loop has to survive the hole in the middle.',
+    duration_s: 360,
+    steps: [
+      { t: 20, action: 'demand', value: 0.70, label: 'demand 70%' },
+      { t: 90, action: 'trip', value: 0, label: 'P-101 trips' },
+      { t: 250, action: 'reset', value: 0, label: 'P-101 reset' },
+    ],
+  },
+  {
+    id: 'STICTION',
+    name: 'Sticking valve',
+    blurb: 'Friction is added to the final element and the loop is left alone. The cycle that '
+      + 'starts is not a tuning problem, and the point of the test is that the diagnostics can '
+      + 'tell you so from the waveform without anyone going out to look at the valve.',
+    duration_s: 600,
+    setup(ctx, api) {
+      api.setDisturbance({ demandTarget: 0.55 });
+      api.setDisturbance({ finalElement: 'THROTTLE' });
+    },
+    steps: [
+      { t: 90, action: 'stiction', value: 3.5, label: 'PCV stickband to 3.5%' },
+    ],
+  },
+  {
+    id: 'ENERGY',
+    name: 'Throttle against speed',
+    blurb: 'The same 22 m3/h held two ways: once by throttling a valve with the pumps at a fixed '
+      + '80%, once by opening the valve and slowing the pumps down. Same flow, same duty, and the '
+      + 'kWh/m3 figures are not remotely the same. The whole argument for a drive, in one test.',
+    duration_s: 620,
+    setup(ctx, api) {
+      api.setLoopMode('FLOW');
+      api.setSetpoint(22);
+      api.setStaging({ enabled: false });
+      api.setDisturbance({ demandTarget: 0.55, fixedSpeed_pct: 80 });
+    },
+    steps: [
+      { t: 20, action: 'finalElement', value: 'THROTTLE', label: 'hold 22 m3/h by throttling' },
+      { t: 320, action: 'finalElement', value: 'VFD', label: 'hold 22 m3/h on speed instead' },
+    ],
+  },
+  {
+    id: 'SLEEP',
+    name: 'Overnight',
+    setup(ctx, api) {
+      api.setStaging({ sleepEnabled: true, sleepDelay_s: 40, sleepFlow_m3h: 6, wakeDroop: 0.06 });
+    },
+    blurb: 'Demand falls away to nothing. With sleep enabled the set stops and lets the gas '
+      + 'cushion hold the header; without it the last pump runs all night against a closed '
+      + 'system. Compare the energy totals.',
+    duration_s: 720,
+    steps: [
+      { t: 20, action: 'demand', value: 0.45, label: 'demand 45%' },
+      { t: 80, action: 'demand', value: 0, label: 'demand falls away completely' },
+      { t: 560, action: 'demand', value: 0.45, label: 'morning — demand back to 45%' },
     ],
   },
 ]);
@@ -324,6 +442,14 @@ function applyStep(config, sc, io, step) {
       break;
     case 'demand':
       plant.demandTarget = step.value;
+      plant.valveOverride.fcv.strokeTime_s = null;
+      break;
+    case 'slam':
+      // A slam is the same valve moved in a second instead of six. Closure time is the whole
+      // difference between a pressure transient and a water hammer, so it is a property of the
+      // step, not of the valve.
+      plant.valveOverride.fcv.strokeTime_s = 1.0;
+      plant.demandTarget = step.value;
       break;
     case 'discharge':
       plant.hDischarge_m = step.value;
@@ -331,8 +457,45 @@ function applyStep(config, sc, io, step) {
     case 'foul':
       plant.foul = step.value;
       break;
-    case 'temp':
-      plant.T_C = step.value;
+    case 'fluid':
+      io.api.setDisturbance({ fluidId: step.value });
+      break;
+    case 'supplyTemp':
+      plant.Tsupply_C = step.value;
+      break;
+    case 'tankTemp':
+      plant.T_tank_C = step.value;
+      break;
+    case 'makeup':
+      plant.makeupAuto = step.value > 0;
+      break;
+    case 'level':
+      plant.level_m = step.value;
+      plant.V_m3 = step.value * config.tank.area_m2;
+      break;
+    case 'finalElement':
+      // Through the action, so the controller action is re-aligned and the output preloaded to
+      // whatever the new element is already at. Writing the field directly makes the loop take a
+      // step nobody asked for at the moment of the switch.
+      io.api.setDisturbance({ finalElement: step.value });
+      break;
+    case 'recirc':
+      plant.recircMode = step.value;
+      break;
+    case 'stiction': {
+      const which = plant.finalElement === 'THROTTLE' ? 'pcv' : 'fcv';
+      plant.valveOverride[which].stickband = step.value / 100;
+      plant.valveOverride[which].slipJump = (step.value / 100) * 0.5;
+      break;
+    }
+    case 'wear':
+      for (let i = 0; i < plant.wear.length; i += 1) plant.wear[i] = step.value;
+      break;
+    case 'trip':
+      tripDrive(plant.drv[step.value | 0], 'scripted trip');
+      break;
+    case 'reset':
+      resetDrive(plant.drv[step.value | 0]);
       break;
     default:
       break;

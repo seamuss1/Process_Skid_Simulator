@@ -18,8 +18,6 @@
 
 import { h, setText, num } from './dom.js';
 import { characteristicCurves } from '../process/plant.js';
-import { headAt } from '../process/pump.js';
-import { kvToK } from '../process/valve.js';
 
 /**
  * Build the curve chart.
@@ -144,17 +142,11 @@ export function createCurves(ctx) {
       g.restore();
     }
 
-    // --- reference envelopes at full speed, including the branch losses ------------------------
-    const K = kvToK(cfg.suction.kv_m3h * (1 - p.foul))
-      + kvToK(cfg.discharge.kv_m3h) + kvToK(cfg.discharge.checkKv_m3h);
-    const refCurve = (nP) => (j) => {
-      const q = (Qmax * j) / (N - 1);
-      const qi = q / nP;
-      return p.zStatic_m + headAt(pump, qi, 1) - K * qi * qi;
-    };
-    const qAt = (j) => (Qmax * j) / (N - 1);
-    stroke(qAt, refCurve(1), '--curve-ref', 1, [3, 3]);
-    stroke(qAt, refCurve(2), '--curve-ref', 1, [3, 3]);
+    // --- reference envelope: the same machines at full speed on clean cold water ---------------
+    // Sampled by the plant rather than recomputed here, so the dashed line and the solid one can
+    // never drift apart when the branch loss model changes. The gap between them is exactly what
+    // the fluid, the fouling and the wear are costing.
+    stroke((j) => cur.Q[j], (j) => cur.Href[j], '--curve-ref', 1, [3, 3]);
 
     // --- the live curves ---------------------------------------------------------------------
     stroke((j) => cur.Q[j], (j) => cur.Hsys[j], '--curve-sys', 1.75, [6, 4]);

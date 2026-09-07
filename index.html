@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<meta name="description" content="Dual Pump PID Trainer — two parallel VFD centrifugal pumps on a common header under PID control. Pump and system curves, NPSH and cavitation, lead/lag staging, relay autotune and a tuning scorecard. Runs entirely in the browser: no build step, no dependencies, no network.">
+<meta name="description" content="Dual Pump PID Trainer — two parallel VFD centrifugal pumps on a common header under PID control. Pump and system curves, NPSH and cavitation, motor and drive dynamics, lead/lag staging with duty rotation and sleep, cascade and feedforward strategies, relay/step/sweep identification with ranked tuning rules, Bode and Nyquist analysis, loop-health diagnostics, a fourteen-lesson curriculum and a graded scorecard. Runs entirely in the browser: no build step, no dependencies, no network.">
 <title>Dual Pump PID Trainer</title>
 
 <link rel="stylesheet" href="./styles/tokens.css">
@@ -76,8 +76,9 @@
        1. title strip  28px  unit, loop tag, sim clock, run state, alarm summary
        2. toolbar      40px  transport, time compression, loop select, view select
        3. alarm banner 24px  present only while something is in alarm
-       4. workspace          process over trend, plus the control rail. The only
-                             band that grows.
+       4. workspace          the stage (P&ID, curves, Bode, Nyquist, reports or
+                             lessons) over the trend, plus the four-tab control
+                             rail. The only band that grows.
        5. status bar   22px  the last thing that happened, and the frame cost
 
      Do NOT author shell markup here: boot() removes every child of #app before
