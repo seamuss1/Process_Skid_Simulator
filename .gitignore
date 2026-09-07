@@ -5,3 +5,6 @@ Thumbs.db
 *.log
 .vscode/
 .idea/
+
+# Agent scratch: throwaway probe scripts written while checking a numerical claim.
+.probe/
