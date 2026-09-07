@@ -118,25 +118,115 @@ export function boot(host) {
     h('button', { class: 'chip', type: 'button', text: 'PIC pressure', title: 'Control header pressure. Slow: the surge vessel dominates.', onClick: () => A.setLoopMode(LOOP.PRESSURE) }),
     h('button', { class: 'chip', type: 'button', text: 'FIC flow', title: 'Control flow to process. Fast: the drive ramp dominates.', onClick: () => A.setLoopMode(LOOP.FLOW) }),
   ];
+  // ==============================================================================================
+  // THE VIEW REGISTRY
+  //
+  // Six views fitted on one row of chips. Twenty do not, and constructing twenty panes at boot in
+  // order to show one of them is worse still — each is a few thousand DOM nodes or a canvas.
+  //
+  // So views are GROUPED and LAZY. The toolbar carries one row of groups; picking a group reveals
+  // its views. A pane is built the first time it is asked for, by a dynamic import, and never
+  // before — which also means a view whose module is missing or throws on construction shows a
+  // placeholder saying exactly that, while the rest of the application boots unaffected. That
+  // property is worth having permanently, not only while the thing is being built.
+  //
+  // `make` receives the imported module and returns the standard pane shape: { el, update }.
+  // ==============================================================================================
   let view = 'pid';
-  const VIEWS = [
-    { id: 'pid', label: 'P&ID', hint: 'The process schematic' },
-    { id: 'curves', label: 'CURVES', hint: 'Head-capacity chart: where the operating point actually sits' },
-    { id: 'bode', label: 'BODE', hint: 'Open-loop, sensitivity and noise responses, with the margins marked where they are read' },
-    { id: 'nyquist', label: 'NYQUIST', hint: 'The same response as one curve, and how close it comes to the point of instability' },
-    { id: 'health', label: 'REPORTS', hint: 'Loop health, the event log and the run comparison' },
-    { id: 'lessons', label: 'LESSONS', hint: 'Fourteen guided exercises' },
+
+  const VIEW_GROUPS = [
+    {
+      id: 'process',
+      label: 'PROCESS',
+      views: [
+        { id: 'pid', label: 'P&ID', hint: 'The process schematic' },
+        { id: 'iso', label: 'ISOMETRIC', hint: 'The skid as a machine: flow, speed, level and vibration, animated from the live plant', mod: './iso.js', make: (m) => m.createIso(ctx, A) },
+        { id: 'curves', label: 'CURVES', hint: 'Head-capacity chart: where the operating point actually sits' },
+        { id: 'wall', label: 'WALL BOARD', hint: 'The big-board display, meant to be read from across the room', mod: './wall.js', make: (m) => m.createWall(ctx, A) },
+        { id: 'dash', label: 'DASHBOARD', hint: 'A grid of widgets you arrange yourself', mod: './dash.js', make: (m) => m.createDash(ctx, A) },
+      ],
+    },
+    {
+      id: 'control',
+      label: 'CONTROL',
+      views: [
+        { id: 'bode', label: 'BODE', hint: 'Open-loop, sensitivity and noise responses, with the margins marked where they are read' },
+        { id: 'nyquist', label: 'NYQUIST', hint: 'The same response as one curve, and how close it comes to the point of instability' },
+        { id: 'health', label: 'REPORTS', hint: 'Loop health, the event log and the run comparison' },
+        { id: 'import', label: 'YOUR DATA', hint: 'Import a trend from your own historian and run the whole analysis on it', mod: './importview.js', make: (m) => m.createImportView(ctx, A) },
+        { id: 'report', label: 'DOCUMENTS', hint: 'Shift, commissioning, loop-audit and training reports, ready to print', mod: './report.js', make: (m) => m.createReport(ctx, A) },
+      ],
+    },
+    {
+      id: 'program',
+      label: 'PROGRAM',
+      views: [
+        { id: 'ladder', label: 'LADDER', hint: 'The station program, live: power flow through the rungs as it runs', mod: './ladder.js', make: (m) => m.createLadder(ctx, A) },
+        { id: 'tags', label: 'TAGS', hint: 'Every point in the processor, with live values and forcing', mod: './tagbrowser.js', make: (m) => m.createTagBrowser(ctx, A) },
+        { id: 'recipes', label: 'RECIPES', hint: 'The step table the sequencer walks, and the logic that walks it', mod: './recipes.js', make: (m) => m.createRecipes(ctx, A) },
+      ],
+    },
+    {
+      id: 'plant',
+      label: 'PLANT',
+      views: [
+        { id: 'maint', label: 'MAINTENANCE', hint: 'Condition, life remaining, work orders and the parts to do them with', mod: './maintenance.js', make: (m) => m.createMaintenance(ctx, A) },
+        { id: 'instr', label: 'INSTRUMENTS', hint: 'What each transmitter indicates, what is actually true, and the calibration between them', mod: './instruments.js', make: (m) => m.createInstruments(ctx, A) },
+        { id: 'shift', label: 'SHIFT', hint: 'Who is on, how tired they are, and what the last shift did or did not write down', mod: './shift.js', make: (m) => m.createShift(ctx, A) },
+      ],
+    },
+    {
+      id: 'learn',
+      label: 'LEARN',
+      views: [
+        { id: 'arcade', label: 'SHIFTS', hint: 'The campaign, the daily challenge, endless mode and fault hunt', mod: './arcade.js', make: (m) => m.createArcade(ctx, A) },
+        { id: 'lessons', label: 'LESSONS', hint: 'Guided exercises with measurable objectives' },
+        { id: 'help', label: 'MANUAL', hint: 'The manual, searchable, offline', mod: './help.js', make: (m) => m.createHelp(ctx, A) },
+        { id: 'settings', label: 'SETTINGS', hint: 'Units, accessibility, audio and your stored data', mod: './settings.js', make: (m) => m.createSettings(ctx, A) },
+      ],
+    },
   ];
+
+  /** Every view, flattened, for lookup and for the keyboard cycle. */
+  const VIEWS = VIEW_GROUPS.flatMap((g) => g.views.map((v) => ({ ...v, group: g.id })));
+  /**
+   * Find a view record.
+   * @param {string} id the view id
+   * @returns {?object} the record, or null
+   */
+  const viewById = (id) => VIEWS.find((v) => v.id === id) || null;
+
+  let group = 'process';
+  // The title carries the group's own name as well as its description. A screen reader computes
+  // the accessible name from the title when there is one, so a title of "5 views" would leave the
+  // control announced as "5 views" and nothing else — which is exactly the sort of detail that
+  // makes an interface unusable without ever looking broken.
+  const GROUP_HINT = {
+    process: 'PROCESS — the plant itself: schematic, machine view, curves and boards',
+    control: 'CONTROL — the loop: frequency response, margins, health, and your own trend data',
+    program: 'PROGRAM — the station program: ladder logic, the tag database and recipes',
+    plant: 'PLANT — asset condition: maintenance, instrument calibration and the crew',
+    learn: 'LEARN — training: shifts, lessons, the manual and settings',
+  };
+  const groupBtns = VIEW_GROUPS.map((g) => h('button', {
+    class: 'chip chip--grp',
+    type: 'button',
+    text: g.label,
+    title: GROUP_HINT[g.id] || g.label,
+    onClick: () => setGroup(g.id),
+  }));
   const viewBtns = VIEWS.map((v) => h('button', {
     class: 'chip', type: 'button', text: v.label, title: v.hint, onClick: () => setView(v.id),
   }));
+
+  const viewRow = h('div', { class: 'toolbar toolbar--views' }, viewBtns);
   const toolbar = h('div', { class: 'toolbar' },
     btnRun,
     h('span', { class: 'tb__grp' }, speedBtns),
     h('span', { class: 'tb__rule' }),
     h('span', { class: 'tb__grp' }, loopBtns),
     h('span', { class: 'tb__rule' }),
-    h('span', { class: 'tb__grp' }, viewBtns),
+    h('span', { class: 'tb__grp' }, groupBtns),
     h('span', { class: 'tb__gap' }),
     h('button', { class: 'chip', type: 'button', text: 'Clear trend', onClick: () => A.clearTrend() }));
 
@@ -152,13 +242,75 @@ export function boot(host) {
   const trend = createTrend(ctx);
   const rail = createRail(ctx, A);
 
+  // The panes live in a Map keyed by view id. The six that ship in the core bundle are registered
+  // eagerly because they are cheap and one of them is the landing view; everything else arrives
+  // through `ensurePane` the first time it is selected.
+  const stageTitle = h('span', { class: 'panel__title', text: 'P&ID' });
+  const stageBody = h('div', { class: 'panel__body panel__body--stage' });
+  /** @type {Map<string, {el: HTMLElement, update: function():void}>} */
+  const panes = new Map();
+
+  /**
+   * Put a pane on the stage, hidden.
+   * @param {string} id the view id it serves
+   * @param {{el: HTMLElement, update: function():void}} pane the pane
+   * @returns {object} the pane, for chaining
+   */
+  function registerPane(id, pane) {
+    pane.el.hidden = true;
+    stageBody.appendChild(pane.el);
+    panes.set(id, pane);
+    return pane;
+  }
+
+  registerPane('pid', mimic);
+  registerPane('curves', curves);
+  // One module serves two views; both ids point at the same pane and `setView` picks its mode.
+  registerPane('bode', analysis);
+  panes.set('nyquist', analysis);
+  registerPane('health', health);
+  registerPane('lessons', lessons);
+
+  /**
+   * Build a lazy pane on first use, or hand back the one already built.
+   *
+   * A failure here is deliberately not fatal: an unavailable view says so in its own pane and the
+   * rest of the application carries on. Losing the whole workstation because one screen would not
+   * load is not how a control system behaves.
+   *
+   * @param {object} v the view record
+   * @returns {Promise<?object>} the pane, or null if the view has no module
+   */
+  async function ensurePane(v) {
+    if (panes.has(v.id)) return panes.get(v.id);
+    if (!v.mod) return null;
+
+    const holder = h('div', { class: 'pane pane--pending' },
+      h('p', { class: 'pane__msg', text: `Loading ${v.label}…` }));
+    const slot = registerPane(v.id, { el: holder, update() {} });
+    if (view === v.id) holder.hidden = false;
+
+    try {
+      const built = v.make(await import(v.mod));
+      if (!built || !built.el) throw new Error('the module did not return a pane');
+      built.el.hidden = slot.el.hidden;
+      stageBody.replaceChild(built.el, slot.el);
+      panes.set(v.id, built);
+      return built;
+    } catch (err) {
+      holder.classList.add('pane--missing');
+      holder.firstChild.textContent = `${v.label} is not available in this build.`;
+      holder.appendChild(h('p', { class: 'pane__detail', text: String((err && err.message) || err) }));
+      return slot;
+    }
+  }
+
   const stage = h('section', { class: 'panel panel--stage' },
     h('header', { class: 'panel__head' },
-      h('span', { class: 'panel__title', text: 'PROCESS' }),
+      stageTitle,
       h('span', { class: 'panel__tools' },
         h('span', { class: 'panel__note', id: 'stageNote' }))),
-    h('div', { class: 'panel__body panel__body--stage' },
-      mimic.el, curves.el, analysis.el, health.el, lessons.el));
+    stageBody);
 
   const trendPanel = h('section', { class: 'panel panel--trend' },
     h('header', { class: 'panel__head' },
@@ -174,25 +326,56 @@ export function boot(host) {
     h('span', { class: 'tb__gap' }),
     h('span', { class: 'status__diag' }));
 
-  host.append(h('div', { class: 'shell' }, titlebar, toolbar, banner, workspace, status), toastLayer);
+  host.append(h('div', { class: 'shell' }, titlebar, toolbar, viewRow, banner, workspace, status),
+    toastLayer);
+
+  /** Views that size themselves; everything else has to be told how much room it may have. */
+  const SELF_SIZING = new Set(['pid', 'curves', 'iso']);
 
   /**
-   * Switch the stage between the schematic and the curve chart.
-   * @param {string} v 'pid' or 'curves'
+   * Show one view and hide the rest, building it first if it has never been shown.
+   * @param {string} v the view id
    * @returns {void}
    */
   function setView(v) {
+    const rec = viewById(v);
+    if (!rec) return;
     view = v;
-    mimic.el.hidden = v !== 'pid';
-    curves.el.hidden = v !== 'curves';
-    analysis.el.hidden = v !== 'bode' && v !== 'nyquist';
-    health.el.hidden = v !== 'health';
-    lessons.el.hidden = v !== 'lessons';
+    group = rec.group;
+
+    // `bode` and `nyquist` share one pane, so hide by pane rather than by id or the shared pane
+    // would be hidden by the sibling id that is not current.
+    const wanted = panes.get(v) || null;
+    for (const [id, pane] of panes) {
+      if (id === 'nyquist') continue;
+      pane.el.hidden = pane !== wanted;
+    }
     if (v === 'bode' || v === 'nyquist') analysis.el.setMode(v === 'bode' ? 'BODE' : 'NYQUIST');
-    // The schematic sizes itself; the other panes have to be told how much room they may have.
-    cls(stage, 'is-tall', v !== 'pid' && v !== 'curves');
-    for (let i = 0; i < VIEWS.length; i += 1) cls(viewBtns[i], 'is-on', VIEWS[i].id === v);
+    cls(stage, 'is-tall', !SELF_SIZING.has(v));
+    setText(stageTitle, rec.label);
+
+    for (let i = 0; i < VIEWS.length; i += 1) {
+      const shown = VIEWS[i].group === group;
+      viewBtns[i].hidden = !shown;
+      cls(viewBtns[i], 'is-on', VIEWS[i].id === v);
+    }
+    for (let i = 0; i < VIEW_GROUPS.length; i += 1) {
+      cls(groupBtns[i], 'is-on', VIEW_GROUPS[i].id === group);
+    }
+
+    if (!panes.has(v)) ensurePane(rec);
   }
+
+  /**
+   * Switch to a group, landing on its first view.
+   * @param {string} g the group id
+   * @returns {void}
+   */
+  function setGroup(g) {
+    const grp = VIEW_GROUPS.find((x) => x.id === g);
+    if (grp) setView(grp.views[0].id);
+  }
+
   setView('pid');
 
   // ---- event markers on the trend -------------------------------------------------------------
@@ -211,8 +394,13 @@ export function boot(host) {
     else if (ev.key === 'a' || ev.key === 'A') A.ackAlarms();
     else if (ev.key >= '1' && ev.key <= '3') A.setSpeed(SPEEDS[Number(ev.key) - 1]);
     else if (ev.key === 'p' || ev.key === 'P') {
-      const i = VIEWS.findIndex((v) => v.id === view);
-      setView(VIEWS[(i + 1) % VIEWS.length].id);
+      // Within the group, because cycling twenty views one key-press at a time is not navigation.
+      const inGroup = VIEWS.filter((v) => v.group === group);
+      const i = inGroup.findIndex((v) => v.id === view);
+      setView(inGroup[(i + 1) % inGroup.length].id);
+    } else if (ev.key === 'g' || ev.key === 'G') {
+      const i = VIEW_GROUPS.findIndex((g) => g.id === group);
+      setGroup(VIEW_GROUPS[(i + 1) % VIEW_GROUPS.length].id);
     }
   });
 
@@ -278,11 +466,8 @@ export function boot(host) {
     // --- the panes ---------------------------------------------------------------------------
     // Only the visible one is repainted. Each pane is a few thousand canvas or DOM operations,
     // and five of them a frame is the difference between sixty frames a second and a slideshow.
-    if (view === 'pid') mimic.update();
-    else if (view === 'curves') curves.update();
-    else if (view === 'bode' || view === 'nyquist') analysis.update();
-    else if (view === 'health') health.update();
-    else if (view === 'lessons') lessons.update();
+    const shown = panes.get(view);
+    if (shown) shown.update();
     trend.update();
     rail.update();
 

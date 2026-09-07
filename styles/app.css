@@ -951,3 +951,63 @@ circle.lamp.is-alarm { fill: var(--lamp-alarm); }
   .reports > .card:first-child { grid-column: auto; }
   .lessons { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ==============================================================================================
+   THE TWO-LEVEL VIEW SELECTOR
+
+   Six views fitted on one row. Twenty do not. The toolbar now carries the GROUP, and a second
+   strip beneath it carries the views within that group — which keeps the row that is always
+   visible short, and keeps the number of clicks to any view at two.
+   ============================================================================================== */
+
+.toolbar--views {
+  min-height: 26px;
+  padding-block: 0;
+  gap: var(--sp-1);
+  border-top: none;
+  background: color-mix(in srgb, var(--panel) 60%, var(--screen));
+}
+
+.chip--grp {
+  font-weight: 600;
+  letter-spacing: var(--ls-caps);
+}
+
+/* ==============================================================================================
+   LAZY PANES
+
+   A view is built the first time it is opened. Between the click and the module arriving there is
+   a pane saying so, and if the module never arrives there is a pane saying that instead. Neither
+   state is an error page: the rest of the workstation is still running behind it.
+   ============================================================================================== */
+
+.pane--pending,
+.pane--missing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  height: 100%;
+  min-height: 180px;
+  padding: var(--sp-6);
+  text-align: center;
+}
+
+.pane__msg {
+  margin: 0;
+  font-size: var(--fs-7);
+  letter-spacing: var(--ls-caps);
+  color: var(--ink-2);
+}
+
+.pane--missing .pane__msg { color: var(--warn); }
+
+.pane__detail {
+  margin: 0;
+  max-width: 46ch;
+  font-family: var(--font-mono);
+  font-size: var(--fs-9);
+  line-height: 1.5;
+  color: var(--ink-3);
+}

@@ -8,3 +8,5 @@ Thumbs.db
 
 # Agent scratch: throwaway probe scripts written while checking a numerical claim.
 .probe/
+probe.tmp.*
+*.tmp.mjs
