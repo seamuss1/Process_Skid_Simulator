@@ -169,6 +169,23 @@ export function createSim(patch) {
     trend: createRing(TREND_CHANNELS, config.trendRows),
     bus: createBus(),
 
+    // ------------------------------------------------------------------------------------------
+    // THE TWO SUPERVISORY SLOTS.
+    //
+    // A real skid has a PLC above the loop controller and, in this build, a game layer watching
+    // what the operator does with both. Neither belongs in `src/core`: the layering runs
+    // process -> control -> core -> {plc, game} -> ui, and core importing either of them would
+    // close the loop and make the simulator unloadable without its user interface.
+    //
+    // So core knows only that something MIGHT be sitting in these slots and calls a single method
+    // on it if it is. `src/ui/app.js` is what puts anything there. A headless test gets a plain
+    // simulator with both slots null and no behaviour change whatsoever.
+    // ------------------------------------------------------------------------------------------
+    /** The ladder processor, or null. Scanned at the TOP of each controller scan. */
+    plc: null,
+    /** The game session, or null. Scanned at the BOTTOM, after the loop has acted. */
+    game: null,
+
     /** The identified process model, or null until a test produces one. */
     model: null,
     /** Where the model came from, for the panel. */
@@ -373,6 +390,13 @@ function controllerScan(ctx, scan_s) {
     config, plant, pid, pidCfg, strat, stratCfg, staging, stagingCfg, autotune, stepTest, sweep, run,
   } = ctx;
   run.diag.scans += 1;
+
+  // --- the supervisory processor ---------------------------------------------------------------
+  // Ahead of the loop controller, because that is where it sits on a real skid: the PLC reads the
+  // plant, runs its rungs and writes its outputs — which may include this controller's setpoint,
+  // its mode, and which machines are called — and only then does the loop execute against whatever
+  // it was handed. Running it afterwards would put every supervisory decision one scan late.
+  if (ctx.plc) ctx.plc.onScan(ctx, scan_s);
 
   const prevPv = pid.pvRaw;
   const pv = measuredPV(plant, run.mode);
@@ -600,6 +624,14 @@ function controllerScan(ctx, scan_s) {
       ctx.bus.emit('lesson', m);
     }
   }
+
+  // --- the game layer --------------------------------------------------------------------------
+  // Last, so it scores the scan that just happened rather than the one about to: by here the
+  // output has been written, the alarms have been rebuilt and the energy has been accumulated, so
+  // everything the scorer reads is the settled result of this scan and not a half-updated view of
+  // it. It is also the only place a director can fire an upset and be sure the loop will see it on
+  // the very next scan.
+  if (ctx.game) ctx.game.onScan(ctx, scan_s);
 }
 
 /** Cache for the staging energy prediction, which is far too expensive to do every scan. */

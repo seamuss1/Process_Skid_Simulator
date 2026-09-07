@@ -139,6 +139,27 @@ export function createTrend(ctx) {
    * @param {string} label one line
    * @returns {void}
    */
+  // ---- painting hooks -------------------------------------------------------------------------
+  // Two, not one, and the difference matters: a tolerance band painted OVER the trace dulls the
+  // very line the operator is reading, so it goes underneath, while a score marker painted
+  // underneath disappears behind the pen, so it goes on top.
+  let underlay = null;
+  let overlay = null;
+
+  /**
+   * Paint beneath the pens each frame, with the trend's own coordinate mapping.
+   * @param {?function(CanvasRenderingContext2D, object):void} fn the painter, or null to clear
+   * @returns {void}
+   */
+  function setUnderlay(fn) { underlay = typeof fn === 'function' ? fn : null; }
+
+  /**
+   * Paint over the pens each frame, with the trend's own coordinate mapping.
+   * @param {?function(CanvasRenderingContext2D, object):void} fn the painter, or null to clear
+   * @returns {void}
+   */
+  function setOverlay(fn) { overlay = typeof fn === 'function' ? fn : null; }
+
   function mark(kind, label) {
     marks.push({ t_s: ctx.run.t_s, kind, label });
     if (marks.length > 240) marks.shift();
@@ -308,6 +329,43 @@ export function createTrend(ctx) {
       g.globalAlpha = 1;
     }
 
+    // --- painting hooks: the map -----------------------------------------------------------------
+    // Rebuilt each frame because every field in it moves: the window scrolls, the lane autoscales
+    // and the canvas resizes. It is one small object per frame, which is the right trade against
+    // handing out four closures that would each have to be rebuilt anyway.
+    const map = {
+      /**
+       * Pixel x for a simulated time.
+       * @param {number} t_s simulated seconds
+       * @returns {number} device-independent pixels
+       */
+      xForT: (t_s) => xOf(t_s),
+      /**
+       * Pixel y for a value on the measurement lane — the lane the controlled variable lives on.
+       * @param {number} v the value, in engineering units
+       * @returns {number} device-independent pixels
+       */
+      yForV: (v) => yOf(0, v),
+      /** The plot rectangle. */
+      rect: { x: padL, y: padT, w: plotW, h: plotH },
+      /** The measurement lane's own vertical bounds. */
+      lane: { y0: lanes[0].y0, y1: lanes[0].y1 },
+      /** The visible time window, simulated seconds. */
+      t0_s: tStart,
+      t1_s: tEnd,
+      /** The engineering units of the measurement lane. */
+      eu,
+    };
+
+    if (underlay) {
+      g.save();
+      g.beginPath();
+      g.rect(padL, lanes[0].y0, plotW, lanes[0].y1 - lanes[0].y0);
+      g.clip();
+      underlay(g, map);
+      g.restore();
+    }
+
     // --- pens ----------------------------------------------------------------------------------
     g.lineJoin = 'round';
     g.lineCap = 'round';
@@ -374,7 +432,15 @@ export function createTrend(ctx) {
       const v = n > 0 ? at(p.ch, readIdx) : NaN;
       setText(r.val, `${num(v, p.dp)} ${p.unit}`);
     }
+
+    // The overlay is NOT clipped to the measurement lane: a score marker or a telegraph flag is
+    // allowed to sit in the margin, which is exactly where there is room for it.
+    if (overlay) {
+      g.save();
+      overlay(g, map);
+      g.restore();
+    }
   }
 
-  return { el, update, mark };
+  return { el, update, mark, setUnderlay, setOverlay };
 }
