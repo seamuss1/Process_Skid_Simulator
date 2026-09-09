@@ -22,6 +22,7 @@ import { createAnalysis } from './analysis.js';
 import { createHealth } from './health.js';
 import { createLesson } from './lesson.js';
 import { createHud } from './hud.js';
+import { createRegistry, createPalette, paletteCommands } from './keys.js';
 import {
   createGame, gameView, startMission, startEndless, startDaily, startFaultHunt,
   abortGame, submitDiagnosis, replayLast,
@@ -214,10 +215,7 @@ export function boot(host) {
       label: 'PROCESS',
       views: [
         { id: 'pid', label: 'P&ID', hint: 'The process schematic' },
-        { id: 'iso', label: 'ISOMETRIC', hint: 'The skid as a machine: flow, speed, level and vibration, animated from the live plant', mod: './iso.js', make: (m) => m.createIso(ctx, A) },
         { id: 'curves', label: 'CURVES', hint: 'Head-capacity chart: where the operating point actually sits' },
-        { id: 'wall', label: 'WALL BOARD', hint: 'The big-board display, meant to be read from across the room', mod: './wall.js', make: (m) => m.createWall(ctx, A) },
-        { id: 'dash', label: 'DASHBOARD', hint: 'A grid of widgets you arrange yourself', mod: './dash.js', make: (m) => m.createDash(ctx, A) },
       ],
     },
     {
@@ -227,26 +225,6 @@ export function boot(host) {
         { id: 'bode', label: 'BODE', hint: 'Open-loop, sensitivity and noise responses, with the margins marked where they are read' },
         { id: 'nyquist', label: 'NYQUIST', hint: 'The same response as one curve, and how close it comes to the point of instability' },
         { id: 'health', label: 'REPORTS', hint: 'Loop health, the event log and the run comparison' },
-        { id: 'import', label: 'YOUR DATA', hint: 'Import a trend from your own historian and run the whole analysis on it', mod: './importview.js', make: (m) => m.createImportView(ctx, A) },
-        { id: 'report', label: 'DOCUMENTS', hint: 'Shift, commissioning, loop-audit and training reports, ready to print', mod: './report.js', make: (m) => m.createReport(ctx, A) },
-      ],
-    },
-    {
-      id: 'program',
-      label: 'PROGRAM',
-      views: [
-        { id: 'ladder', label: 'LADDER', hint: 'The station program, live: power flow through the rungs as it runs', mod: './ladder.js', make: (m) => m.createLadder(ctx, A) },
-        { id: 'tags', label: 'TAGS', hint: 'Every point in the processor, with live values and forcing', mod: './tagbrowser.js', make: (m) => m.createTagBrowser(ctx, A) },
-        { id: 'recipes', label: 'RECIPES', hint: 'The step table the sequencer walks, and the logic that walks it', mod: './recipes.js', make: (m) => m.createRecipes(ctx, A) },
-      ],
-    },
-    {
-      id: 'plant',
-      label: 'PLANT',
-      views: [
-        { id: 'maint', label: 'MAINTENANCE', hint: 'Condition, life remaining, work orders and the parts to do them with', mod: './maintenance.js', make: (m) => m.createMaintenance(ctx, A) },
-        { id: 'instr', label: 'INSTRUMENTS', hint: 'What each transmitter indicates, what is actually true, and the calibration between them', mod: './instruments.js', make: (m) => m.createInstruments(ctx, A) },
-        { id: 'shift', label: 'SHIFT', hint: 'Who is on, how tired they are, and what the last shift did or did not write down', mod: './shift.js', make: (m) => m.createShift(ctx, A) },
       ],
     },
     {
@@ -255,8 +233,6 @@ export function boot(host) {
       views: [
         { id: 'arcade', label: 'SHIFTS', hint: 'The campaign, the daily challenge, endless mode and fault hunt', mod: './arcade.js', make: (m) => m.createArcade(ctx, A) },
         { id: 'lessons', label: 'LESSONS', hint: 'Guided exercises with measurable objectives' },
-        { id: 'help', label: 'MANUAL', hint: 'The manual, searchable, offline', mod: './help.js', make: (m) => m.createHelp(ctx, A) },
-        { id: 'settings', label: 'SETTINGS', hint: 'Units, accessibility, audio and your stored data', mod: './settings.js', make: (m) => m.createSettings(ctx, A) },
       ],
     },
   ];
@@ -409,8 +385,43 @@ export function boot(host) {
     h('span', { class: 'tb__gap' }),
     h('span', { class: 'status__diag' }));
 
-  host.append(h('div', { class: 'shell' }, titlebar, toolbar, viewRow, banner, workspace, status),
-    toastLayer);
+  // ---- the command palette --------------------------------------------------------------------
+  // Every action on the bound surface, searchable, on one keystroke. The rig has grown a lot of
+  // controls across five rail tabs and several screens, and a palette is the difference between
+  // knowing a feature exists and being able to reach it.
+  const keyReg = createRegistry();
+
+  // The palette enumerates whatever it is handed, so it is handed the ACTIONS and not the queries.
+  // `gameView` and `summary` are things the interface asks, not things an operator does, and a
+  // command called "Game view" that appears to run and visibly does nothing is worse than no
+  // command at all. `raw`, `game` and `profile` are plumbing and are not callable.
+  const NOT_A_COMMAND = new Set([
+    'summary', 'tuningCandidates', 'deleteRun', 'toast', 'raw', 'game', 'profile', 'gameView',
+  ]);
+  const paletteActions = {};
+  for (const name of Object.keys(A)) {
+    if (!NOT_A_COMMAND.has(name) && typeof A[name] === 'function') paletteActions[name] = A[name];
+  }
+
+  const palette = createPalette({
+    A: paletteActions,
+    reg: keyReg,
+    // View switching is a property of the shell, not of the sim, so it is contributed here rather
+    // than living in the action surface.
+    extra: () => VIEWS.map((v) => ({
+      id: `view:${v.id}`,
+      label: `Go to ${v.label}`,
+      section: 'View',
+      runnable: true,
+      run: () => setView(v.id),
+    })),
+  });
+
+  host.append(
+    h('div', { class: 'shell' }, titlebar, toolbar, viewRow, banner, workspace, status),
+    palette.el,
+    toastLayer,
+  );
 
   /** Views that size themselves; everything else has to be told how much room it may have. */
   const SELF_SIZING = new Set(['pid', 'curves', 'iso']);
@@ -472,7 +483,18 @@ export function boot(host) {
   // ---- keyboard ---------------------------------------------------------------------------------
   globalThis.addEventListener('keydown', (ev) => {
     const t = ev.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
+      // One exception: the palette's own field must still answer Ctrl-K and Escape, or the only
+      // way out of it is the mouse.
+      const escaping = ev.key === 'Escape' || ((ev.ctrlKey || ev.metaKey) && (ev.key === 'k' || ev.key === 'K'));
+      if (!escaping) return;
+    }
+    if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'k' || ev.key === 'K')) {
+      ev.preventDefault();
+      if (palette.isOpen()) palette.close(); else palette.open();
+      return;
+    }
+    if (ev.key === 'Escape' && palette.isOpen()) { ev.preventDefault(); palette.close(); return; }
     if (ev.key === ' ') { ev.preventDefault(); A.togglePause(); }
     else if (ev.key === 'a' || ev.key === 'A') A.ackAlarms();
     else if (ev.key >= '1' && ev.key <= '3') A.setSpeed(SPEEDS[Number(ev.key) - 1]);

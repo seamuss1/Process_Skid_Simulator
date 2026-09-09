@@ -1011,3 +1011,104 @@ circle.lamp.is-alarm { fill: var(--lamp-alarm); }
   line-height: 1.5;
   color: var(--ink-3);
 }
+
+/* ==============================================================================================
+   THE COMMAND PALETTE
+
+   The rig has grown five rail tabs, three view groups and several dozen actions. A palette is the
+   difference between a feature existing and a feature being reachable, so it sits above
+   everything on Ctrl-K and searches the whole bound action surface plus the views.
+
+   It is deliberately not a modal: it takes focus and closes on Escape, but it does not trap, and
+   the plant keeps running behind it. Freezing a process because someone opened a menu would be a
+   strange thing for a control system to do.
+   ============================================================================================== */
+
+.palette {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+  /* Derived from --overlay rather than used neat: that token is fully opaque, and a palette that
+     blanks the plant would hide a running process behind a menu. Seventy percent dims the shell
+     enough to put the focus on the list while leaving the trend, the alarms and the machine states
+     readable behind it — which is the whole reason this is not a modal. */
+  background: color-mix(in srgb, var(--overlay) 70%, transparent);
+}
+
+.palette__box {
+  width: min(560px, calc(100vw - 2 * var(--sp-5)));
+  display: flex;
+  flex-direction: column;
+  max-height: 60vh;
+  border: 1px solid var(--edge);
+  border-radius: var(--r-panel);
+  background: var(--panel);
+  box-shadow: var(--shadow-window);
+  overflow: hidden;
+}
+
+.palette__top { padding: var(--sp-3); border-bottom: 1px solid var(--edge-soft); }
+
+.palette__input {
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--fld-edge);
+  border-radius: var(--r-field);
+  background: var(--fld-bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--fs-13);
+}
+
+.palette__input:focus { outline: var(--focus-ring); outline-offset: 1px; }
+
+.palette__list { overflow-y: auto; padding: var(--sp-1); }
+
+.palette__row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-2);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: var(--fs-11);
+  text-align: left;
+  cursor: pointer;
+}
+
+.palette__row:hover { background: var(--hover-tint); }
+
+.palette__row.is-on {
+  background: var(--sel-bg);
+  color: var(--sel-ink);
+}
+
+/* Not hidden, greyed: a command that needs a value typed on a panel first is worth SEEING, because
+   knowing it exists is half of what the palette is for. The title says what it wants. */
+.palette__row.is-off { opacity: 0.45; cursor: not-allowed; }
+
+.palette__label { flex: 1 1 auto; }
+
+.palette__keys {
+  flex: 0 0 auto;
+  font-family: var(--font-num);
+  font-size: var(--fs-9);
+  letter-spacing: var(--ls-num);
+  color: var(--ink-3);
+}
+
+.palette__none,
+.palette__foot {
+  padding: var(--sp-3);
+  font-size: var(--fs-10);
+  color: var(--ink-3);
+}
+
+.palette__foot { border-top: 1px solid var(--edge-soft); }

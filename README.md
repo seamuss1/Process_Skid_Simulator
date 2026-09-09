@@ -230,18 +230,37 @@ set of settings as a session file you can load back.
 
 ```
 index.html            the shell; boots src/ui/app.js and nothing else
-styles/               tokens.css (one graphite palette) and app.css
+styles/               tokens.css (one graphite palette), app.css, game.css
 src/
   core/util.js        maths, seeded noise, ring buffers, the event bus
   core/sim.js         the tick order, the clocks, and every action an operator may take
+  core/perf.js        the frame-budget manager: what gets skipped when a frame runs long
   data/config.js      the plant as a frozen record: what was bought and how it was ranged
   process/            fluid, pump, pipe, valve, motor, plant, alarms — physics, no control
+                      plus transient (water hammer), thermal, network, fluids2 (two-phase)
   control/            pid, strategy, staging, autotune, analysis, diagnostics, scenario, lessons
-  io/export.js        CSV, session files, the run library
-  ui/                 dom, mimic, curves, trend, analysis, health, lesson, panels, app
+  game/               rng, profile, score, missions, director, faults, replay, audio, badges,
+                      session — the shift game, above core and below ui
+  plc/                tags, iomap, model, instructions, solver, library, recipe, compile —
+                      an IEC-61131 ladder runtime with a live power-flow scan
+  realism/            config, wear, calibration, consumables, operators — all optional, all off
+  rigs/level.js       a surge-drum level rig, for averaging level control
+  content/            curriculum, scenarios2, reference — additional teaching material
+  io/                 export (CSV, sessions, runs), importdata (historian trends), interop
+  ui/                 dom, mimic, curves, trend, analysis, health, lesson, panels, app,
+                      hud, arcade, gamepanel, anim, keys, a11y, theme, tour, pwa
 tools/serve.js        a zero-dependency static server
-tests/                174 assertions across nine suites
+tools/coverage.js     an instrumented run that reports what the suite never reaches
+tests/                844 assertions across thirty-four suites
 ```
+
+### What has a screen, and what does not
+
+The game layer, the trend HUD and the shifts board are wired in and reachable. The **PLC**,
+**realism** and **alternate-rig** layers are complete, tested libraries with no user interface yet —
+`src/plc/` will parse, lint and run a ladder program against the live plant today, and
+`src/realism/` will age a machine and drift a transmitter, but neither has an editor or a panel. If
+you want them now, drive them from the console: `window.__skid` is the sim context.
 
 The layering is strict and one-directional: `process/` never imports `control/`, `control/` never
 imports `ui/`, and nothing outside `ui/` touches the DOM. Every module states what it is for and
@@ -260,6 +279,8 @@ implement.
 1. the plant integrates on the LAST scan's outputs        (50 Hz)
 2. on a scan boundary                                     (5 Hz, adjustable)
      read instruments
+     → optional realism: wear and instrument drift        (ctx.realism, null by default)
+     → the supervisory ladder processor                   (ctx.plc, null by default)
      → setpoint reset and gain scheduling
      → the primary controller
      → feedforward
@@ -268,8 +289,17 @@ implement.
      → the sequence starts and stops machines
      → the final element is written
      → alarms, diagnostics, scorecard, lesson
+     → the game session scores the scan                   (ctx.game)
 3. log the trend
 ```
+
+The three supervisory slots are the only thing `src/core` knows about the layers above it: it calls
+one method on whatever is in each and imports none of them, so a headless simulator with all three
+null is bit-for-bit the rig it always was. The order is not arbitrary. Realism goes first because it
+changes both the machine and the measurement, and everything downstream this scan has to read the
+changed versions. The processor goes above the loop because that is where a supervisory PLC sits on
+a real skid — running it afterwards would put every staging decision one scan late. The game goes
+last, so it grades a settled scan rather than a half-updated one.
 
 The controller never sees a measurement that its own current output helped produce. Getting that
 backwards makes every tuning look better than it is.
@@ -295,7 +325,9 @@ question with an answer.
 | `Space` | run / freeze |
 | `A` | acknowledge alarms |
 | `1` `2` `3` | time compression |
-| `P` | cycle the view |
+| `P` | cycle the view within its group |
+| `G` | move to the next view group |
+| `Ctrl`/`Cmd` `K` | the command palette: every action, searchable |
 
 ---
 
