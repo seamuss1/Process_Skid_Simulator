@@ -39,6 +39,7 @@ import {
 } from '../io/export.js';
 import { TREND_UNITS } from '../core/sim.js';
 import { LOOP_EU } from '../data/config.js';
+import { createGamePanel } from './gamepanel.js';
 
 // ==============================================================================================
 // RUN — the faceplate, the setpoint, the mode
@@ -978,11 +979,19 @@ function exportPanel(ctx, A) {
  * @returns {{el:HTMLElement, update:Function, show:Function}} the rail
  */
 export function createRail(ctx, A) {
+  // The game panel is built by its own module and returns the `{el, update}` pair the rest of the
+  // application uses, whereas a rail panel is an element carrying its own `update`. One adapter
+  // here is better than bending either convention to meet the other.
+  const gp = createGamePanel(ctx, A);
+  const gamePanel = gp.el;
+  gamePanel.update = gp.update;
+
   const groups = [
     { id: 'run', label: 'RUN', panels: [faceplate(ctx, A), strategyPanel(ctx, A)] },
     { id: 'tune', label: 'TUNE', panels: [tuningPanel(ctx, A), identifyPanel(ctx, A)] },
     { id: 'plant', label: 'PLANT', panels: [stagingPanel(ctx, A), loadPanel(ctx, A), machinesPanel(ctx, A)] },
     { id: 'test', label: 'TEST', panels: [scorePanel(ctx, A), energyPanel(ctx, A), exportPanel(ctx, A)] },
+    { id: 'game', label: 'GAME', panels: [gamePanel] },
   ];
   let active = 'run';
 

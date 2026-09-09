@@ -21,6 +21,13 @@ import { createRail } from './panels.js';
 import { createAnalysis } from './analysis.js';
 import { createHealth } from './health.js';
 import { createLesson } from './lesson.js';
+import { createHud } from './hud.js';
+import {
+  createGame, gameView, startMission, startEndless, startDaily, startFaultHunt,
+  abortGame, submitDiagnosis, replayLast,
+} from '../game/session.js';
+import { loadProfile, saveProfile, resetProfile } from '../game/profile.js';
+import { createAudio, setEnabled, setVolume } from '../game/audio.js';
 
 /** Time-compression choices offered on the toolbar. */
 const SPEEDS = [1, 5, 20];
@@ -63,6 +70,36 @@ function bindActions(ctx, toast) {
 }
 
 /**
+ * The page's own storage, or null when it cannot be used.
+ *
+ * Reading `localStorage` THROWS rather than returning null in a browser set to block site data,
+ * and in a few embedding contexts, so the access itself has to be guarded — and a probe read is
+ * needed as well, because the property can exist and still throw on first use. Everything
+ * downstream already treats a null store as "remember nothing", so this is the whole of it.
+ *
+ * @returns {?object} a Storage, or null
+ */
+function pageStorage() {
+  try {
+    const s = globalThis.localStorage;
+    if (!s) return null;
+    s.getItem('skid.probe');
+    return s;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * An AudioContext factory, or null on a page that has no Web Audio.
+ * @returns {?function(): object} the factory
+ */
+function audioFactory() {
+  const Ctor = globalThis.AudioContext || globalThis.webkitAudioContext;
+  return typeof Ctor === 'function' ? () => new Ctor() : null;
+}
+
+/**
  * Boot the application into a host element.
  * @param {HTMLElement} host the mount point; its children are replaced
  * @returns {object} the sim context, for the console
@@ -87,6 +124,43 @@ export function boot(host) {
     while (toastLayer.children.length > 5) toastLayer.firstChild.remove();
   }
   const A = bindActions(ctx, toast);
+
+  // ---- the game layer -------------------------------------------------------------------------
+  // `src/core/sim.js` scans whatever is in `ctx.game` at the bottom of every controller scan and
+  // knows nothing else about it. This is the only place the two halves meet.
+  const storage = pageStorage();
+  const profile = loadProfile(storage);
+  const audio = createAudio(audioFactory());
+  const game = createGame({ sim, storage, audio, profile });
+  ctx.game = game;
+
+  /**
+   * Wrap a game action so a refusal surfaces as a toast, exactly as a sim action's does.
+   * @param {Function} fn the action, taking `(game, ctx, ...args)`
+   * @returns {Function} the bound, wrapped action
+   */
+  const gameAction = (fn) => (...args) => {
+    const res = fn(game, ctx, ...args);
+    if (res && res.ok === false) toast(res.reason, 'warn');
+    return res;
+  };
+
+  A.game = game;
+  A.profile = profile;
+  A.gameView = () => gameView(game);
+  A.startMission = gameAction(startMission);
+  A.startEndless = gameAction(startEndless);
+  A.startDaily = gameAction(startDaily);
+  A.startFaultHunt = gameAction(startFaultHunt);
+  A.abortGame = gameAction(abortGame);
+  A.submitDiagnosis = gameAction(submitDiagnosis);
+  A.replayLast = gameAction(replayLast);
+  A.saveProfile = () => saveProfile(storage, profile);
+  A.resetProfile = () => { resetProfile(profile); saveProfile(storage, profile); };
+  A.setAudio = (on, volume) => {
+    setEnabled(audio, on !== false);
+    if (Number.isFinite(volume)) setVolume(audio, volume);
+  };
 
   // ---- title strip --------------------------------------------------------------------------
   const clockEl = h('span', { class: 'tb__clock', text: '0:00:00' });
@@ -312,10 +386,19 @@ export function boot(host) {
         h('span', { class: 'panel__note', id: 'stageNote' }))),
     stageBody);
 
+  // The HUD lives in the trend's own header, because the trend IS the play field and a score
+  // that reads somewhere else asks the player to look away from the thing they are steering.
+  const hud = createHud(ctx, A);
   const trendPanel = h('section', { class: 'panel panel--trend' },
-    h('header', { class: 'panel__head' },
-      h('span', { class: 'panel__title', text: 'TREND' })),
+    h('header', { class: 'panel__head panel__head--hud' },
+      h('span', { class: 'panel__title', text: 'TREND' }),
+      hud.el),
     h('div', { class: 'panel__body panel__body--trend' }, trend.el));
+
+  // UNDER the pens, not over them. The tolerance band is the largest thing the HUD paints and the
+  // trace has to stay the crispest thing on the chart — which is the reason the trend offers two
+  // painting slots rather than one.
+  trend.setUnderlay((g2d, map) => hud.overlay(g2d, map));
 
   const workspace = h('div', { class: 'workspace' },
     h('div', { class: 'col col--main' }, stage, trendPanel),
@@ -468,6 +551,13 @@ export function boot(host) {
     // and five of them a frame is the difference between sixty frames a second and a slideshow.
     const shown = panes.get(view);
     if (shown) shown.update();
+    // The HUD builds itself hidden and leaves the decision to show it to whoever mounted it —
+    // which is right, because only the shell knows whether a run is on. It appears the moment a
+    // shift is armed and goes away again the moment it is over, so the trend header is a plain
+    // header in free play.
+    const gv = A.gameView();
+    hud.setVisible(!!gv && gv.phase !== 'IDLE');
+    hud.update(gv);
     trend.update();
     rail.update();
 

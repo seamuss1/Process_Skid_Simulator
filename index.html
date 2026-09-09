@@ -9,6 +9,11 @@
 
 <link rel="stylesheet" href="./styles/tokens.css">
 <link rel="stylesheet" href="./styles/app.css">
+<!-- The game layer's styles: the HUD over the trend, the shifts board and the GAME rail tab.
+     The id is load-bearing: src/ui/arcade.js is a lazily imported view and injects its own
+     stylesheet if it cannot find one already on the page, so carrying the link here with the
+     id it looks for is what stops it asking the server for a second copy. -->
+<link id="arcade-css" rel="stylesheet" href="./styles/game.css">
 <!-- Favicon: two pump circles on a common header, on a graphite plate. The palette is the
      HMI-2012 one — --screen behind, --panel plate, a 1px --edge border, --ok for the running
      machine and --ink-3 for the standby. -->
