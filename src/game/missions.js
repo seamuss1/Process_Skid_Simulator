@@ -49,7 +49,7 @@
  */
 
 import { deepFreeze } from '../core/util.js';
-import { LOOP, LOOP_EU } from '../data/config.js';
+import { DEFAULT_SP, LOOP, LOOP_EU } from '../data/config.js';
 
 /**
  * The tiers, in the order they are played. `feature` names the one idea the tier exists to teach,
@@ -263,14 +263,22 @@ function act(action, ...args) {
 
 /**
  * Shorthand for a scripted upset.
+ *
+ * THE THIRD ARGUMENT IS CALLED `severity` AND NOT `mag` ON PURPOSE. It lands in the record as
+ * `mag`, because that is the field `director.js` reads, but the number is a fraction of the
+ * upset's own physical range in -1..+1 — never bar, never m3/h, and never a delta in engineering
+ * units. Writing the supervisor's order as `-0.3` meaning "0.3 bar down" reads as severity 0.3
+ * and moves the header 0.72 bar instead, which is the mistake this parameter name and
+ * {@link validateMissions}'s setpoint walk both exist to catch.
+ *
  * @param {number} at_s seconds from the start of the shift
  * @param {string} upset an id from {@link UPSET_MAG}
- * @param {number} mag the magnitude, interpreted per {@link UPSET_MAG}
+ * @param {number} severity the magnitude as a severity in -1..+1, per {@link UPSET_MAG}
  * @param {string} label what the ticker says when it telegraphs, in plant language
- * @returns {object} the script entry
+ * @returns {{at_s:number, upset:string, mag:number, label:string}} the script entry
  */
-function up(at_s, upset, mag, label) {
-  return { at_s, upset, mag, label };
+function up(at_s, upset, severity, label) {
+  return { at_s, upset, mag: severity, label };
 }
 
 /** Put the rig in manual on one machine, with the lag locked out. The tier-1 starting state. */
@@ -295,6 +303,20 @@ const SOLO_AUTO = [
  *
  * Read the rows in order: `requires` is a straight chain, so the table's order IS the play order
  * and there is no separate ordering field to fall out of step with it.
+ *
+ * THE THREE GRAPH FIELDS, because they are easy to confuse with each other:
+ *
+ *   requires  mission ids. Which shifts must be CLEARED before this one is offered.
+ *   needs     feature ids. Which unlocks the shift is BUILT AROUND, and therefore which ones an
+ *             earlier mission has to have granted. A shift may need a feature its setup never
+ *             names — INNER_LOOP starts on SINGLE and asks the player to build the cascade — so
+ *             this is authored, and {@link missionNeeds} adds everything the setup gives away on
+ *             top of it.
+ *   unlocks   feature ids. What clearing this shift hands over, exactly once in the campaign.
+ *
+ * A feature that is needed before it is granted is not a cosmetic fault: it is a player sat in
+ * front of a shift whose brief talks about a button that is still greyed out, with no way through
+ * and nothing to tell them why. {@link validateMissions} walks all three fields together.
  */
 export const MISSIONS = deepFreeze([
 
@@ -318,6 +340,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 950, silver: 1400, gold: 1850 },
     parEnergy_kWh: 0.13,
+    needs: [],
     unlocks: [],
     requires: [],
   },
@@ -340,6 +363,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 1200, silver: 1800, gold: 2350 },
     parEnergy_kWh: 0.16,
+    needs: [],
     unlocks: [],
     requires: ['HANDS_ON'],
   },
@@ -359,10 +383,16 @@ export const MISSIONS = deepFreeze([
     setup: HAND_ONLY,
     script: [
       up(25, 'SP_CHANGE', 0.1, 'supervisor wants the header up for a transfer'),
-      up(80, 'SP_CHANGE', -0.3, 'transfer done — put it back down'),
+      // -0.1 and not -0.3. This is a severity, so "put it back" only puts it back if the down
+      // order has the same MAGNITUDE as the up order above it. -0.3 was an engineering value in
+      // disguise: it reads as 0.72 bar down against a 0.56 bar lift and leaves the header a
+      // sixth of a bar BELOW where the shift started, which is not the transfer the brief
+      // describes and not a move the player can be scored fairly on.
+      up(80, 'SP_CHANGE', -0.1, 'transfer done — put it back down'),
     ],
     par: { bronze: 1450, silver: 2150, gold: 2800 },
     parEnergy_kWh: 0.12,
+    needs: [],
     unlocks: [],
     requires: ['DEAD_TIME'],
   },
@@ -387,6 +417,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 1700, silver: 2500, gold: 3300 },
     parEnergy_kWh: 0.21,
+    needs: [],
     unlocks: ['proportional'],
     requires: ['SUPERVISOR'],
   },
@@ -419,6 +450,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 1850, silver: 2700, gold: 3550 },
     parEnergy_kWh: 0.24,
+    needs: ['proportional'],
     unlocks: [],
     requires: ['TOO_MANY_HANDS'],
   },
@@ -447,6 +479,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 2050, silver: 2950, gold: 3900 },
     parEnergy_kWh: 0.25,
+    needs: ['proportional'],
     unlocks: ['reset'],
     requires: ['FIRST_AUTO'],
   },
@@ -476,6 +509,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 2200, silver: 3250, gold: 4250 },
     parEnergy_kWh: 0.26,
+    needs: ['reset'],
     unlocks: ['spWeight'],
     requires: ['THE_OFFSET'],
   },
@@ -507,6 +541,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 2350, silver: 3400, gold: 4500 },
     parEnergy_kWh: 0.38,
+    needs: ['reset'],
     unlocks: [],
     requires: ['RESET_TIME'],
   },
@@ -538,6 +573,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 2350, silver: 3450, gold: 4550 },
     parEnergy_kWh: 0.31,
+    needs: ['reset'],
     unlocks: ['derivative'],
     requires: ['THE_WINDUP'],
   },
@@ -567,6 +603,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 2450, silver: 3550, gold: 4700 },
     parEnergy_kWh: 0.28,
+    needs: ['derivative'],
     unlocks: [],
     requires: ['LOAD_REJECT'],
   },
@@ -602,6 +639,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 2550, silver: 3700, gold: 4900 },
     parEnergy_kWh: 0.12,
+    needs: ['derivative'],
     unlocks: [],
     requires: ['RATE_ACTION'],
   },
@@ -633,6 +671,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 2700, silver: 3900, gold: 5150 },
     parEnergy_kWh: 0.17,
+    needs: [],
     unlocks: ['analysis'],
     requires: ['NOISY_LOOP'],
   },
@@ -666,6 +705,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 2800, silver: 4100, gold: 5400 },
     parEnergy_kWh: 0.40,
+    needs: [],
     unlocks: ['staging'],
     requires: ['THE_CYCLE'],
   },
@@ -704,6 +744,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 2850, silver: 4150, gold: 5450 },
     parEnergy_kWh: 0.69,
+    needs: ['staging'],
     unlocks: [],
     requires: ['OUT_OF_ROAD'],
   },
@@ -742,6 +783,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 2850, silver: 4200, gold: 5500 },
     parEnergy_kWh: 0.66,
+    needs: ['staging'],
     unlocks: ['rotation'],
     requires: ['THE_SEQUENCE'],
   },
@@ -774,6 +816,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 2900, silver: 4250, gold: 5600 },
     parEnergy_kWh: 0.18,
+    needs: ['staging'],
     unlocks: [],
     requires: ['SHORT_CYCLE'],
   },
@@ -806,6 +849,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 3000, silver: 4350, gold: 5750 },
     parEnergy_kWh: 0.52,
+    needs: ['staging'],
     unlocks: [],
     requires: ['DEADHEAD'],
   },
@@ -843,6 +887,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 3050, silver: 4500, gold: 5900 },
     parEnergy_kWh: 0.12,
+    needs: [],
     unlocks: ['cascade'],
     requires: ['LOSING_SUCTION'],
   },
@@ -878,6 +923,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 3100, silver: 4500, gold: 5950 },
     parEnergy_kWh: 0.57,
+    needs: ['staging', 'cascade'],
     unlocks: ['feedforward'],
     requires: ['THE_BILL'],
   },
@@ -914,6 +960,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 3150, silver: 4600, gold: 6050 },
     parEnergy_kWh: 0.53,
+    needs: ['staging', 'feedforward'],
     unlocks: ['gainSchedule'],
     requires: ['INNER_LOOP'],
   },
@@ -949,6 +996,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 3200, silver: 4650, gold: 6150 },
     parEnergy_kWh: 0.49,
+    needs: ['staging', 'gainSchedule'],
     unlocks: ['autotune'],
     requires: ['AHEAD_OF_IT'],
   },
@@ -988,6 +1036,7 @@ export const MISSIONS = deepFreeze([
     ],
     par: { bronze: 3300, silver: 4800, gold: 6350 },
     parEnergy_kWh: 0.75,
+    needs: ['staging', 'cascade', 'feedforward', 'gainSchedule'],
     unlocks: [],
     requires: ['MOVING_TARGET'],
   },
@@ -1090,6 +1139,65 @@ export function nextMission(profile) {
 }
 
 /**
+ * Every feature a mission cannot be played without: what it declares in `needs`, plus everything
+ * its own setup gives away.
+ *
+ * The derived half is the half that catches mistakes. `needs` is authored by hand, and a hand
+ * forgets; a setup that switches staging on, or writes a finite reset time, or hands the
+ * controller a strategy with a feedforward block in it, has already said which features the shift
+ * is standing on. Deriving those means a mission moved earlier in the table is caught by
+ * {@link validateMissions} rather than by a player who cannot find the button its brief describes.
+ *
+ * @param {object} m a mission record
+ * @returns {string[]} the feature ids, deduplicated, in no particular order
+ */
+export function missionNeeds(m) {
+  if (!m || typeof m !== 'object') return [];
+  const out = new Set();
+  for (const f of Array.isArray(m.needs) ? m.needs : []) out.add(f);
+  for (const step of Array.isArray(m.setup) ? m.setup : []) {
+    if (!step || !Array.isArray(step.args)) continue;
+    const arg = step.args[0];
+    const o = arg && typeof arg === 'object' ? arg : {};
+    if (step.action === 'setControllerMode' && arg === 'AUTO') out.add('proportional');
+    if (step.action === 'setStaging') {
+      if (o.enabled === true) out.add('staging');
+      if (o.rotate === true || Number.isFinite(o.rotateHours)) out.add('rotation');
+    }
+    if (step.action === 'setTuning') {
+      // Reset is switched OUT by writing a very large Ti rather than Infinity, because a mission
+      // has to survive a JSON round trip into a share code. So "integral is live" is a finite Ti
+      // below the 1e5 those rows use, not merely a present one.
+      if (Number.isFinite(o.Ti) && o.Ti < 1e5) out.add('reset');
+      if (Number.isFinite(o.Td) && o.Td > 0) out.add('derivative');
+      if (Number.isFinite(o.b) && o.b < 1) out.add('spWeight');
+    }
+    if (step.action === 'setStrategy') {
+      if (o.structure === 'CASCADE') out.add('cascade');
+      if (o.ff) out.add('feedforward');
+      if (o.sched) out.add('gainSchedule');
+    }
+  }
+  return [...out];
+}
+
+/**
+ * The setpoint a mission starts on: the last one its setup writes, or the loop mode's default
+ * when it never writes one — a manual shift never sets one, and the supervisor still moves it.
+ * @param {object} m a mission record
+ * @returns {number} the setpoint in the loop's engineering units, or NaN if there is none
+ */
+function startingSetpoint(m) {
+  let sp = DEFAULT_SP[m.loop];
+  for (const step of m.setup || []) {
+    if (step.action === 'setSetpoint' && step.args && Number.isFinite(step.args[0])) {
+      sp = step.args[0];
+    }
+  }
+  return Number.isFinite(sp) ? sp : NaN;
+}
+
+/**
  * The demand-valve travel a mission starts from, read out of its own setup.
  * @param {object} m a mission record
  * @returns {number} the travel, 0..1, defaulting to the rig's boot position
@@ -1149,6 +1257,14 @@ function walkDemand(d, e) {
  * is invisible until a player hits it. So the table is checked in full, and the test suite calls
  * this and demands an empty list.
  *
+ * THE UNLOCK GRAPH IS CHECKED AS A GRAPH, not row by row, because that is the only way its two
+ * failure modes are visible at all. Every feature must be granted exactly once, every `needs`
+ * (authored or derived — see {@link missionNeeds}) must already have been granted by a mission
+ * EARLIER in the table, and every `requires` must name a mission strictly before this one, which
+ * is what keeps the chain acyclic and every shift reachable from a cold start. A feature handed
+ * out twice wastes a mission's reward; a feature needed before it is granted is a player at a
+ * wall with no way through and nothing on screen to explain it.
+ *
  * Pass `refs` to check against the real tables from the other game modules once they are wired
  * up; with no argument the table is checked against the id lists declared at the top of this
  * file, which is still a closed check because those lists are maintained separately from the
@@ -1171,6 +1287,9 @@ export function validateMissions(refs) {
     : (a) => SETUP_ACTIONS.includes(a);
 
   const seen = new Set();
+  // `seen` picks up the current mission's own id at the top of the loop, so it catches a
+  // duplicate id; `before` deliberately does not, so it also catches a row that requires itself.
+  const before = new Set();
   const granted = new Set();
   const usedUpsets = new Set();
   let prevFrac = Infinity;
@@ -1250,6 +1369,11 @@ export function validateMissions(refs) {
     const ceiling = m.loop !== LOOP.PRESSURE ? Infinity
       : (twoPumpsAvailable(m) ? DEMAND_CEILING.twoPumps : DEMAND_CEILING.onePump);
     let demand = startingDemand(m);
+    // The supervisor's orders are walked the same way and for the same reason: SP_CHANGE carries
+    // a SEVERITY, the director moves the setpoint 6..16% of span in the direction of its sign,
+    // and nothing reverts, so a run of orders accumulates across the shift.
+    let sp = startingSetpoint(m);
+    const eu = LOOP_EU[m.loop];
     if (!Array.isArray(m.script) || m.script.length === 0) problems.push(`${at} has no scripted upsets`);
     for (const e of m.script || []) {
       if (!knownUpset(e.upset)) { problems.push(`${at} scripts upset ${e.upset}, which does not exist`); continue; }
@@ -1261,6 +1385,22 @@ export function validateMissions(refs) {
           + 'anything else is an engineering value written in the wrong place');
       }
       if (!e.label) problems.push(`${at} scripts ${e.upset} with nothing for the ticker to say`);
+      if (e.upset === 'SP_CHANGE' && eu && Number.isFinite(sp)) {
+        const span = eu.hi - eu.lo;
+        const dir = e.mag < 0 ? -1 : 1;
+        const moved = sp + dir * (0.06 + 0.10 * Math.min(1, Math.abs(e.mag))) * span;
+        // The director clamps a setpoint order into the middle 15..75% of the transmitter, so a
+        // mission that walks past that edge is not scored on the step it wrote — the player is
+        // graded against a move that never happened. `mag` being a severity and not a number of
+        // bar is exactly what makes that easy to write by accident: an author who means "0.3 bar
+        // down" writes -0.3 and gets 0.72 bar.
+        if (moved < eu.lo + 0.15 * span - 1e-9 || moved > eu.lo + 0.75 * span + 1e-9) {
+          problems.push(`${at} orders the setpoint to ${moved.toFixed(2)} ${eu.unit}, outside the `
+            + `${(eu.lo + 0.15 * span).toFixed(2)}..${(eu.lo + 0.75 * span).toFixed(2)} ${eu.unit} `
+            + 'the director clamps it into — the shift would be scored against a step it never made');
+        }
+        sp = moved;
+      }
       demand = walkDemand(demand, e);
       if (demand > ceiling + 1e-9) {
         problems.push(`${at} walks the demand valve to ${(demand * 100).toFixed(0)}% by ${e.at_s} s, `
@@ -1277,16 +1417,30 @@ export function validateMissions(refs) {
       prevAt = e.at_s;
     }
 
+    // The graph, in the one order that makes it checkable: what this shift needs is judged
+    // against what the shifts BEFORE it granted, so a mission that both needs and unlocks the
+    // same feature is reported rather than quietly satisfying itself.
+    if (!Array.isArray(m.needs)) problems.push(`${at} has no needs list — write [] if it needs nothing`);
+    for (const need of missionNeeds(m)) {
+      if (!knownUnlock(need)) problems.push(`${at} needs ${need}, which is not a known feature`);
+      else if (!granted.has(need)) {
+        problems.push(`${at} needs ${need}, which no mission before it grants — the player would `
+          + 'arrive at this shift with the feature its brief is built around still locked');
+      }
+    }
     for (const u of m.unlocks || []) {
       if (!knownUnlock(u)) problems.push(`${at} unlocks ${u}, which is not a known feature`);
       else if (granted.has(u)) problems.push(`${at} unlocks ${u}, which an earlier mission already granted`);
-      granted.add(u);
+      // An unrecognised unlock is deliberately NOT counted as granted: it cannot satisfy a later
+      // `needs`, and pretending it could would hide the second half of the same mistake.
+      else granted.add(u);
     }
     for (const req of m.requires || []) {
-      if (!seen.has(req)) {
+      if (!before.has(req)) {
         problems.push(`${at} requires ${req}, which is not a mission that comes before it`);
       }
     }
+    before.add(m.id);
   }
 
   for (const u of UNLOCK_IDS) {
@@ -1297,6 +1451,19 @@ export function validateMissions(refs) {
   }
   if (!MISSIONS.some((m) => (m.requires || []).length === 0)) {
     problems.push('no mission can be started first — every one has a prerequisite');
+  }
+  // Reachability, asserted rather than argued from the ordering rule. This is exactly what
+  // `availableMissions` does for a player who clears everything they are offered, so a mission
+  // that does not turn up here is a mission nobody is ever shown.
+  const reachable = new Set();
+  for (const m of MISSIONS) {
+    if ((m.requires || []).every((req) => reachable.has(req))) reachable.add(m.id);
+  }
+  for (const m of MISSIONS) {
+    if (!reachable.has(m.id)) {
+      problems.push(`mission ${m.id} can never be offered — its prerequisites cannot all be `
+        + 'cleared from a cold start');
+    }
   }
   return problems;
 }

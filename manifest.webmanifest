@@ -1,0 +1,37 @@
+{
+  "name": "Dual Pump PID Trainer",
+  "short_name": "PID Trainer",
+  "id": "./",
+  "description": "Two parallel VFD centrifugal pumps on a common header under PID control: pump and system curves, NPSH and cavitation, lead/lag staging, cascade and feedforward, identification, Bode and Nyquist, lessons and a graded scorecard. Runs entirely offline.",
+  "lang": "en",
+  "dir": "ltr",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": [
+    "standalone",
+    "minimal-ui"
+  ],
+  "orientation": "any",
+  "theme_color": "#21262C",
+  "background_color": "#21262C",
+  "categories": [
+    "education",
+    "productivity",
+    "utilities"
+  ],
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20fill='%2321262C'/%3E%3Crect%20x='2.5'%20y='2.5'%20width='27'%20height='27'%20rx='2'%20fill='%232B3138'%20stroke='%23454E58'/%3E%3Cpath%20d='M9%2010h14M9%2022h14M23%2010v12'%20stroke='%23566171'%20stroke-width='2'%20fill='none'/%3E%3Ccircle%20cx='13'%20cy='10'%20r='4.5'%20fill='%23171B20'%20stroke='%234CAF50'%20stroke-width='1.5'/%3E%3Ccircle%20cx='13'%20cy='22'%20r='4.5'%20fill='%23171B20'%20stroke='%236B7681'%20stroke-width='1.5'/%3E%3C/svg%3E",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20fill='%2321262C'/%3E%3Cg%20transform='translate(6.4%206.4)%20scale(0.6)'%3E%3Crect%20x='2.5'%20y='2.5'%20width='27'%20height='27'%20rx='2'%20fill='%232B3138'%20stroke='%23454E58'/%3E%3Cpath%20d='M9%2010h14M9%2022h14M23%2010v12'%20stroke='%23566171'%20stroke-width='2'%20fill='none'/%3E%3Ccircle%20cx='13'%20cy='10'%20r='4.5'%20fill='%23171B20'%20stroke='%234CAF50'%20stroke-width='1.5'/%3E%3Ccircle%20cx='13'%20cy='22'%20r='4.5'%20fill='%23171B20'%20stroke='%236B7681'%20stroke-width='1.5'/%3E%3C/g%3E%3C/svg%3E",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

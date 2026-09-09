@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import {
   MISSIONS, TIERS, UNLOCK_IDS, UPSET_IDS, UPSET_MAG, SETUP_ACTIONS, RULE_DEFAULTS,
   DEMAND_CEILING, missionById, missionsForTier, availableMissions, nextMission,
-  validateMissions, bandFraction, missionCleared,
+  validateMissions, bandFraction, missionCleared, missionNeeds,
 } from '../src/game/missions.js';
 import { UNLOCKS, BASE_UNLOCK } from '../src/game/profile.js';
 import { UPSETS } from '../src/game/director.js';
@@ -174,6 +174,71 @@ test('every feature is unlocked exactly once, and by a mission before it is need
   assert.ok(grantedAt('staging') < grantedAt('cascade'), 'structures come last');
   assert.ok(grantedAt('autotune') > grantedAt('gainSchedule'),
     'the autotuner is the last thing earned — it is a shortcut past everything before it');
+});
+
+test('no shift is built on a feature the campaign has not handed over yet', () => {
+  // The needs are recomputed here rather than taken from `missionNeeds`, so a derivation rule
+  // that quietly stops firing shows up as a failure instead of as two modules agreeing about
+  // nothing. Then the two are compared, which is the check that they have not drifted apart.
+  const needsOf = (m) => {
+    const out = new Set(m.needs);
+    for (const s of m.setup) {
+      const o = (s.args && typeof s.args[0] === 'object' && s.args[0]) || {};
+      if (s.action === 'setControllerMode' && s.args[0] === 'AUTO') out.add('proportional');
+      if (s.action === 'setStaging' && o.enabled === true) out.add('staging');
+      if (s.action === 'setTuning') {
+        // Ti is 1e6 and not Infinity in the rows where reset is switched out, because a mission
+        // has to survive a JSON round trip. So integral is live only below a sane ceiling.
+        if (Number.isFinite(o.Ti) && o.Ti < 1e5) out.add('reset');
+        if (Number.isFinite(o.Td) && o.Td > 0) out.add('derivative');
+      }
+      if (s.action === 'setStrategy') {
+        if (o.structure === 'CASCADE') out.add('cascade');
+        if (o.ff) out.add('feedforward');
+        if (o.sched) out.add('gainSchedule');
+      }
+    }
+    return [...out].sort();
+  };
+  const granted = new Set();
+  for (const m of MISSIONS) {
+    assert.ok(Array.isArray(m.needs), `${m.id} has no needs list — [] if it needs nothing`);
+    for (const f of needsOf(m)) {
+      assert.ok(UNLOCK_IDS.includes(f), `${m.id} needs ${f}, which is not a declared feature`);
+      assert.ok(granted.has(f),
+        `${m.id} is built around ${f} but no mission before it grants it — the player arrives at `
+        + 'this shift with the button its brief talks about still greyed out');
+    }
+    assert.deepEqual(missionNeeds(m).slice().sort(), needsOf(m),
+      `missionNeeds(${m.id}) disagrees with what the mission row plainly says it stands on`);
+    // Its own reward cannot be the thing it needs, or the gate is in front of the key.
+    for (const u of m.unlocks) {
+      assert.ok(!needsOf(m).includes(u), `${m.id} needs ${u} and also grants it`);
+    }
+    for (const u of m.unlocks) granted.add(u);
+  }
+});
+
+test('missionNeeds survives the junk a share code can hand it', () => {
+  for (const junk of [null, undefined, 0, '', 'MISSION', [], {}, { setup: 'no' },
+    { needs: 'staging' }, { setup: [null, { action: 'setTuning' }] }]) {
+    assert.ok(Array.isArray(missionNeeds(junk)),
+      `missionNeeds(${JSON.stringify(junk)}) must be a list — the mission browser calls this while `
+      + 'drawing, and a throw there is a blank campaign screen');
+  }
+  assert.deepEqual(missionNeeds({ needs: ['cascade'], setup: [] }), ['cascade']);
+});
+
+test('every prerequisite names a mission that is strictly earlier in the table', () => {
+  const before = new Set();
+  for (const m of MISSIONS) {
+    for (const req of m.requires) {
+      assert.ok(before.has(req),
+        `${m.id} requires ${req}, which is not a mission before it — a shift that requires itself, `
+        + 'or requires one further down the table, is a shift nobody is ever offered');
+    }
+    before.add(m.id);
+  }
 });
 
 test('the prerequisite chain is acyclic and reaches every mission from a cold start', () => {
